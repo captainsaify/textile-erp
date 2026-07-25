@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     whatsapp_access_token: str = ""
     whatsapp_verify_token: str = ""
     whatsapp_phone_number_id: str = ""
+    whatsapp_api_version: str = "v23.0"
+    whatsapp_rate_limit_per_minute: int = Field(default=30, gt=0)
 
     anthropic_api_key: str = ""
 
