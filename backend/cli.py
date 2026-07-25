@@ -21,6 +21,12 @@ from backend.models.enums import UserRole
 
 cli = typer.Typer(no_args_is_help=True, help="WhatsApp Trading ERP operations CLI")
 
+
+@cli.callback()
+def _root() -> None:
+    """Keeps subcommand names (`create-user`) even while only one exists --
+    a single-command Typer app otherwise flattens into the bare command."""
+
 _E164 = re.compile(r"^\+[1-9]\d{6,14}$")
 
 
