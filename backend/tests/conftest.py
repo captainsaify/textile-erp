@@ -47,8 +47,11 @@ def migrated_test_db() -> str:
     return TEST_DATABASE_URL
 
 
-# fixed UUID from the seed migration (7cb2a37b2a4f)
+# fixed UUIDs from the seed migration (7cb2a37b2a4f)
 SEEDED_ORG_ID = "00000000-0000-4000-a000-000000000001"
+SEEDED_KG_UNIT_ID = "00000000-0000-4000-a000-000000000101"
+SEEDED_TEXTILE_TYPE_ID = "00000000-0000-4000-a000-000000000201"
+SEEDED_MAIN_WAREHOUSE_ID = "00000000-0000-4000-a000-000000000301"
 
 
 @pytest.fixture
@@ -61,3 +64,42 @@ async def engine(migrated_test_db: str) -> AsyncIterator[AsyncEngine]:
 @pytest.fixture
 def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(bind=engine, expire_on_commit=False)
+
+
+# FK-safe delete order: children before parents, users last (everything
+# has created_by). Seed rows (org, units, product type, warehouse) stay.
+_PURGE_ORDER = (
+    "journal_lines",
+    "journal",
+    "audit_logs",
+    "cash_ledger",
+    "bank_ledger",
+    "partner_capital",
+    "inventory_movements",
+    "inventory",
+    "purchase_lines",
+    "purchase_headers",
+    "sales_lines",
+    "sales_headers",
+    "expenses",
+    "income",
+    "ocr_learning_dictionary",
+    "ocr_templates",
+    "attachments",
+    "products",
+    "suppliers",
+    "customers",
+    "whatsapp_sessions",
+    "partners",
+    "users",
+)
+
+
+async def purge_business_rows(session_factory: async_sessionmaker[AsyncSession]) -> None:
+    """Remove all business rows written by tests, keeping seed data."""
+    import sqlalchemy as sa
+
+    async with session_factory() as session:
+        for table in _PURGE_ORDER:
+            await session.execute(sa.text(f"DELETE FROM {table}"))
+        await session.commit()

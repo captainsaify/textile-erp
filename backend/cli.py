@@ -27,6 +27,7 @@ def _root() -> None:
     """Keeps subcommand names (`create-user`) even while only one exists --
     a single-command Typer app otherwise flattens into the bare command."""
 
+
 _E164 = re.compile(r"^\+[1-9]\d{6,14}$")
 
 

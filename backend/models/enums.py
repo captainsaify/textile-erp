@@ -77,6 +77,24 @@ class CapitalEntryType(enum.StrEnum):
     PROFIT_ALLOCATION = "profit_allocation"
 
 
+class AccountCode(enum.StrEnum):
+    """Chart of accounts v1 -- docs/06_Accounting.md §2. Deliberately a
+    fixed Python enum, not config (unlike product types)."""
+
+    CASH = "cash"
+    BANK = "bank"
+    INVENTORY = "inventory"
+    ACCOUNTS_RECEIVABLE = "accounts_receivable"
+    ACCOUNTS_PAYABLE = "accounts_payable"
+    PARTNER_CAPITAL = "partner_capital"
+    SALES_REVENUE = "sales_revenue"
+    COGS = "cogs"
+    FREIGHT_EXPENSE = "freight_expense"
+    OPERATING_EXPENSES = "operating_expenses"
+    OTHER_INCOME = "other_income"
+    DAMAGE_LOSS = "damage_loss"
+
+
 user_role_enum = pg_enum(UserRole, "user_role")
 unit_kind_enum = pg_enum(UnitKind, "unit_kind")
 purchase_status_enum = pg_enum(PurchaseStatus, "purchase_status")

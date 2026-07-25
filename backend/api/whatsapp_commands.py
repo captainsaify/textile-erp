@@ -3,42 +3,37 @@ output, and permission enforcement (docs/17_CodingStandards.md §6).
 
 Every command in docs/08_WhatsApp.md gets exactly one entry here as it
 is implemented; `help` renders from this data so the two can't drift.
-The registry grows with each feature phase -- the CommandSpec shape
-gains a dedicated `parser` field when the first structured-grammar
-command (purchase/sale) lands.
 """
 
 from __future__ import annotations
 
 import difflib
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 
+from backend.api.command_types import (
+    CommandHandler,
+    CommandResult,
+    CommandSpec,
+    RequestContext,
+)
+from backend.api.commands.money_commands import (
+    handle_bank,
+    handle_cash,
+    handle_expense,
+    handle_income,
+)
+from backend.api.commands.stock_commands import handle_search, handle_stock
 from backend.core.security import role_at_least
-from backend.models import User
 from backend.models.enums import UserRole
 
-
-@dataclass(frozen=True)
-class RequestContext:
-    user: User
-
-
-@dataclass(frozen=True)
-class CommandResult:
-    reply: str
-
-
-CommandHandler = Callable[[str, RequestContext], Awaitable[CommandResult]]
-
-
-@dataclass(frozen=True)
-class CommandSpec:
-    name: str
-    syntax: str
-    min_role: UserRole
-    handler: CommandHandler
-    help_text: str
+__all__ = [
+    "COMMAND_REGISTRY",
+    "CommandHandler",
+    "CommandResult",
+    "CommandSpec",
+    "RequestContext",
+    "closest_command",
+    "handle_help",
+]
 
 
 async def handle_help(args: str, ctx: RequestContext) -> CommandResult:
@@ -62,6 +57,48 @@ async def handle_help(args: str, ctx: RequestContext) -> CommandResult:
 
 
 COMMAND_REGISTRY: dict[str, CommandSpec] = {
+    "stock": CommandSpec(
+        name="stock",
+        syntax="stock | stock <CODE> | stock low | stock negative",
+        min_role=UserRole.STAFF,
+        handler=handle_stock,
+        help_text="Stock summary, one product's detail, or low/negative lists.",
+    ),
+    "search": CommandSpec(
+        name="search",
+        syntax="search <text>",
+        min_role=UserRole.STAFF,
+        handler=handle_search,
+        help_text="Fuzzy-search products, suppliers and customers.",
+    ),
+    "expense": CommandSpec(
+        name="expense",
+        syntax="expense <category> <amount> <cash|bank> [description] [paid by <partner>]",
+        min_role=UserRole.STAFF,
+        handler=handle_expense,
+        help_text="Record a business expense.",
+    ),
+    "income": CommandSpec(
+        name="income",
+        syntax="income <category> <amount> <cash|bank> [description]",
+        min_role=UserRole.STAFF,
+        handler=handle_income,
+        help_text="Record non-sales income (interest, commission, ...).",
+    ),
+    "cash": CommandSpec(
+        name="cash",
+        syntax="cash",
+        min_role=UserRole.STAFF,
+        handler=handle_cash,
+        help_text="Cash balance and recent entries.",
+    ),
+    "bank": CommandSpec(
+        name="bank",
+        syntax="bank",
+        min_role=UserRole.STAFF,
+        handler=handle_bank,
+        help_text="Bank balance and recent entries.",
+    ),
     "help": CommandSpec(
         name="help",
         syntax="help [command]",

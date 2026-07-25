@@ -55,8 +55,13 @@ async def staff_user(
         user_id = user.id
     yield user
     async with session_factory() as session:
-        await session.execute(sa.text("DELETE FROM users WHERE id = :id"), {"id": user_id})
-        await session.commit()
+        try:
+            await session.execute(sa.text("DELETE FROM users WHERE id = :id"), {"id": user_id})
+            await session.commit()
+        except sa.exc.IntegrityError:
+            # rows this test wrote still reference the user; the owning
+            # test file's purge fixture removes both
+            await session.rollback()
 
 
 @pytest.fixture

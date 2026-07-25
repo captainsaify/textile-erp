@@ -111,6 +111,27 @@ async function isSelfChat(msg) {
   return false;
 }
 
+// Group messages identify the author by LID under WhatsApp's privacy
+// addressing; the backend allowlist is keyed by phone number, so map
+// LID -> phone JID via contact lookup (cached).
+const lidPhoneCache = new Map();
+async function resolveSenderJid(jid) {
+  if (!jid || !jid.endsWith('@lid')) return jid;
+  if (lidPhoneCache.has(jid)) return lidPhoneCache.get(jid);
+  let resolved = jid;
+  try {
+    const contact = await client.getContactById(jid);
+    if (contact && contact.number) resolved = `${contact.number}@c.us`;
+    else if (contact && contact.id && String(contact.id._serialized).endsWith('@c.us'))
+      resolved = contact.id._serialized;
+  } catch (err) {
+    console.log(`sender lid resolution failed for ${jid}:`, err.message);
+  }
+  if (resolved !== jid) console.log(`sender lid mapped: ${jid} -> ${resolved}`);
+  lidPhoneCache.set(jid, resolved);
+  return resolved;
+}
+
 // Loop guard: replies this bridge sends also fire message_create as
 // fromMe -- without this they'd be fed back into the backend forever.
 const pendingSends = new Map(); // "chatId|body" -> count
@@ -157,7 +178,7 @@ client.on('message_create', async (msg) => {
   const payload = {
     message_id: (msg.id && msg.id._serialized) || `noid_${Date.now()}_${Math.random().toString(36).slice(2)}`,
     chat_id: chatId,
-    sender: msg.fromMe ? ownId || msg.from : msg.author || msg.from,
+    sender: msg.fromMe ? ownId || msg.from : await resolveSenderJid(msg.author || msg.from),
     is_group: chatId.endsWith('@g.us'),
     kind: msg.type,
     body: msg.type === 'chat' ? msg.body : null,

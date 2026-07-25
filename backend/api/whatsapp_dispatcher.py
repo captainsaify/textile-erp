@@ -139,7 +139,12 @@ class WhatsAppDispatcher:
             org_id=str(user.org_id),
             message_id=message.message_id,
         )
-        return await spec.handler(args.strip(), RequestContext(user=user))
+        context = RequestContext(
+            user=user,
+            session_factory=self._session_factory,
+            message_id=message.message_id,
+        )
+        return await spec.handler(args.strip(), context)
 
     async def _first_delivery(self, message_id: str) -> bool:
         return bool(
