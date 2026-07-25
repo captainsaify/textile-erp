@@ -52,6 +52,20 @@ class WebhookPayload(_WebhookModel):
     entry: list[WebhookEntry] = []
 
 
+class BridgeInboundMedia(_WebhookModel):
+    """A photo/PDF relayed by the bridge, base64-encoded. Kept separate
+    from text messages because the OCR path is asynchronous: it acks
+    immediately and replies when the sheet is parsed."""
+
+    message_id: str
+    chat_id: str
+    sender: str
+    is_group: bool = False
+    mime_type: str
+    filename: str | None = None
+    data_base64: str
+
+
 class BridgeInboundMessage(_WebhookModel):
     """One message relayed by the whatsapp-web.js bridge.
 

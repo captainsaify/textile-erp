@@ -175,10 +175,42 @@ client.on('message_create', async (msg) => {
     if (chatId.endsWith('@g.us')) console.log(`skipped chat ${chatId} (not in BRIDGE_ALLOWED_CHATS)`);
     return;
   }
+  const messageId =
+    (msg.id && msg.id._serialized) || `noid_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const sender = msg.fromMe ? ownId || msg.from : await resolveSenderJid(msg.author || msg.from);
+
+  // photos/PDFs take the OCR path -- download and relay the bytes
+  if (msg.hasMedia && (msg.type === 'image' || msg.type === 'document')) {
+    try {
+      const media = await msg.downloadMedia();
+      if (!media || !media.data) {
+        console.error(`media download empty for ${messageId}`);
+        return;
+      }
+      const res = await fetch(`${BACKEND_URL}/internal/whatsapp-bridge/media`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Bridge-Secret': SHARED_SECRET },
+        body: JSON.stringify({
+          message_id: messageId,
+          chat_id: chatId,
+          sender,
+          is_group: chatId.endsWith('@g.us'),
+          mime_type: media.mimetype || 'image/jpeg',
+          filename: media.filename || null,
+          data_base64: media.data,
+        }),
+      });
+      if (!res.ok) console.error(`backend rejected media ${messageId}: ${res.status}`);
+    } catch (err) {
+      console.error('media relay failed:', err.message);
+    }
+    return;
+  }
+
   const payload = {
-    message_id: (msg.id && msg.id._serialized) || `noid_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+    message_id: messageId,
     chat_id: chatId,
-    sender: msg.fromMe ? ownId || msg.from : await resolveSenderJid(msg.author || msg.from),
+    sender,
     is_group: chatId.endsWith('@g.us'),
     kind: msg.type,
     body: msg.type === 'chat' ? msg.body : null,
@@ -189,7 +221,7 @@ client.on('message_create', async (msg) => {
       headers: { 'Content-Type': 'application/json', 'X-Bridge-Secret': SHARED_SECRET },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) console.error(`backend rejected message ${msg.id._serialized}: ${res.status}`);
+    if (!res.ok) console.error(`backend rejected message ${messageId}: ${res.status}`);
   } catch (err) {
     console.error('backend unreachable:', err.message);
   }

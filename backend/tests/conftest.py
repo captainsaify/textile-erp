@@ -84,7 +84,6 @@ _PURGE_ORDER = (
     "expenses",
     "income",
     "ocr_learning_dictionary",
-    "ocr_templates",
     "attachments",
     "products",
     "suppliers",
@@ -100,6 +99,9 @@ async def purge_business_rows(session_factory: async_sessionmaker[AsyncSession])
     import sqlalchemy as sa
 
     async with session_factory() as session:
+        # supplier-specific templates are test data; the seeded default
+        # (supplier_id IS NULL) must survive
+        await session.execute(sa.text("DELETE FROM ocr_templates WHERE supplier_id IS NOT NULL"))
         for table in _PURGE_ORDER:
             await session.execute(sa.text(f"DELETE FROM {table}"))
         await session.commit()

@@ -21,6 +21,7 @@ from backend.api.commands.money_commands import (
     handle_expense,
     handle_income,
 )
+from backend.api.commands.ocr_commands import handle_details
 from backend.api.commands.purchase_commands import handle_purchase
 from backend.api.commands.stock_commands import handle_search, handle_stock
 from backend.core.security import role_at_least
@@ -65,6 +66,14 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.STAFF,
         handler=handle_purchase,
         help_text="Record a purchase (draft + CONFIRM). Photo OCR arrives soon.",
+    ),
+    "details": CommandSpec(
+        name="details",
+        syntax="details Supplier: <name> Invoice: <no> Date: DD-MM-YYYY Rate: <rate> "
+        "[Brand: <name>] [Freight: <amt>] [Other: <amt>] [Total: <amt>]",
+        min_role=UserRole.STAFF,
+        handler=handle_details,
+        help_text="Fill in the invoice details for a purchase sheet you photographed.",
     ),
     "stock": CommandSpec(
         name="stock",

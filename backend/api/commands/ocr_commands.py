@@ -1,0 +1,249 @@
+"""The OCR purchase path -- docs/07_OCR.md §1, §10-§12 and
+docs/04_Purchases.md §2.
+
+A photo becomes the same purchase Draft the typed `purchase` command
+produces, so both entry paths share one confirmation flow. What the
+sheet can't tell us (supplier, invoice no/date, rate, freight) is asked
+for via `details ...`, the template's required_manual_fields.
+"""
+
+from __future__ import annotations
+
+import datetime
+import decimal
+import re
+
+from backend.api.command_types import CommandResult, RequestContext
+from backend.api.commands.purchase_commands import render_preview
+from backend.api.formatting import fmt_date, fmt_qty
+from backend.core.exceptions import DomainError, ValidationError
+from backend.core.logging import get_logger
+from backend.ocr.engines import DualEngine, PaddleEngine, TesseractEngine
+from backend.ocr.pipeline import OcrFailure, parse_sheet
+from backend.services.ocr_service import OcrService
+from backend.services.purchase_service import Draft, PurchaseService
+from backend.services.session_service import (
+    AWAITING_PURCHASE_CONFIRMATION,
+    SessionService,
+)
+
+logger = get_logger(__name__)
+
+_DETAILS = re.compile(
+    r"Supplier:\s*(?P<supplier>.+?)"
+    r"(?:\s+Invoice:\s*(?P<invoice>\S+))?"
+    r"(?:\s+Date:\s*(?P<date>\d{2}-\d{2}-\d{4}))?"
+    r"(?:\s+Rate:\s*(?P<rate>[\d.]+))?"
+    r"(?:\s+Brand:\s*(?P<brand>.+?))?"
+    r"(?:\s+Freight:\s*(?P<freight>[\d.]+))?"
+    r"(?:\s+Other:\s*(?P<other>[\d.]+))?"
+    r"(?:\s+Total:\s*(?P<total>[\d.]+))?\s*$",
+    re.IGNORECASE,
+)
+
+DETAILS_PROMPT = (
+    "Now send the invoice details:\n"
+    "details Supplier: <name> Invoice: <no> Date: DD-MM-YYYY Rate: <rate per unit> "
+    "[Brand: <name>] [Freight: <amt>] [Other: <amt>] [Total: <amt>]"
+)
+
+
+def build_engine(primary_name: str) -> DualEngine:
+    """Primary per settings, the other engine as fallback (§6)."""
+    paddle, tesseract = PaddleEngine(), TesseractEngine()
+    if primary_name == "tesseract":
+        return DualEngine(primary=tesseract, fallback=paddle)
+    return DualEngine(primary=paddle, fallback=tesseract)
+
+
+def render_ocr_result(
+    draft: Draft,
+    *,
+    low_confidence: list[str],
+    auto_corrections: list[str],
+    unmapped_headers: list[str],
+    hard_to_read: bool,
+    page_count: int,
+) -> str:
+    lines = [
+        f"📸 Read {len(draft.lines)} item{'s' if len(draft.lines) != 1 else ''} from your sheet:"
+    ]
+    for index, line in enumerate(draft.lines, start=1):
+        unit = line.unit_code or "KG"
+        flag = "" if line.product_id else " ⚠️ unknown product"
+        code = line.code or "?"
+        lines.append(f"{index}. {code}  {fmt_qty(line.qty)} {unit}{flag}")
+    lines.extend(auto_corrections)
+    if low_confidence:
+        lines.append("Couldn't read clearly:")
+        lines.extend(f"• {note}" for note in low_confidence)
+    if unmapped_headers:
+        lines.append(
+            "I saw column"
+            + ("s " if len(unmapped_headers) > 1 else " ")
+            + ", ".join(f"'{header}'" for header in unmapped_headers)
+            + " I don't recognize — ignoring for now."
+        )
+    if hard_to_read:
+        lines.append(
+            "⚠️ This photo is hard to read — you may want to retake it, or keep correcting manually."
+        )
+    if page_count > 1:
+        lines.append(
+            f"ℹ️ That PDF has {page_count} pages; I read page 1. Send the other pages separately."
+        )
+    lines.append(DETAILS_PROMPT)
+    return "\n".join(lines)
+
+
+def apply_details(draft: Draft, args: str) -> Draft:
+    match = _DETAILS.match(args.strip())
+    if match is None:
+        raise ValidationError(DETAILS_PROMPT)
+    draft.supplier_name = match["supplier"].strip()
+    draft.supplier_id = None  # re-resolved against the new name
+    if match["invoice"]:
+        draft.invoice_no = match["invoice"].strip()
+    if match["date"]:
+        try:
+            draft.invoice_date = datetime.datetime.strptime(match["date"], "%d-%m-%Y").date()
+        except ValueError:
+            raise ValidationError(f"'{match['date']}' is not a valid DD-MM-YYYY date.") from None
+    if match["brand"]:
+        draft.brand_name = match["brand"].strip()
+    if match["rate"]:
+        rate = decimal.Decimal(match["rate"])
+        for line in draft.lines:
+            if line.rate == 0:
+                line.rate = rate
+    if match["freight"]:
+        draft.freight = decimal.Decimal(match["freight"])
+    if match["other"]:
+        draft.other_charges = decimal.Decimal(match["other"])
+    if match["total"]:
+        draft.declared_total = decimal.Decimal(match["total"])
+    if not draft.invoice_no:
+        raise ValidationError("I still need an invoice number — include 'Invoice: <no>'.")
+    return draft
+
+
+async def handle_details(args: str, ctx: RequestContext) -> CommandResult:
+    """`details ...` -- fills the required_manual_fields on an
+    OCR-derived draft, then shows the normal purchase preview."""
+    sessions = SessionService(ctx.session_factory)
+    state = await sessions.get(ctx.user.org_id, ctx.user.id)
+    if state.state != AWAITING_PURCHASE_CONFIRMATION:
+        return CommandResult(
+            reply="There's no purchase draft waiting for details. Send a photo of a "
+            "purchase sheet, or use the 'purchase' command."
+        )
+    draft = Draft.from_context(state.context)
+    try:
+        draft = apply_details(draft, args)
+    except DomainError as exc:
+        return CommandResult(reply=exc.message)
+
+    async with ctx.session_factory() as session:
+        service = PurchaseService(session)
+        supplier = await service.resolve_supplier(ctx.user.org_id, draft.supplier_name)
+        if supplier is not None:
+            draft.supplier_id = supplier.id
+            draft.supplier_name = supplier.name
+        if draft.brand_name and draft.brand_id is None:
+            async with session.begin():
+                brand = await service.resolve_or_create_brand(ctx.user.org_id, draft.brand_name)
+                draft.brand_id = brand.id
+        for line in draft.lines:
+            if line.product_id is None and line.code:
+                product = await service.resolve_product(ctx.user.org_id, line.code)
+                if product is not None:
+                    line.product_id = product.id
+                    line.resolved_code = product.code
+                    line.unit_code = product.unit.code
+
+    await sessions.set(
+        ctx.user.org_id, ctx.user.id, AWAITING_PURCHASE_CONFIRMATION, draft.to_context()
+    )
+    return CommandResult(reply=render_preview(draft))
+
+
+async def process_purchase_photo(
+    data: bytes, mime_type: str, media_id: str | None, ctx: RequestContext
+) -> CommandResult:
+    """Photo/PDF -> attachment -> OCR -> draft -> preview. Runs in the
+    request's background task; never raises into the caller."""
+    org_id = ctx.user.org_id
+    settings_engine = None
+    async with ctx.session_factory() as session:
+        service = OcrService(session)
+        sha256_hash = service.hash_bytes(data)
+        async with session.begin():
+            duplicate = await service.find_duplicate_photo(org_id, sha256_hash)
+            if duplicate is not None:
+                return CommandResult(
+                    reply=f"📎 You already sent this exact photo on "
+                    f"{fmt_date(duplicate.created_at.date())}. Send a different photo, "
+                    "or use the 'purchase' command to enter it manually."
+                )
+            attachment = await service.store_attachment(
+                ctx.user, data=data, mime_type=mime_type, whatsapp_media_id=media_id
+            )
+            attachment_id = attachment.id
+            mappings = await service.resolve_template(org_id)
+        if not mappings:
+            return CommandResult(
+                reply="No OCR template is configured for this business yet — "
+                "use the 'purchase' command to enter this manually."
+            )
+
+    from backend.core.config import get_settings
+
+    settings_engine = get_settings().ocr_primary_engine
+    import asyncio
+
+    try:
+        sheet = await asyncio.to_thread(parse_sheet, data, mappings, build_engine(settings_engine))
+    except OcrFailure as exc:
+        async with ctx.session_factory() as session, session.begin():
+            await OcrService(session).mark_attachment(attachment_id, "failed")
+        return CommandResult(
+            reply=f"❌ {exc}. Want to enter it manually? Use the 'purchase' command "
+            "(send 'help purchase' for the format)."
+        )
+    except Exception as exc:  # noqa: BLE001 -- a crash must not leave the user waiting
+        logger.error("ocr_pipeline_crashed", error=str(exc), attachment_id=str(attachment_id))
+        async with ctx.session_factory() as session, session.begin():
+            await OcrService(session).mark_attachment(attachment_id, "failed")
+        return CommandResult(
+            reply="❌ Something went wrong reading that image. Use the 'purchase' "
+            "command to enter it manually."
+        )
+
+    async with ctx.session_factory() as session:
+        service = OcrService(session)
+        async with session.begin():
+            build = await service.build_draft(org_id, sheet)
+            await service.mark_attachment(
+                attachment_id,
+                "processed",
+                ocr_result={
+                    "rows": len(sheet.extraction.rows),
+                    "columns": [c.field for c in sheet.extraction.columns],
+                    "grid_confidence": sheet.extraction.grid_confidence,
+                    "engines": sheet.extraction.engines,
+                },
+            )
+
+    await SessionService(ctx.session_factory).set(
+        org_id, ctx.user.id, AWAITING_PURCHASE_CONFIRMATION, build.draft.to_context()
+    )
+    return CommandResult(
+        reply=render_ocr_result(
+            build.draft,
+            low_confidence=build.low_confidence_notes,
+            auto_corrections=build.auto_corrections,
+            unmapped_headers=build.unmapped_headers,
+            hard_to_read=build.hard_to_read,
+            page_count=sheet.page_count,
+        )
+    )

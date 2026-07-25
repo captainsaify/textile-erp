@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     attachments_dir: str = "./data/attachments"
     max_attachment_size_mb: int = Field(default=15, gt=0)
 
+    # "paddle" (docs/07_OCR.md §6 primary) or "tesseract"; the other is
+    # always the fallback, and an unavailable engine degrades silently.
+    ocr_primary_engine: str = "paddle"
+
     @property
     def is_local(self) -> bool:
         return self.environment == "local"

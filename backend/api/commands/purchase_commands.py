@@ -25,6 +25,7 @@ from backend.core.exceptions import (
 )
 from backend.core.security import role_at_least
 from backend.models.enums import UserRole
+from backend.services.ocr_service import OcrService
 from backend.services.purchase_service import (
     QTY_SANITY_CEILING,
     ConfirmedPurchase,
@@ -163,12 +164,19 @@ def render_preview(draft: Draft) -> str:
     lines.append(f"Grand total: {fmt_money(draft.grand_total)}")
     if draft.declared_total is not None:
         lines.append(f"Invoice shows: {fmt_money(draft.declared_total)}")
-    if draft.supplier_id is None:
+    if draft.supplier_name and draft.supplier_id is None:
         warnings.append(
             f"Supplier '{draft.supplier_name}' not found — reply 'create supplier' to add them."
         )
+    missing_details = not draft.supplier_name or not draft.invoice_no
+    if any(line.rate == 0 for line in draft.lines):
+        warnings.append("Some lines have no rate yet.")
     lines.extend(f"⚠️ {warning}" for warning in warnings)
-    if draft.unresolved_codes or draft.supplier_id is None:
+    if missing_details:
+        from backend.api.commands.ocr_commands import DETAILS_PROMPT
+
+        lines.append(DETAILS_PROMPT)
+    elif draft.unresolved_codes or draft.supplier_id is None:
         lines.append("Resolve the items above, then reply CONFIRM to save.")
     else:
         lines.append("Reply CONFIRM to save, or send corrections (e.g. 'line 1 qty 90').")
@@ -299,6 +307,7 @@ async def handle_purchase_session_reply(
             return CommandResult(reply=f"There's no line {correction['line']} in this draft.")
         field, value = correction["field"].lower(), correction["value"].strip()
         line = draft.lines[index]
+        previous_code = line.code
         try:
             if field == "qty":
                 line.qty = decimal.Decimal(value)
@@ -311,6 +320,16 @@ async def handle_purchase_session_reply(
                 line.unit_code = None
         except decimal.InvalidOperation:
             return CommandResult(reply=f"'{value}' is not a valid number.")
+        if field == "code" and previous_code and previous_code != line.code:
+            # the user just told us what that OCR text really meant (§8)
+            async with ctx.session_factory() as session, session.begin():
+                await OcrService(session).record_correction(
+                    ctx.user.org_id,
+                    field="code",
+                    raw_ocr_text=previous_code,
+                    corrected_value=line.code,
+                    supplier_id=draft.supplier_id,
+                )
         draft = await _resolve_draft(draft, ctx)
         await sessions.set(
             ctx.user.org_id, ctx.user.id, AWAITING_PURCHASE_CONFIRMATION, draft.to_context()

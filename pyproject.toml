@@ -19,6 +19,11 @@ dependencies = [
     "typer>=0.13",
     "httpx>=0.27",
     "rapidfuzz>=3.10",
+    "opencv-python-headless>=4.10",
+    "numpy>=2.1",
+    "pytesseract>=0.3.13",
+    "pillow>=11.0",
+    "pdf2image>=1.17",
 ]
 
 [dependency-groups]
@@ -48,6 +53,12 @@ python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
 exclude = ["alembic/versions"]
+
+# OCR engines ship no type stubs; their call sites are narrowly wrapped
+# in backend/ocr/engines.py and guarded at runtime.
+[[tool.mypy.overrides]]
+module = ["pytesseract.*", "paddleocr.*", "pdf2image.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

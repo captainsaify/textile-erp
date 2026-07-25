@@ -60,6 +60,17 @@ class InboundMessage:
     text: str | None
 
 
+@dataclass(frozen=True)
+class InboundMedia:
+    """A photo/PDF: the OCR purchase path (docs/07_OCR.md)."""
+
+    message_id: str
+    sender_number: str
+    reply_to: str
+    mime_type: str
+    data: bytes
+
+
 class WhatsAppDispatcher:
     def __init__(
         self,
@@ -114,6 +125,39 @@ class WhatsAppDispatcher:
             return
         if reply is not None:
             await self._client.send_text(message.reply_to, reply.reply)
+
+    async def process_media(self, media: InboundMedia) -> None:
+        if not await self._first_delivery(media.message_id):
+            logger.info("whatsapp_duplicate_delivery", message_id=media.message_id)
+            return
+
+        async with self._session_factory() as session:
+            user = await UserRepository(session).get_active_by_whatsapp_number(media.sender_number)
+        if user is None:
+            logger.warning(
+                "unauthorized_sender",
+                whatsapp_number=media.sender_number,
+                message_id=media.message_id,
+            )
+            return
+
+        from backend.api.commands.ocr_commands import process_purchase_photo
+
+        context = RequestContext(
+            user=user, session_factory=self._session_factory, message_id=media.message_id
+        )
+        logger.info(
+            "whatsapp_media",
+            user_id=str(user.id),
+            org_id=str(user.org_id),
+            mime_type=media.mime_type,
+            bytes=len(media.data),
+        )
+        await self._client.send_text(media.reply_to, "📸 Reading your sheet, one moment…")
+        result = await process_purchase_photo(
+            media.data, media.mime_type, media.message_id, context
+        )
+        await self._client.send_text(media.reply_to, result.reply)
 
     async def _handle(self, message: InboundMessage, user: User) -> CommandResult | None:
         if message.kind != "text" or message.text is None:
