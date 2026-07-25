@@ -5,6 +5,12 @@
 // does all the thinking (sender allowlist, permissions, commands).
 // Outbound: the backend POSTs /send here to deliver replies.
 //
+// Self-bot mode: when the bridge is logged in with a person's own
+// number, their messages arrive as fromMe. Those are processed in the
+// self-chat ("Message yourself") always, and in BRIDGE_ALLOWED_CHATS
+// if configured -- never in other chats, so normal conversations can't
+// trigger commands. Replies the bridge itself sends are loop-guarded.
+//
 // Login: first run prints a QR code -- scan it from the *bot's* phone
 // (WhatsApp > Linked devices). The session persists in ./session so
 // restarts don't need a rescan.
@@ -24,6 +30,15 @@ const PORT = parseInt(process.env.BRIDGE_PORT || '3001', 10);
 const DEFAULT_CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const CHROME_PATH =
   process.env.BRIDGE_CHROME_PATH || (fs.existsSync(DEFAULT_CHROME) ? DEFAULT_CHROME : undefined);
+
+// Optional containment: comma-separated chat ids (e.g. the business
+// group's ...@g.us). When set, ONLY these chats plus the self-chat are
+// relayed at all. When unset: others' messages relay from any chat;
+// own (fromMe) messages relay only from the self-chat.
+const ALLOWED_CHATS = (process.env.BRIDGE_ALLOWED_CHATS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 if (!SHARED_SECRET) {
   console.error('BRIDGE_SHARED_SECRET is required (same value as the backend .env)');
@@ -57,17 +72,54 @@ client.on('qr', (qr) => {
   console.log('Scan this QR with the bot phone: WhatsApp > Linked devices > Link a device');
 });
 
-client.on('ready', () => console.log(`whatsapp connected as ${client.info.wid.user}`));
+let ownId = null;
+client.on('ready', () => {
+  ownId = client.info.wid._serialized;
+  console.log(`whatsapp connected as ${client.info.wid.user}`);
+});
+
+// Loop guard: replies this bridge sends also fire message_create as
+// fromMe -- without this they'd be fed back into the backend forever.
+const pendingSends = new Map(); // "chatId|body" -> count
+function markPendingSend(chatId, body) {
+  const key = `${chatId}|${body}`;
+  pendingSends.set(key, (pendingSends.get(key) || 0) + 1);
+  setTimeout(() => {
+    const n = pendingSends.get(key);
+    if (n > 1) pendingSends.set(key, n - 1);
+    else pendingSends.delete(key);
+  }, 60_000).unref();
+}
+function isPendingSend(chatId, body) {
+  const key = `${chatId}|${body}`;
+  const n = pendingSends.get(key);
+  if (!n) return false;
+  if (n > 1) pendingSends.set(key, n - 1);
+  else pendingSends.delete(key);
+  return true;
+}
+
+function chatAllowed(chatId, fromMe) {
+  const isSelfChat = ownId !== null && chatId === ownId;
+  if (ALLOWED_CHATS.length > 0) return isSelfChat || ALLOWED_CHATS.includes(chatId);
+  return fromMe ? isSelfChat : true;
+}
 client.on('auth_failure', (msg) => console.error('whatsapp auth failure:', msg));
 client.on('disconnected', (reason) => console.error('whatsapp disconnected:', reason));
 
-client.on('message', async (msg) => {
-  if (msg.fromMe || msg.from === 'status@broadcast') return;
+client.on('message_create', async (msg) => {
+  if (msg.from === 'status@broadcast' || msg.to === 'status@broadcast') return;
+  const chatId = msg.fromMe ? msg.to : msg.from;
+  if (msg.fromMe && msg.type === 'chat' && isPendingSend(chatId, msg.body)) return;
+  if (!chatAllowed(chatId, msg.fromMe)) {
+    if (chatId.endsWith('@g.us')) console.log(`skipped chat ${chatId} (not in BRIDGE_ALLOWED_CHATS)`);
+    return;
+  }
   const payload = {
     message_id: msg.id._serialized,
-    chat_id: msg.from,
-    sender: msg.author || msg.from,
-    is_group: msg.from.endsWith('@g.us'),
+    chat_id: chatId,
+    sender: msg.fromMe ? ownId : msg.author || msg.from,
+    is_group: chatId.endsWith('@g.us'),
     kind: msg.type,
     body: msg.type === 'chat' ? msg.body : null,
   };
@@ -99,7 +151,9 @@ app.post('/send', async (req, res) => {
     return res.status(400).json({ error: 'chat_id and body are required' });
   }
   try {
-    await client.sendMessage(toChatId(chatId), body);
+    const target = toChatId(chatId);
+    markPendingSend(target, body);
+    await client.sendMessage(target, body);
     return res.json({ status: 'sent' });
   } catch (err) {
     console.error('send failed:', err.message);
