@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     whatsapp_api_version: str = "v23.0"
     whatsapp_rate_limit_per_minute: int = Field(default=30, gt=0)
 
+    # "webjs" = whatsapp-web.js bridge (supports groups); "meta" = official
+    # Cloud API webhooks. Both transports feed the same dispatcher.
+    whatsapp_transport: str = "webjs"
+    bridge_url: str = "http://localhost:3001"
+    bridge_shared_secret: str = ""
+
     anthropic_api_key: str = ""
 
     backup_encryption_key: str = ""

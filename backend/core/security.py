@@ -43,3 +43,19 @@ def normalize_whatsapp_number(raw: str) -> str:
     if cleaned and not cleaned.startswith("+"):
         cleaned = f"+{cleaned}"
     return cleaned
+
+
+def jid_to_e164(jid: str) -> str:
+    """whatsapp-web.js identifies people as JIDs -- `919876543210@c.us`,
+    sometimes with a device suffix (`919876543210:3@c.us`). Extract the
+    number and normalize to E.164 for users.whatsapp_number lookup."""
+    local = jid.split("@", 1)[0].split(":", 1)[0]
+    return normalize_whatsapp_number(local)
+
+
+def verify_shared_secret(configured: str, presented: str | None) -> bool:
+    """Constant-time check for the bridge's X-Bridge-Secret header.
+    An unconfigured secret fails closed."""
+    if not configured or not presented:
+        return False
+    return hmac.compare_digest(configured.encode(), presented.encode())

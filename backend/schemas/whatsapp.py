@@ -50,3 +50,20 @@ class WebhookEntry(_WebhookModel):
 class WebhookPayload(_WebhookModel):
     object: str = ""
     entry: list[WebhookEntry] = []
+
+
+class BridgeInboundMessage(_WebhookModel):
+    """One message relayed by the whatsapp-web.js bridge.
+
+    `chat_id` is where the conversation lives (`...@c.us` for 1:1,
+    `...@g.us` for a group) and is where the reply goes; `sender` is the
+    JID of the individual person who wrote it (equals chat_id in 1:1).
+    `kind` is web.js's message type -- "chat" means text.
+    """
+
+    message_id: str
+    chat_id: str
+    sender: str
+    is_group: bool = False
+    kind: str
+    body: str | None = None

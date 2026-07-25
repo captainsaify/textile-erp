@@ -1,0 +1,19 @@
+{
+  "name": "whatsapp-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "whatsapp-web.js relay between WhatsApp and the ERP backend",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.26.0"
+  }
+}

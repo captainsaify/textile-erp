@@ -51,6 +51,23 @@ def test_normalize_whatsapp_number() -> None:
     assert normalize_whatsapp_number("") == ""
 
 
+def test_jid_to_e164() -> None:
+    from backend.core.security import jid_to_e164
+
+    assert jid_to_e164("919876543210@c.us") == "+919876543210"
+    assert jid_to_e164("919876543210:7@c.us") == "+919876543210"
+    assert jid_to_e164("919876543210") == "+919876543210"
+
+
+def test_shared_secret_verification() -> None:
+    from backend.core.security import verify_shared_secret
+
+    assert verify_shared_secret("s3cret", "s3cret")
+    assert not verify_shared_secret("s3cret", "wrong")
+    assert not verify_shared_secret("s3cret", None)
+    assert not verify_shared_secret("", "")  # unconfigured fails closed
+
+
 def test_role_ordering() -> None:
     assert role_at_least(UserRole.OWNER, UserRole.STAFF)
     assert role_at_least(UserRole.STAFF, UserRole.STAFF)

@@ -3,12 +3,19 @@ docs/08_WhatsApp.md §1-§3: transport dedup, sender resolution, rate
 limiting, per-user serialization, then registry dispatch. No domain
 decisions happen here (docs/17_CodingStandards.md §5); handlers call
 services.
+
+Transport-neutral: Meta Cloud API webhooks and the whatsapp-web.js
+bridge both map into InboundMessage. `reply_to` is whatever chat the
+answer belongs in -- the sender's own number for 1:1, the group chat id
+for group messages -- while `sender_number` is always the individual
+person, so RBAC and audit attribution are per-user even in a group.
 """
 
 from __future__ import annotations
 
 import time
 import uuid
+from dataclasses import dataclass
 
 import redis.asyncio as aioredis
 from redis.exceptions import LockError
@@ -28,6 +35,7 @@ from backend.core.security import normalize_whatsapp_number, role_at_least
 from backend.models import User
 from backend.repositories.user_repository import UserRepository
 from backend.schemas.whatsapp import WebhookMessage, WebhookPayload
+from backend.services.whatsapp_bridge_client import get_bridge_sender
 from backend.services.whatsapp_client import SupportsSendText, get_whatsapp_client
 
 logger = get_logger(__name__)
@@ -42,6 +50,15 @@ BUSY_REPLY = "⏳ Still working on your previous message — try again in a mome
 THROTTLE_REPLY = "Sending a lot of messages at once — please slow down a little."
 
 
+@dataclass(frozen=True)
+class InboundMessage:
+    message_id: str
+    sender_number: str  # E.164 of the individual person who wrote it
+    reply_to: str  # transport-specific chat address replies go to
+    kind: str  # "text" or a media/other type name
+    text: str | None
+
+
 class WhatsAppDispatcher:
     def __init__(
         self,
@@ -51,32 +68,35 @@ class WhatsAppDispatcher:
     ) -> None:
         self._session_factory = session_factory or get_session_factory()
         self._redis = redis or get_redis()
-        self._client = client or get_whatsapp_client()
+        self._client = client or _default_sender()
 
     async def process_webhook(self, payload: WebhookPayload) -> None:
+        """Meta Cloud API entrypoint; 1:1 only, so replies go to the sender."""
         for entry in payload.entry:
             for change in entry.changes:
                 for message in change.value.messages:
-                    await self.process_message(message)
+                    await self.process_inbound(_from_meta(message))
 
-    async def process_message(self, message: WebhookMessage) -> None:
-        if not await self._first_delivery(message.id):
-            logger.info("whatsapp_duplicate_delivery", message_id=message.id)
+    async def process_inbound(self, message: InboundMessage) -> None:
+        if not await self._first_delivery(message.message_id):
+            logger.info("whatsapp_duplicate_delivery", message_id=message.message_id)
             return
 
-        sender = normalize_whatsapp_number(message.from_number)
+        sender = message.sender_number
         async with self._session_factory() as session:
             user = await UserRepository(session).get_active_by_whatsapp_number(sender)
 
         if user is None:
             # deliberate silence -- docs/08_WhatsApp.md §2: strangers get no
             # reply at all, only a log line for security review
-            logger.warning("unauthorized_sender", whatsapp_number=sender, message_id=message.id)
+            logger.warning(
+                "unauthorized_sender", whatsapp_number=sender, message_id=message.message_id
+            )
             return
 
         if await self._over_rate_limit(sender):
             if await self._first_throttle_notice(sender):
-                await self._client.send_text(sender, THROTTLE_REPLY)
+                await self._client.send_text(message.reply_to, THROTTLE_REPLY)
             return
 
         lock = self._redis.lock(
@@ -89,16 +109,16 @@ class WhatsAppDispatcher:
                 reply = await self._handle(message, user)
         except LockError:
             logger.warning("whatsapp_user_lock_contention", user_id=str(user.id))
-            await self._client.send_text(sender, BUSY_REPLY)
+            await self._client.send_text(message.reply_to, BUSY_REPLY)
             return
         if reply is not None:
-            await self._client.send_text(sender, reply.reply)
+            await self._client.send_text(message.reply_to, reply.reply)
 
-    async def _handle(self, message: WebhookMessage, user: User) -> CommandResult | None:
-        if message.type != "text" or message.text is None:
+    async def _handle(self, message: InboundMessage, user: User) -> CommandResult | None:
+        if message.kind != "text" or message.text is None:
             return CommandResult(reply=UNSUPPORTED_MEDIA_REPLY)
 
-        text = message.text.body.strip()
+        text = message.text.strip()
         keyword, _, args = text.partition(" ")
         keyword = keyword.lower()
         spec = COMMAND_REGISTRY.get(keyword)
@@ -117,7 +137,7 @@ class WhatsAppDispatcher:
             command=spec.name,
             user_id=str(user.id),
             org_id=str(user.org_id),
-            message_id=message.id,
+            message_id=message.message_id,
         )
         return await spec.handler(args.strip(), RequestContext(user=user))
 
@@ -142,6 +162,23 @@ class WhatsAppDispatcher:
         return bool(
             await self._redis.set(f"wa:rl:notice:{sender}", "1", nx=True, ex=_RATE_WINDOW_SECONDS)
         )
+
+
+def _default_sender() -> SupportsSendText:
+    if get_settings().whatsapp_transport == "webjs":
+        return get_bridge_sender()
+    return get_whatsapp_client()
+
+
+def _from_meta(message: WebhookMessage) -> InboundMessage:
+    sender = normalize_whatsapp_number(message.from_number)
+    return InboundMessage(
+        message_id=message.id,
+        sender_number=sender,
+        reply_to=sender,
+        kind=message.type,
+        text=message.text.body if message.text is not None else None,
+    )
 
 
 def get_dispatcher() -> WhatsAppDispatcher:

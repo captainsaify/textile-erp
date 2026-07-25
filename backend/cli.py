@@ -55,9 +55,7 @@ async def create_user_record(
 @cli.command()
 def create_user(
     full_name: Annotated[str, typer.Option("--name", help="Full name")],
-    whatsapp_number: Annotated[
-        str, typer.Option("--whatsapp", help="E.164, e.g. +919876543210")
-    ],
+    whatsapp_number: Annotated[str, typer.Option("--whatsapp", help="E.164, e.g. +919876543210")],
     role: Annotated[UserRole, typer.Option("--role")] = UserRole.OWNER,
 ) -> None:
     """Register a WhatsApp user so the bot responds to their number."""
