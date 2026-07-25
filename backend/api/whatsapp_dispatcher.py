@@ -21,6 +21,7 @@ import redis.asyncio as aioredis
 from redis.exceptions import LockError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from backend.api.commands.purchase_commands import handle_purchase_session_reply
 from backend.api.whatsapp_commands import (
     COMMAND_REGISTRY,
     CommandResult,
@@ -122,8 +123,25 @@ class WhatsAppDispatcher:
         keyword, _, args = text.partition(" ")
         keyword = keyword.lower()
         spec = COMMAND_REGISTRY.get(keyword)
+        context = RequestContext(
+            user=user,
+            session_factory=self._session_factory,
+            message_id=message.message_id,
+        )
 
         if spec is None:
+            # not a command: an active session interprets it as a reply in
+            # the current flow -- docs/08_WhatsApp.md §5
+            from backend.services.session_service import (
+                AWAITING_PURCHASE_CONFIRMATION,
+                SessionService,
+            )
+
+            session_state = await SessionService(self._session_factory, self._redis).get(
+                user.org_id, user.id
+            )
+            if session_state.state == AWAITING_PURCHASE_CONFIRMATION:
+                return await handle_purchase_session_reply(text, context, session_state)
             suggestion = closest_command(keyword, user.role)
             hint = f" Did you mean '{suggestion}'?" if suggestion else ""
             return CommandResult(
@@ -137,11 +155,6 @@ class WhatsAppDispatcher:
             command=spec.name,
             user_id=str(user.id),
             org_id=str(user.org_id),
-            message_id=message.message_id,
-        )
-        context = RequestContext(
-            user=user,
-            session_factory=self._session_factory,
             message_id=message.message_id,
         )
         return await spec.handler(args.strip(), context)

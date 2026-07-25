@@ -18,6 +18,17 @@ from backend.models.enums import UserRole
 from backend.tests.conftest import SEEDED_ORG_ID
 
 
+@pytest.fixture(autouse=True)
+async def _reset_global_redis() -> AsyncIterator[None]:
+    """The lazy global redis client binds to the first event loop that
+    touches it; pytest-asyncio gives every test its own loop, so reset
+    the singleton in teardown (while its loop is still alive)."""
+    yield
+    from backend.core.redis import close_redis
+
+    await close_redis()
+
+
 class FakeSender:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str]] = []
@@ -61,6 +72,30 @@ async def staff_user(
         except sa.exc.IntegrityError:
             # rows this test wrote still reference the user; the owning
             # test file's purge fixture removes both
+            await session.rollback()
+
+
+@pytest.fixture
+async def owner_user(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[User]:
+    number = f"+9195{uuid.uuid4().hex[:8]}"
+    async with session_factory() as session:
+        user = User(
+            org_id=uuid.UUID(SEEDED_ORG_ID),
+            full_name="Owner Probe",
+            whatsapp_number=number,
+            role=UserRole.OWNER,
+        )
+        session.add(user)
+        await session.commit()
+        user_id = user.id
+    yield user
+    async with session_factory() as session:
+        try:
+            await session.execute(sa.text("DELETE FROM users WHERE id = :id"), {"id": user_id})
+            await session.commit()
+        except sa.exc.IntegrityError:
             await session.rollback()
 
 

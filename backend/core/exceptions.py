@@ -65,3 +65,38 @@ class ValidationError(DomainError):
     request-shape validation, which never reaches the service layer)."""
 
     code = "validation_error"
+
+
+class DuplicateInvoiceError(DomainError):
+    code = "duplicate_invoice"
+
+
+class ExactDuplicateInvoiceError(DuplicateInvoiceError):
+    """Same supplier + invoice number already confirmed -- always a hard
+    stop (docs/04_Purchases.md §6 layer 1)."""
+
+    code = "exact_duplicate_invoice"
+
+    def __init__(self, invoice_no: str, supplier_name: str, details: dict[str, Any]) -> None:
+        super().__init__(
+            f"Invoice {invoice_no} from {supplier_name} is already recorded",
+            details=details,
+        )
+
+
+class FuzzyDuplicateInvoiceError(DuplicateInvoiceError):
+    """Probable duplicate (2-of-3 signals) -- owner may override
+    (docs/04_Purchases.md §6 layer 2)."""
+
+    code = "fuzzy_duplicate_invoice"
+
+    def __init__(self, message: str, *, details: dict[str, Any]) -> None:
+        super().__init__(message, details=details)
+
+
+class TotalMismatchWarning(DomainError):
+    """Declared invoice total disagrees with computed total beyond
+    tolerance -- requires the user to pick which is right
+    (docs/04_Purchases.md §5)."""
+
+    code = "total_mismatch"
