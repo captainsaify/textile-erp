@@ -73,10 +73,43 @@ client.on('qr', (qr) => {
 });
 
 let ownId = null;
-client.on('ready', () => {
+let ownLid = null; // WhatsApp's privacy id for our own account (...@lid)
+const knownForeignLids = new Set();
+client.on('ready', async () => {
   ownId = client.info.wid._serialized;
   console.log(`whatsapp connected as ${client.info.wid.user}`);
+  try {
+    const me = await client.getContactById(ownId);
+    if (me && me.lid) {
+      ownLid = typeof me.lid === 'string' ? me.lid : me.lid._serialized;
+      console.log(`own lid resolved: ${ownLid}`);
+    }
+  } catch (err) {
+    console.log('own lid lookup failed (will resolve lazily):', err.message);
+  }
 });
+
+// The self-chat may appear under the phone JID or the LID, and which of
+// the two shows up in from/to varies by which device typed the message.
+async function isSelfChat(msg) {
+  if (!msg.fromMe) return false;
+  if (msg.from === msg.to) return true;
+  const to = msg.to || '';
+  if (to === ownId || (ownLid !== null && to === ownLid)) return true;
+  if (!to.endsWith('@lid') || knownForeignLids.has(to)) return false;
+  try {
+    const contact = await client.getContactById(to);
+    if (contact && contact.isMe) {
+      ownLid = to;
+      console.log(`own lid resolved lazily: ${ownLid}`);
+      return true;
+    }
+  } catch (err) {
+    console.log(`lid contact lookup failed for ${to}:`, err.message);
+  }
+  knownForeignLids.add(to);
+  return false;
+}
 
 // Loop guard: replies this bridge sends also fire message_create as
 // fromMe -- without this they'd be fed back into the backend forever.
@@ -99,26 +132,32 @@ function isPendingSend(chatId, body) {
   return true;
 }
 
-function chatAllowed(chatId, fromMe) {
-  const isSelfChat = ownId !== null && chatId === ownId;
-  if (ALLOWED_CHATS.length > 0) return isSelfChat || ALLOWED_CHATS.includes(chatId);
-  return fromMe ? isSelfChat : true;
+function chatAllowed(chatId, fromMe, isSelfChat) {
+  const self = isSelfChat || (ownId !== null && chatId === ownId);
+  if (ALLOWED_CHATS.length > 0) return self || ALLOWED_CHATS.includes(chatId);
+  return fromMe ? self : true;
 }
 client.on('auth_failure', (msg) => console.error('whatsapp auth failure:', msg));
 client.on('disconnected', (reason) => console.error('whatsapp disconnected:', reason));
 
 client.on('message_create', async (msg) => {
   if (msg.from === 'status@broadcast' || msg.to === 'status@broadcast') return;
-  const chatId = msg.fromMe ? msg.to : msg.from;
+  console.log(`evt message_create type=${msg.type} fromMe=${msg.fromMe} from=${msg.from} to=${msg.to}`);
+  // WhatsApp increasingly addresses chats by LID (privacy id, ...@lid)
+  // instead of the phone JID. Normalize the self-chat to the phone JID
+  // so the backend replies via the form sendMessage reliably accepts.
+  const selfChat = await isSelfChat(msg);
+  let chatId = msg.fromMe ? msg.to : msg.from;
+  if (selfChat && ownId) chatId = ownId;
   if (msg.fromMe && msg.type === 'chat' && isPendingSend(chatId, msg.body)) return;
-  if (!chatAllowed(chatId, msg.fromMe)) {
+  if (!chatAllowed(chatId, msg.fromMe, selfChat)) {
     if (chatId.endsWith('@g.us')) console.log(`skipped chat ${chatId} (not in BRIDGE_ALLOWED_CHATS)`);
     return;
   }
   const payload = {
-    message_id: msg.id._serialized,
+    message_id: (msg.id && msg.id._serialized) || `noid_${Date.now()}_${Math.random().toString(36).slice(2)}`,
     chat_id: chatId,
-    sender: msg.fromMe ? ownId : msg.author || msg.from,
+    sender: msg.fromMe ? ownId || msg.from : msg.author || msg.from,
     is_group: chatId.endsWith('@g.us'),
     kind: msg.type,
     body: msg.type === 'chat' ? msg.body : null,
@@ -156,8 +195,8 @@ app.post('/send', async (req, res) => {
     await client.sendMessage(target, body);
     return res.json({ status: 'sent' });
   } catch (err) {
-    console.error('send failed:', err.message);
-    return res.status(502).json({ error: 'send_failed' });
+    console.error('send failed:', err.stack || err.message);
+    return res.status(502).json({ error: 'send_failed', detail: String(err.message) });
   }
 });
 
