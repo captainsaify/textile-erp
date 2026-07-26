@@ -1,8 +1,9 @@
 # Handoff — WhatsApp-Native Trading ERP
 
-Written 2026-07-27 at the end of an Opus session. Read this before
-touching anything; it records decisions and traps that are **not**
-recoverable from the code or from `docs/`.
+Written 2026-07-27 at the end of an Opus session; updated the same day
+by a Sonnet session that completed §2a. Read this before touching
+anything; it records decisions and traps that are **not** recoverable
+from the code or from `docs/`.
 
 `CLAUDE.md` is still the authority on philosophy, and `docs/` on
 implementation detail. This file only says **where we are**, **what's
@@ -41,15 +42,18 @@ implementation is most dangerous.
 
 **Working and verified end-to-end**, on real hardware with a real phone:
 
-- 30-table schema, migrations, seeds. Migration head: `b3d1c7a9e42f`.
+- 30-table schema, migrations, seeds. Migration head: `b3d1c7a9e42f`
+  (no schema change since — §2a added no columns, only queries).
 - WhatsApp transport via **Meta Cloud API** (the working one).
-- 11 commands: `purchase` `sale` `received` `paid` `stock` (+ `stock
+- 17 commands: `purchase` `sale` `received` `paid` `stock` (+ `stock
   CODE`) `search` `expense` `income` `cash` `bank` `help`, plus
-  `details` (the OCR follow-up step, not in the spec's command list).
+  `details` (the OCR follow-up step, not in the spec's command list),
+  plus the reporting six added in §2a below: `dashboard` `summary`
+  `profit` `supplier` `customer` `ledger`.
 - OCR: local pipeline (OpenCV → table detect → Paddle/Tesseract) **and**
   Claude vision, vision-first with automatic fallback.
-- 118 tests pass, fixed and random order. `mypy --strict` clean across
-  94 files. `ruff` clean.
+- 142 tests pass, fixed and random order. `mypy --strict` clean across
+  100 files. `ruff` clean.
 
 **Live OCR result on the user's real 26-item purchase sheet:** all 26
 rows correct, confirmed independently — the costing quantities sum to
@@ -63,28 +67,48 @@ managed 20/26 on the same image. Vision cost $0.054, took 18.1s.
 
 ## 2. Sonnet-safe work, in the order I'd do it
 
-### 2a. The reporting six ← **start here**
+### 2a. The reporting six — ✅ done (2026-07-27, Sonnet)
 
 `dashboard` · `summary` · `profit` · `ledger` · `supplier NAME` ·
-`customer NAME`
+`customer NAME` are built, registered, and tested (24 new tests in
+`backend/tests/api/test_report_commands.py`).
 
-Read-only queries over tables that already exist and already balance.
-No new infrastructure, no migrations, no money mutations. Highest value
-per token: this is what finally makes the purchase data *visible*.
+What's there, for whoever touches this next:
+- `backend/services/profit_service.py` — P&L from the journal's account
+  rollup (`JournalRepository.account_rollup`), not re-derived from
+  `expenses`/`income`/`sales_headers`. This is deliberate: whatever a
+  service posts to the journal *is* the P&L, so a new transaction type
+  can't quietly diverge the two the way a second hand-written
+  calculation could.
+- `backend/repositories/report_repository.py` — period totals,
+  org-wide receivables/payables (one grouped query each), top sellers,
+  slow-moving stock. `slow_moving_days` reads the `settings` table
+  directly (default 60) since the `settings` command doesn't exist yet
+  — when it ships, values it writes are picked up here with no change.
+- `backend/repositories/party_repository.py` — `SupplierRepository`/
+  `CustomerRepository.stats()` (aging buckets 0-30/31-60/61-90/90+,
+  computed per open invoice, not a lump sum) and `.statement()` (the
+  `ledger` command's event reconstruction from purchase/sales headers
+  + cash/bank ledger rows — there's no separate per-payment table).
+  **Payment sign is not symmetric between the two**: a supplier
+  payment's effect on cash and on payable are both decreases (same
+  sign, reused directly); a customer payment's effect on cash is an
+  increase but on receivable is a decrease (opposite sign, negated).
+  Both are commented in place — don't "simplify" one to match the
+  other without re-deriving which way the sign actually goes.
+- **Redis caching from docs/12_Dashboard.md §4 is NOT wired in.** Every
+  dashboard/summary read hits Postgres directly every time — correct,
+  just not fast. This was a deliberate scope cut, not an oversight: the
+  spec's own graceful-degradation path already allows "cache
+  unavailable → compute directly," so this is that path taken
+  unconditionally. Wiring invalidation into every mutating service
+  (purchase/sale confirm, payment, expense/income, capital, inventory
+  adjustment) is real, separate, cross-cutting work — and a missed
+  invalidation call would be exactly the kind of silent staleness
+  `CLAUDE.md` tries hard to avoid everywhere else. Do this as its own
+  focused pass, not bolted onto an unrelated change.
 
-Follow the existing pattern exactly:
-- `backend/api/commands/stock_commands.py` for command shape
-- `backend/repositories/` for queries — **routes call services, services
-  call repositories**, never skip a layer (`docs/17_CodingStandards.md`)
-- `backend/api/formatting.py` already has `fmt_money`, `fmt_qty`,
-  `fmt_date` — use them, don't reinvent currency formatting
-- register in `backend/api/whatsapp_commands.py` (`CommandSpec` table)
-- test alongside `backend/tests/api/test_stock_commands.py`
-
-Specs: `docs/12_Dashboard.md`, `docs/06_Accounting.md`,
-`docs/08_WhatsApp.md`.
-
-### 2b. `capital` / `withdraw`
+### 2b. `capital` / `withdraw` ← **start here**
 
 Partner capital in/out. Mutating, but there is direct precedent:
 `backend/api/commands/money_commands.py` (`expense`/`income`) already
