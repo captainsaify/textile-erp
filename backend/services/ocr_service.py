@@ -35,6 +35,9 @@ AUTO_MATCH_THRESHOLD = 0.85  # §9 pg_trgm auto-accept
 ZERO = decimal.Decimal("0")
 
 _ALNUM = re.compile(r"[^A-Za-z0-9]")
+# how far the sheet's stated total KG may drift from qty x kg before the
+# computed value is preferred
+_TOTAL_DRIFT_TOLERANCE = decimal.Decimal("0.02")
 _TOTAL_WORD = re.compile(r"^\s*(grand\s*)?totals?\b", re.IGNORECASE)
 # the template's own column labels, for spotting a header band read as data
 _HEADER_WORDS = {
@@ -241,7 +244,12 @@ class OcrService:
         of those are purchases -- dropping them here beats making the user
         delete them from every preview."""
         code = _ALNUM.sub("", (row.fields["code"].text if "code" in row.fields else "")).strip()
-        description = row.fields["description"].text.strip() if "description" in row.fields else ""
+        raw_description = (
+            row.fields["description"].text.strip() if "description" in row.fields else ""
+        )
+        # a totals line often reads as bare rules or pipes -- punctuation
+        # with no letters or digits is not a description
+        description = raw_description if _ALNUM.sub("", raw_description).strip() else ""
         numbers = [
             cls._decimal(row.fields[field].text)
             for field in ("qty", "weight_kg", "total_weight_kg")
@@ -276,8 +284,23 @@ class OcrService:
             if "total_weight_kg" in row.fields
             else None
         )
-        if total is None and pieces is not None and per_unit is not None:
-            total = pieces * per_unit
+        computed = pieces * per_unit if pieces is not None and per_unit is not None else None
+        if total is None:
+            total = computed
+        elif computed is not None and computed > ZERO:
+            # The sheet states qty, kg/unit and total kg, so the three are
+            # checkable against each other. A misread digit in any one of
+            # them shows up here; trust the product of the two simpler
+            # cells over the wider total cell, and flag it (§7 -- a wrong
+            # silent value is worse than a visible question).
+            drift = abs(total - computed) / computed
+            if drift > _TOTAL_DRIFT_TOLERANCE:
+                logger.info(
+                    "ocr_total_weight_mismatch",
+                    stated=str(total),
+                    computed=str(computed),
+                )
+                total = computed
         costing = total if total is not None else pieces
         return costing, pieces, per_unit
 

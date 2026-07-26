@@ -73,6 +73,19 @@ def test_resolve_columns_maps_headers_and_surfaces_unknown() -> None:
     assert unmapped == ["Rate"]  # never silently dropped (§5)
 
 
+def test_duplicate_field_claims_keep_the_best_match() -> None:
+    """A real sheet had 'Item' and 'Description' both matching the
+    description field; the loser silently overwrote the winner."""
+    columns, unmapped = resolve_columns(
+        ["Qty", "Description", "Item", "Code", "KG", "T.KG"], TEXTILE_MAPPINGS
+    )
+    fields = [c.field for c in columns]
+    assert fields.count("description") == 1
+    winner = next(c for c in columns if c.field == "description")
+    assert winner.header_text == "Description"  # exact match beats 'Item'
+    assert "Item" in unmapped  # surfaced, not silently dropped
+
+
 def test_ruled_grid_detected() -> None:
     prepared = prepare(sheet_bytes(), denoise=False)
     grid = detect(prepared.binary)

@@ -133,7 +133,26 @@ def resolve_columns(
         else:
             # never silently dropped -- surfaced to the user once (§5)
             unmapped.append(raw.strip())
-    return resolved, unmapped
+
+    # Two columns can plausibly match one field ("Item" and "Description"
+    # both look like `description`). Keep only the best-scoring claim --
+    # otherwise the loser silently overwrote the winner downstream, and a
+    # real sheet's Description was replaced by an adjacent Fold column.
+    best_by_field: dict[str, ResolvedColumn] = {}
+    for column in resolved:
+        if column.field == IGNORED:
+            continue
+        incumbent = best_by_field.get(column.field)
+        if incumbent is None or column.match_score > incumbent.match_score:
+            best_by_field[column.field] = column
+    kept = {id(column) for column in best_by_field.values()}
+    deduped: list[ResolvedColumn] = []
+    for column in resolved:
+        if column.field == IGNORED or id(column) in kept:
+            deduped.append(column)
+        else:
+            unmapped.append(column.header_text)
+    return deduped, unmapped
 
 
 def _read_grid_texts(
