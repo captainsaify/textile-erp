@@ -153,10 +153,12 @@ async def test_photo_to_confirmed_purchase(
                 )
             )
         ).all()
+        # quantities are the sheet's TOTAL KG, not its piece count:
+        # CTW is 25 rolls x 2 kg = 50 kg (docs/04_Purchases.md §12)
         assert [(r.code, r.qty, r.rate) for r in lines] == [
             ("TRP", D("100.000"), D("150.0000")),
             ("MJP", D("40.000"), D("150.0000")),
-            ("CTW", D("25.000"), D("150.0000")),
+            ("CTW", D("50.000"), D("150.0000")),
         ]
         movements = (
             await session.execute(sa.text("SELECT count(*) FROM inventory_movements"))

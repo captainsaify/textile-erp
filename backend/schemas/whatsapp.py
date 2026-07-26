@@ -16,12 +16,28 @@ class WebhookTextBody(_WebhookModel):
     body: str
 
 
+class WebhookMedia(_WebhookModel):
+    """Meta sends a media *id*, not bytes -- the file is fetched from the
+    Graph API in a second step (docs/07_OCR.md media path)."""
+
+    id: str
+    mime_type: str = ""
+    sha256: str = ""
+    filename: str | None = None
+
+
 class WebhookMessage(_WebhookModel):
     id: str
     from_number: str = Field(alias="from")
     timestamp: str = ""
     type: str
     text: WebhookTextBody | None = None
+    image: WebhookMedia | None = None
+    document: WebhookMedia | None = None
+
+    @property
+    def media(self) -> WebhookMedia | None:
+        return self.image or self.document
 
 
 class WebhookMetadata(_WebhookModel):

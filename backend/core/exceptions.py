@@ -94,6 +94,42 @@ class FuzzyDuplicateInvoiceError(DuplicateInvoiceError):
         super().__init__(message, details=details)
 
 
+class InsufficientStockError(DomainError):
+    """Movement would take stock negative -- blocked by default, override
+    available (docs/03_Inventory.md §3)."""
+
+    code = "insufficient_stock"
+
+    def __init__(self, code: str, available: object, requested: object, unit: str = "") -> None:
+        super().__init__(
+            f"{code} has {available} {unit} in stock, this needs {requested} {unit}".strip(),
+            details={
+                "product_code": code,
+                "available": str(available),
+                "requested": str(requested),
+            },
+        )
+
+
+class BelowCostSaleWarning(DomainError):
+    """Sale rate below weighted average cost -- warns, never blocks
+    (docs/05_Sales.md §4)."""
+
+    code = "below_cost_sale"
+
+
+class CreditLimitExceededWarning(DomainError):
+    """Credit sale would exceed the customer's limit (docs/05_Sales.md §8)."""
+
+    code = "credit_limit_exceeded"
+
+
+class DuplicateSaleError(DomainError):
+    """Byte-identical resend inside the dedup window (docs/05_Sales.md §5)."""
+
+    code = "duplicate_sale"
+
+
 class TotalMismatchWarning(DomainError):
     """Declared invoice total disagrees with computed total beyond
     tolerance -- requires the user to pick which is right

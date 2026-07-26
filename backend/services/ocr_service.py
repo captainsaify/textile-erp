@@ -13,6 +13,7 @@ import dataclasses
 import datetime
 import decimal
 import hashlib
+import re
 import uuid
 from pathlib import Path
 
@@ -32,6 +33,34 @@ logger = get_logger(__name__)
 
 AUTO_MATCH_THRESHOLD = 0.85  # §9 pg_trgm auto-accept
 ZERO = decimal.Decimal("0")
+
+_ALNUM = re.compile(r"[^A-Za-z0-9]")
+_TOTAL_WORD = re.compile(r"^\s*(grand\s*)?totals?\b", re.IGNORECASE)
+# the template's own column labels, for spotting a header band read as data
+_HEADER_WORDS = {
+    "qty",
+    "quantity",
+    "qnty",
+    "description",
+    "desc",
+    "item",
+    "particulars",
+    "code",
+    "design",
+    "label",
+    "kg",
+    "wt",
+    "weight",
+    "t.kg",
+    "total kg",
+    "tot kg",
+    "total weight",
+    "s.no",
+    "sno",
+    "sr.no",
+    "amount",
+    "value",
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -205,6 +234,53 @@ class OcrService:
             return None
         return value if value > ZERO else None
 
+    @classmethod
+    def _is_noise_row(cls, row: ExtractedRow) -> bool:
+        """Real sheets bracket their items with a repeated header band and
+        a grand-total line, and ruled grids yield blank filler rows. None
+        of those are purchases -- dropping them here beats making the user
+        delete them from every preview."""
+        code = _ALNUM.sub("", (row.fields["code"].text if "code" in row.fields else "")).strip()
+        description = row.fields["description"].text.strip() if "description" in row.fields else ""
+        numbers = [
+            cls._decimal(row.fields[field].text)
+            for field in ("qty", "weight_kg", "total_weight_kg")
+            if field in row.fields
+        ]
+        has_number = any(value is not None for value in numbers)
+
+        if not code and not description:
+            return True  # blank filler, or a totals line with only a number
+        if _TOTAL_WORD.match(description) or _TOTAL_WORD.match(code):
+            return True
+        if not code and not has_number:
+            return True
+        # header band read as data: the cells echo the template's own labels
+        return description.lower() in _HEADER_WORDS or code.lower() in _HEADER_WORDS
+
+    @classmethod
+    def _costing_quantity(
+        cls, row: ExtractedRow
+    ) -> tuple[decimal.Decimal | None, decimal.Decimal | None, decimal.Decimal | None]:
+        """(costing_qty, pieces, weight_per_unit).
+
+        Textile is costed per KG, so the quantity that drives inventory
+        and line_total is total KG -- the sheet's Qty column counts rolls
+        (docs/04_Purchases.md §12). Falls back to pieces for product types
+        that carry no weight columns at all.
+        """
+        pieces = cls._decimal(row.fields["qty"].text) if "qty" in row.fields else None
+        per_unit = cls._decimal(row.fields["weight_kg"].text) if "weight_kg" in row.fields else None
+        total = (
+            cls._decimal(row.fields["total_weight_kg"].text)
+            if "total_weight_kg" in row.fields
+            else None
+        )
+        if total is None and pieces is not None and per_unit is not None:
+            total = pieces * per_unit
+        costing = total if total is not None else pieces
+        return costing, pieces, per_unit
+
     async def _resolve_code(
         self, org_id: uuid.UUID, row: ExtractedRow, supplier_id: uuid.UUID | None
     ) -> tuple[str, uuid.UUID | None, str | None, str | None]:
@@ -256,26 +332,35 @@ class OcrService:
         low_confidence: list[str] = []
         auto_corrections: list[str] = []
 
-        for index, row in enumerate(sheet.extraction.rows, start=1):
+        skipped = 0
+        index = 0
+        for row in sheet.extraction.rows:
+            if self._is_noise_row(row):
+                skipped += 1
+                continue
+            index += 1
             code, product_id, unit_code, note = await self._resolve_code(org_id, row, supplier_id)
             if note:
                 auto_corrections.append(f"Line {index}: {note}")
 
-            qty_field = row.fields.get("qty")
-            qty = self._decimal(qty_field.text) if qty_field else None
-            if qty is None:
-                weight_field = row.fields.get("total_weight_kg")
-                qty = self._decimal(weight_field.text) if weight_field else None
+            qty, pieces, per_unit = self._costing_quantity(row)
             if qty is None:
                 low_confidence.append(f"Line {index}, Qty: couldn't read this — what should it be?")
                 qty = ZERO
+
+            description_field = row.fields.get("description")
+            description = description_field.text.strip() if description_field else None
 
             if not code:
                 low_confidence.append(
                     f"Line {index}, Code: couldn't read this clearly — what should it be?"
                 )
-            elif qty_field is not None and qty_field.needs_review:
-                low_confidence.append(f"Line {index} ({code}): quantity is unclear, please check")
+            else:
+                qty_field = row.fields.get("qty")
+                if qty_field is not None and qty_field.needs_review:
+                    low_confidence.append(
+                        f"Line {index} ({code}): quantity is unclear, please check"
+                    )
 
             lines.append(
                 DraftLine(
@@ -285,8 +370,13 @@ class OcrService:
                     product_id=product_id,
                     resolved_code=code.upper() if product_id else None,
                     unit_code=unit_code,
+                    description=description or None,
+                    pieces=pieces,
+                    weight_per_unit=per_unit,
                 )
             )
+        if skipped:
+            logger.info("ocr_noise_rows_skipped", count=skipped)
 
         draft = Draft(
             supplier_id=supplier_id,

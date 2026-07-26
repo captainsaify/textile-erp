@@ -35,7 +35,7 @@ from backend.core.redis import get_redis
 from backend.core.security import normalize_whatsapp_number, role_at_least
 from backend.models import User
 from backend.repositories.user_repository import UserRepository
-from backend.schemas.whatsapp import WebhookMessage, WebhookPayload
+from backend.schemas.whatsapp import WebhookMedia, WebhookMessage, WebhookPayload
 from backend.services.whatsapp_bridge_client import get_bridge_sender
 from backend.services.whatsapp_client import SupportsSendText, get_whatsapp_client
 
@@ -87,7 +87,39 @@ class WhatsAppDispatcher:
         for entry in payload.entry:
             for change in entry.changes:
                 for message in change.value.messages:
+                    media = message.media
+                    if media is not None:
+                        await self._process_meta_media(message, media)
+                        continue
                     await self.process_inbound(_from_meta(message))
+
+    async def _process_meta_media(self, message: WebhookMessage, media: WebhookMedia) -> None:
+        """Meta carries media by reference: fetch the bytes, then hand to
+        the same OCR path the bridge transport uses."""
+        sender = normalize_whatsapp_number(message.from_number)
+        fetcher = getattr(self._client, "fetch_media", None)
+        if fetcher is None:
+            await self.process_inbound(_from_meta(message))
+            return
+
+        fetched = await fetcher(media.id)
+        if fetched is None:
+            logger.error("media_fetch_failed", media_id=media.id, message_id=message.id)
+            await self._client.send_text(
+                sender, "❌ I couldn't download that file from WhatsApp — please resend it."
+            )
+            return
+
+        data, mime_type = fetched
+        await self.process_media(
+            InboundMedia(
+                message_id=message.id,
+                sender_number=sender,
+                reply_to=sender,
+                mime_type=media.mime_type or mime_type,
+                data=data,
+            )
+        )
 
     async def process_inbound(self, message: InboundMessage) -> None:
         if not await self._first_delivery(message.message_id):
@@ -176,8 +208,14 @@ class WhatsAppDispatcher:
         if spec is None:
             # not a command: an active session interprets it as a reply in
             # the current flow -- docs/08_WhatsApp.md §5
+            from backend.api.commands.sale_commands import handle_sale_session_reply
+            from backend.api.commands.settlement_commands import (
+                handle_settlement_session_reply,
+            )
             from backend.services.session_service import (
                 AWAITING_PURCHASE_CONFIRMATION,
+                AWAITING_SALE_CONFIRMATION,
+                AWAITING_SETTLEMENT_CONFIRMATION,
                 SessionService,
             )
 
@@ -186,6 +224,10 @@ class WhatsAppDispatcher:
             )
             if session_state.state == AWAITING_PURCHASE_CONFIRMATION:
                 return await handle_purchase_session_reply(text, context, session_state)
+            if session_state.state == AWAITING_SALE_CONFIRMATION:
+                return await handle_sale_session_reply(text, context, session_state)
+            if session_state.state == AWAITING_SETTLEMENT_CONFIRMATION:
+                return await handle_settlement_session_reply(text, context, session_state)
             suggestion = closest_command(keyword, user.role)
             hint = f" Did you mean '{suggestion}'?" if suggestion else ""
             return CommandResult(

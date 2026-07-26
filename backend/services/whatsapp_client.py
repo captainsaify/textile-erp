@@ -30,15 +30,26 @@ class SupportsSendText(Protocol):
     async def send_text(self, to_number: str, body: str) -> bool: ...
 
 
+class SupportsFetchMedia(Protocol):
+    """Transports that carry media by reference rather than by value."""
+
+    async def fetch_media(self, media_id: str) -> tuple[bytes, str] | None: ...
+
+
 class WhatsAppClient:
     def __init__(self, http: httpx.AsyncClient | None = None) -> None:
         settings = get_settings()
         self._phone_number_id = settings.whatsapp_phone_number_id
+        self._access_token = settings.whatsapp_access_token
         self._http = http or httpx.AsyncClient(
             base_url=f"https://graph.facebook.com/{settings.whatsapp_api_version}",
             headers={"Authorization": f"Bearer {settings.whatsapp_access_token}"},
-            timeout=10.0,
+            # media downloads are larger than a text send
+            timeout=60.0,
         )
+
+    async def fetch_media(self, media_id: str) -> tuple[bytes, str] | None:
+        return await _fetch_media_impl(self._http, self._access_token, media_id)
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -74,6 +85,44 @@ class WhatsAppClient:
             await asyncio.sleep(delay)
         logger.error("whatsapp_send_failed", to=to_number)
         return False
+
+
+async def _fetch_media_impl(
+    http: httpx.AsyncClient, access_token: str, media_id: str
+) -> tuple[bytes, str] | None:
+    """Two-step per Meta's API: resolve the media id to a short-lived
+    lookaside URL, then download it with the same bearer token. Returns
+    (bytes, mime_type), or None on any failure -- the caller turns that
+    into a user-facing 'couldn't download' message."""
+    try:
+        meta_response = await http.get(f"/{media_id}")
+        if meta_response.status_code >= 300:
+            logger.error(
+                "media_lookup_failed",
+                media_id=media_id,
+                status=meta_response.status_code,
+                body=meta_response.text[:300],
+            )
+            return None
+        payload = meta_response.json()
+        url = payload.get("url")
+        mime_type = payload.get("mime_type") or "application/octet-stream"
+        if not url:
+            logger.error("media_lookup_no_url", media_id=media_id)
+            return None
+
+        # The lookaside URL is absolute and outside the client's base_url,
+        # and still requires the bearer token.
+        download = await http.get(
+            url, headers={"Authorization": f"Bearer {access_token}"}, follow_redirects=True
+        )
+        if download.status_code >= 300:
+            logger.error("media_download_failed", media_id=media_id, status=download.status_code)
+            return None
+        return download.content, str(mime_type)
+    except httpx.HTTPError as exc:
+        logger.error("media_transport_error", media_id=media_id, error=str(exc))
+        return None
 
 
 _client: WhatsAppClient | None = None

@@ -3,6 +3,7 @@ path -- docs/02_Database.md §4."""
 
 from __future__ import annotations
 
+import decimal
 import uuid
 
 from sqlalchemy import func, or_, select
@@ -49,6 +50,33 @@ class CustomerRepository:
             .limit(limit)
         )
         return list((await self._session.execute(stmt)).scalars())
+
+    async def outstanding(self, org_id: uuid.UUID, customer_id: uuid.UUID) -> decimal.Decimal:
+        """Receivable: unpaid portion of confirmed sales plus the
+        opening balance -- docs/05_Sales.md §3."""
+        from backend.models import SalesHeader
+
+        unpaid = (
+            await self._session.execute(
+                select(
+                    func.coalesce(
+                        func.sum(SalesHeader.grand_total - SalesHeader.amount_paid),
+                        decimal.Decimal("0"),
+                    )
+                ).where(
+                    SalesHeader.org_id == org_id,
+                    SalesHeader.customer_id == customer_id,
+                    SalesHeader.deleted_at.is_(None),
+                    SalesHeader.status.in_(["confirmed", "partially_returned", "returned"]),
+                )
+            )
+        ).scalar_one()
+        opening = (
+            await self._session.execute(
+                select(Customer.opening_balance).where(Customer.id == customer_id)
+            )
+        ).scalar_one_or_none() or decimal.Decimal("0")
+        return decimal.Decimal(unpaid) + opening
 
 
 class PartnerRepository:

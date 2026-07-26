@@ -40,6 +40,12 @@ const ALLOWED_CHATS = (process.env.BRIDGE_ALLOWED_CHATS || '')
   .map((s) => s.trim())
   .filter(Boolean);
 
+// Link without a QR: WhatsApp > Linked devices > Link with phone number.
+// Set to the bot number, digits only with country code (e.g. 919000000000).
+// Needed when whoever is linking only has the phone in front of them and
+// can't scan a code shown on another screen.
+const PAIRING_NUMBER = (process.env.BRIDGE_PAIRING_NUMBER || '').replace(/[^0-9]/g, '');
+
 if (!SHARED_SECRET) {
   console.error('BRIDGE_SHARED_SECRET is required (same value as the backend .env)');
   process.exit(1);
@@ -58,19 +64,58 @@ function toChatId(value) {
   return `${value.replace(/^\+/, '')}@c.us`;
 }
 
+// whatsapp-web.js hooks WhatsApp Web's internals, so a web-side rollout
+// can break it outright -- on 2026-07-25 the build served from ~20:04
+// (2.3000.1043849311+) failed Client.inject entirely. Pinning to a build
+// this library is known to work with is the documented remedy; copies
+// land in .wwebjs_cache as they are served, so a working one is usually
+// already on disk. Set BRIDGE_WEB_VERSION='' to follow live WhatsApp Web.
+const WEB_VERSION = process.env.BRIDGE_WEB_VERSION ?? '';
+const webVersionCache = WEB_VERSION
+  ? {
+      webVersion: WEB_VERSION,
+      webVersionCache: { type: 'local', path: './.wwebjs_cache' },
+    }
+  : {};
+
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: './session' }),
   puppeteer: {
     headless: true,
     executablePath: CHROME_PATH,
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    // whatsapp-web.js's injection step evaluates a lot of code in-page;
+    // on a cold profile it can exceed Puppeteer's 30s protocol default
+    // and abort the whole startup.
+    protocolTimeout: 180000,
   },
+  ...webVersionCache,
 });
 
-client.on('qr', (qr) => {
+let pairingRequested = false;
+client.on('qr', async (qr) => {
+  if (PAIRING_NUMBER && !pairingRequested) {
+    pairingRequested = true;
+    try {
+      const code = await client.requestPairingCode(PAIRING_NUMBER);
+      console.log(`PAIRING CODE: ${code}`);
+      console.log('Enter it in WhatsApp > Linked devices > Link with phone number instead');
+      return;
+    } catch (err) {
+      console.error('pairing code request failed, falling back to QR:', err.message);
+    }
+  }
   qrcode.generate(qr, { small: true });
   console.log('Scan this QR with the bot phone: WhatsApp > Linked devices > Link a device');
 });
+
+// Startup visibility: without these, a client stuck part-way through
+// loading looks identical to one that simply hasn't finished.
+client.on('loading_screen', (percent, message) =>
+  console.log(`whatsapp loading ${percent}% ${message || ''}`),
+);
+client.on('authenticated', () => console.log('whatsapp authenticated (session restored)'));
+client.on('change_state', (state) => console.log(`whatsapp state: ${state}`));
 
 let ownId = null;
 let ownLid = null; // WhatsApp's privacy id for our own account (...@lid)
@@ -115,19 +160,59 @@ async function isSelfChat(msg) {
 // addressing; the backend allowlist is keyed by phone number, so map
 // LID -> phone JID via contact lookup (cached).
 const lidPhoneCache = new Map();
-async function resolveSenderJid(jid) {
+
+// WhatsApp now carries the real phone number alongside the LID in a
+// few different places depending on message shape; check them all
+// before falling back to a contact lookup.
+function phoneFromMessage(msg) {
+  const data = msg._data || {};
+  const candidates = [
+    data.senderPn,
+    data.participantPn,
+    data.authorPn,
+    data.from?._serialized,
+    data.author?._serialized,
+    msg.id?.participant?._serialized,
+    msg.id?.participant,
+  ];
+  for (const candidate of candidates) {
+    const value = typeof candidate === 'string' ? candidate : candidate?._serialized;
+    if (typeof value === 'string' && value.endsWith('@c.us')) return value;
+  }
+  return null;
+}
+
+async function resolveSenderJid(jid, msg) {
   if (!jid || !jid.endsWith('@lid')) return jid;
+
+  const fromMessage = msg ? phoneFromMessage(msg) : null;
+  if (fromMessage) {
+    if (!lidPhoneCache.has(jid)) console.log(`sender lid mapped (msg): ${jid} -> ${fromMessage}`);
+    lidPhoneCache.set(jid, fromMessage);
+    return fromMessage;
+  }
+
   if (lidPhoneCache.has(jid)) return lidPhoneCache.get(jid);
   let resolved = jid;
   try {
     const contact = await client.getContactById(jid);
-    if (contact && contact.number) resolved = `${contact.number}@c.us`;
-    else if (contact && contact.id && String(contact.id._serialized).endsWith('@c.us'))
+    if (contact && contact.number) {
+      resolved = `${String(contact.number).replace(/[^0-9]/g, '')}@c.us`;
+    } else if (contact?.id?._serialized && String(contact.id._serialized).endsWith('@c.us')) {
       resolved = contact.id._serialized;
+    }
   } catch (err) {
     console.log(`sender lid resolution failed for ${jid}:`, err.message);
   }
-  if (resolved !== jid) console.log(`sender lid mapped: ${jid} -> ${resolved}`);
+  if (resolved === jid) {
+    // Surface the shape so an unmapped sender is diagnosable rather than
+    // just silently unauthorized.
+    console.log(
+      `sender lid UNMAPPED ${jid}; msg id keys=${JSON.stringify(Object.keys(msg?._data || {}).filter((k) => /pn|phone|author|sender|participant/i.test(k)))}`,
+    );
+  } else {
+    console.log(`sender lid mapped (contact): ${jid} -> ${resolved}`);
+  }
   lidPhoneCache.set(jid, resolved);
   return resolved;
 }
@@ -177,14 +262,51 @@ client.on('message_create', async (msg) => {
   }
   const messageId =
     (msg.id && msg.id._serialized) || `noid_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-  const sender = msg.fromMe ? ownId || msg.from : await resolveSenderJid(msg.author || msg.from);
+  const sender = msg.fromMe
+    ? ownId || msg.from
+    : await resolveSenderJid(msg.author || msg.from, msg);
 
   // photos/PDFs take the OCR path -- download and relay the bytes
   if (msg.hasMedia && (msg.type === 'image' || msg.type === 'document')) {
     try {
-      const media = await msg.downloadMedia();
-      if (!media || !media.data) {
-        console.error(`media download empty for ${messageId}`);
+      // Media isn't always decryptable from the object the event hands
+      // us -- for our own sent messages the store entry can still be
+      // settling -- so retry, and re-fetch the message from the chat
+      // before the later attempts.
+      let media = null;
+      let lastErr = null;
+      for (const [attempt, delayMs] of [0, 1500, 3000, 5000].entries()) {
+        if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+        let target = msg;
+        if (attempt > 0) {
+          try {
+            const chat = await msg.getChat();
+            const recent = await chat.fetchMessages({ limit: 5 });
+            const fresh = recent.find(
+              (m) => m.hasMedia && (m.id?._serialized === msg.id?._serialized || m.body === msg.body),
+            );
+            if (fresh) target = fresh;
+          } catch (err) {
+            lastErr = err;
+          }
+        }
+        try {
+          media = await target.downloadMedia();
+          if (media && media.data) break;
+          media = null;
+        } catch (err) {
+          lastErr = err;
+        }
+      }
+      if (!media) {
+        const detail = lastErr
+          ? JSON.stringify({
+              name: lastErr.name,
+              message: lastErr.message,
+              stack: (lastErr.stack || '').split('\n').slice(0, 4).join(' | '),
+            })
+          : 'empty payload';
+        console.error(`media download failed for ${messageId}: ${detail}`);
         return;
       }
       const res = await fetch(`${BACKEND_URL}/internal/whatsapp-bridge/media`, {

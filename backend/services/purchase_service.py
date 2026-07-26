@@ -79,11 +79,17 @@ def allocate(total: decimal.Decimal, weights: list[decimal.Decimal]) -> list[dec
 @dataclasses.dataclass
 class DraftLine:
     code: str
+    # The costing quantity, in the product's unit. For weight-costed
+    # textile that is total KG, not the piece count -- docs/03_Inventory.md
+    # §2 and docs/04_Purchases.md §12 (line_total = total_weight_kg * rate).
     qty: decimal.Decimal
     rate: decimal.Decimal
     product_id: uuid.UUID | None
     resolved_code: str | None  # actual product code when fuzzy-matched
     unit_code: str | None
+    description: str | None = None  # from the sheet; used when creating
+    pieces: decimal.Decimal | None = None  # sheet's Qty column (rolls/bags)
+    weight_per_unit: decimal.Decimal | None = None  # sheet's KG column
 
     @property
     def line_total(self) -> decimal.Decimal:
@@ -133,6 +139,11 @@ class Draft:
                     "product_id": str(line.product_id) if line.product_id else None,
                     "resolved_code": line.resolved_code,
                     "unit_code": line.unit_code,
+                    "description": line.description,
+                    "pieces": str(line.pieces) if line.pieces is not None else None,
+                    "weight_per_unit": (
+                        str(line.weight_per_unit) if line.weight_per_unit is not None else None
+                    ),
                 }
                 for line in self.lines
             ],
@@ -160,6 +171,15 @@ class Draft:
                     product_id=uuid.UUID(line["product_id"]) if line["product_id"] else None,
                     resolved_code=line["resolved_code"],
                     unit_code=line["unit_code"],
+                    description=line.get("description"),
+                    pieces=(
+                        decimal.Decimal(line["pieces"]) if line.get("pieces") is not None else None
+                    ),
+                    weight_per_unit=(
+                        decimal.Decimal(line["weight_per_unit"])
+                        if line.get("weight_per_unit") is not None
+                        else None
+                    ),
                 )
                 for line in context["lines"]
             ],
@@ -450,8 +470,8 @@ class PurchaseService:
                     line_no=index + 1,
                     product_id=line.product_id,
                     qty=line.qty,
-                    weight_kg=decimal.Decimal("1"),
-                    total_weight_kg=line.qty,
+                    weight_kg=line.weight_per_unit,
+                    total_weight_kg=line.qty if line.weight_per_unit is not None else None,
                     rate=line.rate,
                     line_total=line.line_total,
                     freight_allocated=freight_shares[index],

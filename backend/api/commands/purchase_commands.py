@@ -50,8 +50,10 @@ _CORRECTION = re.compile(
     r"^line\s+(?P<line>\d+)\s+(?P<field>code|qty|rate)\s+(?P<value>.+)$", re.IGNORECASE
 )
 _CREATE_PRODUCT = re.compile(
-    r"^create\s+product\s+(?P<code>[A-Za-z0-9_-]+)\s+(?P<description>.+)$", re.IGNORECASE
+    r"^create\s+product\s+(?P<code>[A-Za-z0-9_-]+)(?:\s+(?P<description>.+))?$",
+    re.IGNORECASE,
 )
+_CREATE_ALL = re.compile(r"^create\s+all\s+products?$", re.IGNORECASE)
 
 CONFIRM_VOCAB = {"confirm", "yes", "ok", "save"}
 
@@ -133,12 +135,20 @@ def render_preview(draft: Draft) -> str:
     for index, line in enumerate(draft.lines, start=1):
         if line.product_id is None:
             lines.append(
-                f"❓ {line.code}  {fmt_qty(line.qty)} × {fmt_money(line.rate)} — unknown product"
+                f"❓ {line.code}"
+                + (f" {line.description}" if line.description else "")
+                + f"  {fmt_qty(line.qty)} × {fmt_money(line.rate)} — unknown product"
             )
-            warnings.append(
-                f"Reply 'create product {line.code} <description>' to add it, "
-                f"or 'line {index} code <CODE>' to correct."
-            )
+            if line.description:
+                warnings.append(
+                    f"Reply 'create product {line.code}' to add it as "
+                    f"'{line.description}', or 'line {index} code <CODE>' to correct."
+                )
+            else:
+                warnings.append(
+                    f"Reply 'create product {line.code} <description>' to add it, "
+                    f"or 'line {index} code <CODE>' to correct."
+                )
             continue
         unit = line.unit_code or "KG"
         matched = (
@@ -146,8 +156,14 @@ def render_preview(draft: Draft) -> str:
             if line.resolved_code and line.resolved_code != line.code
             else ""
         )
+        label = line.description or ""
+        breakdown = ""
+        if line.pieces is not None and line.weight_per_unit is not None:
+            breakdown = f" [{fmt_qty(line.pieces)}×{fmt_qty(line.weight_per_unit)}{unit}]"
         lines.append(
-            f"{line.resolved_code or line.code}  {fmt_qty(line.qty)} {unit} × "
+            f"{line.resolved_code or line.code}"
+            + (f" {label}" if label else "")
+            + f"  {fmt_qty(line.qty)} {unit}{breakdown} × "
             f"{fmt_money(line.rate)} = {fmt_money(line.line_total)}{matched}"
         )
         if line.rate == 0:
@@ -278,17 +294,64 @@ async def handle_purchase_session_reply(
         )
         return CommandResult(reply=render_preview(draft))
 
+    if _CREATE_ALL.match(text.strip()):
+        # A first-ever sheet can carry dozens of unknown codes; creating
+        # them one message at a time is unusable. Only codes the sheet
+        # gave a description for are eligible -- the rest still get asked
+        # about individually rather than invented (docs/04_Purchases.md §10).
+        pending = [
+            line
+            for line in draft.lines
+            if line.product_id is None and line.code and line.description
+        ]
+        if not pending:
+            return CommandResult(
+                reply="Nothing to create — every line either resolved already or has "
+                "no description on the sheet."
+            )
+        created: list[str] = []
+        async with ctx.session_factory() as session:
+            service = PurchaseService(session)
+            async with session.begin():
+                for line in pending:
+                    if any(c == line.code for c in created):
+                        continue
+                    assert line.description is not None
+                    await service.create_product(ctx.user, line.code, line.description)
+                    created.append(line.code)
+        draft = await _resolve_draft(draft, ctx)
+        await sessions.set(
+            ctx.user.org_id, ctx.user.id, AWAITING_PURCHASE_CONFIRMATION, draft.to_context()
+        )
+        return CommandResult(
+            reply=f"✅ Created {len(created)} products: {', '.join(created)}\n\n"
+            + render_preview(draft)
+        )
+
     create_match = _CREATE_PRODUCT.match(text.strip())
     if create_match:
         code = create_match["code"].upper()
         if code not in draft.unresolved_codes:
             return CommandResult(reply=f"'{code}' isn't an unresolved item in this draft.")
+        described = create_match["description"]
+        if not described:
+            described = next(
+                (
+                    line.description
+                    for line in draft.lines
+                    if line.code == code and line.description
+                ),
+                None,
+            )
+        if not described:
+            return CommandResult(
+                reply=f"I don't have a description for {code} — send "
+                f"'create product {code} <description>'."
+            )
         async with ctx.session_factory() as session:
             service = PurchaseService(session)
             async with session.begin():
-                product = await service.create_product(
-                    ctx.user, code, create_match["description"].strip()
-                )
+                product = await service.create_product(ctx.user, code, described.strip())
             unit_code = await service.resolve_product(ctx.user.org_id, code)
             for line in draft.lines:
                 if line.code == code:

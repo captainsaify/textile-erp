@@ -23,6 +23,8 @@ from backend.api.commands.money_commands import (
 )
 from backend.api.commands.ocr_commands import handle_details
 from backend.api.commands.purchase_commands import handle_purchase
+from backend.api.commands.sale_commands import handle_sale
+from backend.api.commands.settlement_commands import handle_paid, handle_received
 from backend.api.commands.stock_commands import handle_search, handle_stock
 from backend.core.security import role_at_least
 from backend.models.enums import UserRole
@@ -66,6 +68,27 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.STAFF,
         handler=handle_purchase,
         help_text="Record a purchase (draft + CONFIRM). Photo OCR arrives soon.",
+    ),
+    "sale": CommandSpec(
+        name="sale",
+        syntax="sale Customer: <name> [cash|bank|credit]\n<CODE> <qty> <rate> ...",
+        min_role=UserRole.STAFF,
+        handler=handle_sale,
+        help_text="Record a sale. Defaults to credit; warns below cost or over limit.",
+    ),
+    "received": CommandSpec(
+        name="received",
+        syntax="received Customer: <name> <amount> <cash|bank> [against <ref>]",
+        min_role=UserRole.STAFF,
+        handler=handle_received,
+        help_text="Record money received from a customer (oldest invoice first).",
+    ),
+    "paid": CommandSpec(
+        name="paid",
+        syntax="paid Supplier: <name> <amount> <cash|bank> [against <invoice>]",
+        min_role=UserRole.STAFF,
+        handler=handle_paid,
+        help_text="Record money paid to a supplier (oldest invoice first).",
     ),
     "details": CommandSpec(
         name="details",

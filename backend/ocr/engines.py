@@ -186,6 +186,9 @@ class PaddleEngine:
         engine = self._load()
         if engine is None:
             return CellText(text="", confidence=0.0, engine=self.name)
+        # Paddle expects HxWx3; the geometry stages work in grayscale
+        if image.ndim == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         try:
             if hasattr(engine, "predict"):
                 result = engine.predict(image)
