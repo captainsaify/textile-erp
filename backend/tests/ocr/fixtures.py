@@ -76,3 +76,43 @@ def rotated_sheet_bytes(angle: float = 3.0) -> bytes:
         borderValue=[255.0],
     )
     return encode(rotated)
+
+
+# The real supplier sheet's layout: S.NO | QTY | DESCRIPTION | (unnamed,
+# carries FOLD) | CODE | LABEL | KG | T.KG. The unnamed column is the
+# thing that broke column alignment in the field.
+WAGDIA_HEADERS = ["S.NO", "QTY", "DESCRIPTION", "", "CODE", "LABEL", "KG", "T.KG"]
+WAGDIA_ROWS = [
+    ["1", "10", "Men Zipper Jacket", "FOLD", "35A", "TOP", "80", "800"],
+    ["2", "19", "Men Zipper Jacket B", "FOLD", "22D", "TOP", "80", "1520"],
+    ["3", "12", "Children Parka", "FOLD", "CPK", "TOP", "80", "960"],
+    ["10", "82", "JOGGING PANT", "FOLD", "TRP", "TOP", "90", "7380"],
+    ["", "322", "TOTAL", "", "", "", "KGS", "27280"],
+]
+
+_W_X = [30, 150, 300, 760, 900, 1090, 1250, 1390]
+_W_W = [110, 140, 450, 130, 180, 150, 130, 190]
+
+
+def render_wagdia_sheet() -> np.ndarray:
+    height = _TOP * 2 + _ROW_H * (len(WAGDIA_ROWS) + 1)
+    width = _W_X[-1] + _W_W[-1] + 40
+    image = np.full((height, width), 255, dtype=np.uint8)
+    for row_index, cells in enumerate([WAGDIA_HEADERS, *WAGDIA_ROWS]):
+        y = _TOP + _ROW_H * row_index
+        for column_index, text in enumerate(cells):
+            if not text:
+                continue
+            cv2.putText(
+                image, text, (_W_X[column_index] + 8, y + 48), _FONT, 0.9, (0,), 2, cv2.LINE_AA
+            )
+    for row_index in range(len(WAGDIA_ROWS) + 2):
+        y = _TOP + _ROW_H * row_index
+        cv2.line(image, (20, y), (width - 20, y), (0,), 2)
+    for x in [x - 8 for x in _W_X] + [width - 20]:
+        cv2.line(image, (x, _TOP), (x, _TOP + _ROW_H * (len(WAGDIA_ROWS) + 1)), (0,), 2)
+    return image
+
+
+def wagdia_sheet_bytes() -> bytes:
+    return encode(render_wagdia_sheet())

@@ -59,10 +59,16 @@ class TableDetectionError(Exception):
     """No usable grid -- caller routes to manual entry (§3)."""
 
 
-def _line_positions(mask: np.ndarray, axis: int, min_gap: int) -> list[int]:
-    """Collapse a line mask to de-duplicated boundary coordinates."""
+def _line_positions(mask: np.ndarray, axis: int, min_gap: int, ratio: float = 0.35) -> list[int]:
+    """Collapse a line mask to de-duplicated boundary coordinates.
+
+    `ratio` is deliberately well below half the strongest line: a real
+    sheet photographed slightly unevenly has fainter rules at one edge,
+    and missing a single boundary merges two columns, which shifts every
+    field after it onto the wrong data.
+    """
     projection = mask.sum(axis=axis)
-    threshold = projection.max() * 0.5 if projection.size and projection.max() else 0
+    threshold = projection.max() * ratio if projection.size and projection.max() else 0
     if threshold == 0:
         return []
     hits = np.where(projection >= threshold)[0]
