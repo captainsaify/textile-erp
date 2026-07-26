@@ -17,6 +17,7 @@ from backend.models import Inventory, InventoryMovement, Product
 @dataclasses.dataclass(frozen=True)
 class StockTotals:
     total_value: decimal.Decimal
+    total_qty: decimal.Decimal
     low_count: int
     negative_count: int
 
@@ -54,6 +55,23 @@ class InventoryRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def movement_history(
+        self, org_id: uuid.UUID, product_id: uuid.UUID, limit: int = 10
+    ) -> list[InventoryMovement]:
+        """Most recent first -- `ledger CODE` (docs/08_WhatsApp.md #ledger:
+        product movement history). Capped rather than paginated, same
+        "reply for more" convention as `stock all`."""
+        stmt = (
+            select(InventoryMovement)
+            .where(
+                InventoryMovement.org_id == org_id,
+                InventoryMovement.product_id == product_id,
+            )
+            .order_by(InventoryMovement.created_at.desc())
+            .limit(limit)
+        )
+        return list((await self._session.execute(stmt)).scalars())
+
     def _low_stock_condition(self) -> ColumnElement[bool]:
         # below reorder level, or negative regardless of reorder config
         # -- docs/03_Inventory.md §7
@@ -66,6 +84,7 @@ class InventoryRepository:
         join = (
             select(
                 func.coalesce(func.sum(Inventory.qty_on_hand * Inventory.weighted_avg_cost), 0),
+                func.coalesce(func.sum(Inventory.qty_on_hand), 0),
                 func.count().filter(self._low_stock_condition()),
                 func.count().filter(Inventory.qty_on_hand < 0),
             )
@@ -77,9 +96,10 @@ class InventoryRepository:
                 Product.is_active.is_(True),
             )
         )
-        value, low, negative = (await self._session.execute(join)).one()
+        value, qty, low, negative = (await self._session.execute(join)).one()
         return StockTotals(
             total_value=decimal.Decimal(value),
+            total_qty=decimal.Decimal(qty),
             low_count=int(low),
             negative_count=int(negative),
         )

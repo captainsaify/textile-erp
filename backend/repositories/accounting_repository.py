@@ -11,7 +11,7 @@ import decimal
 import uuid
 from typing import cast
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import (
@@ -175,6 +175,34 @@ class JournalRepository:
         await self._session.flush()
         return journal
 
+    async def account_rollup(
+        self, org_id: uuid.UUID, start: datetime.date, end: datetime.date
+    ) -> dict[str, tuple[decimal.Decimal, decimal.Decimal]]:
+        """SUM(debit), SUM(credit) per account_code for journal entries
+        dated in [start, end] -- this *is* P&L's source of truth
+        (docs/06_Accounting.md §5), not a re-derivation from the
+        simplified cash/bank ledgers, so the two can never quietly
+        diverge as new transaction types are added."""
+        stmt = (
+            select(
+                JournalLine.account_code,
+                func.coalesce(func.sum(JournalLine.debit), 0),
+                func.coalesce(func.sum(JournalLine.credit), 0),
+            )
+            .join(Journal, Journal.id == JournalLine.journal_id)
+            .where(
+                Journal.org_id == org_id,
+                Journal.entry_date >= start,
+                Journal.entry_date <= end,
+            )
+            .group_by(JournalLine.account_code)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return {
+            str(code): (decimal.Decimal(debit), decimal.Decimal(credit))
+            for code, debit, credit in rows
+        }
+
 
 class ExpenseRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -212,9 +240,9 @@ class IncomeRepository:
         return list((await self._session.execute(stmt)).scalars())
 
 
-async def business_today(session: AsyncSession, org_id: uuid.UUID) -> datetime.date:
-    """The org's local calendar date -- docs/02_Database.md §8: DATE
-    columns hold the business's local date, never UTC 'today'."""
+async def business_now(session: AsyncSession, org_id: uuid.UUID) -> datetime.datetime:
+    """Wall-clock time in the org's local timezone -- for a `dashboard`
+    header timestamp, not just the date. docs/02_Database.md §8."""
     import zoneinfo
 
     from backend.models import Organization
@@ -222,4 +250,10 @@ async def business_today(session: AsyncSession, org_id: uuid.UUID) -> datetime.d
     tz_name = (
         await session.execute(select(Organization.timezone).where(Organization.id == org_id))
     ).scalar_one()
-    return datetime.datetime.now(zoneinfo.ZoneInfo(tz_name)).date()
+    return datetime.datetime.now(zoneinfo.ZoneInfo(tz_name))
+
+
+async def business_today(session: AsyncSession, org_id: uuid.UUID) -> datetime.date:
+    """The org's local calendar date -- docs/02_Database.md §8: DATE
+    columns hold the business's local date, never UTC 'today'."""
+    return (await business_now(session, org_id)).date()

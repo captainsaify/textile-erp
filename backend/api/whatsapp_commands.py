@@ -23,6 +23,14 @@ from backend.api.commands.money_commands import (
 )
 from backend.api.commands.ocr_commands import handle_details
 from backend.api.commands.purchase_commands import handle_purchase
+from backend.api.commands.report_commands import (
+    handle_customer,
+    handle_dashboard,
+    handle_ledger,
+    handle_profit,
+    handle_summary,
+    handle_supplier,
+)
 from backend.api.commands.sale_commands import handle_sale
 from backend.api.commands.settlement_commands import handle_paid, handle_received
 from backend.api.commands.stock_commands import handle_search, handle_stock
@@ -139,6 +147,48 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.STAFF,
         handler=handle_bank,
         help_text="Bank balance and recent entries.",
+    ),
+    "dashboard": CommandSpec(
+        name="dashboard",
+        syntax="dashboard",
+        min_role=UserRole.STAFF,
+        handler=handle_dashboard,
+        help_text="Cash, bank, inventory, today's activity, profit, receivables/payables.",
+    ),
+    "summary": CommandSpec(
+        name="summary",
+        syntax="summary [today|week|month|year|<DD-MM-YYYY> to <DD-MM-YYYY>]",
+        min_role=UserRole.STAFF,
+        handler=handle_summary,
+        help_text="Condensed sales/purchases/expenses/profit digest for a period.",
+    ),
+    "profit": CommandSpec(
+        name="profit",
+        syntax="profit [today|week|month|year|<DD-MM-YYYY> to <DD-MM-YYYY>]",
+        min_role=UserRole.OWNER,
+        handler=handle_profit,
+        help_text="Profit & loss for a period.",
+    ),
+    "supplier": CommandSpec(
+        name="supplier",
+        syntax="supplier <name>",
+        min_role=UserRole.STAFF,
+        handler=handle_supplier,
+        help_text="Outstanding payable, aging, and recent purchases for a supplier.",
+    ),
+    "customer": CommandSpec(
+        name="customer",
+        syntax="customer <name>",
+        min_role=UserRole.STAFF,
+        handler=handle_customer,
+        help_text="Outstanding receivable, aging, and recent sales for a customer.",
+    ),
+    "ledger": CommandSpec(
+        name="ledger",
+        syntax="ledger <supplier|customer> <name>  |  ledger <CODE>",
+        min_role=UserRole.STAFF,
+        handler=handle_ledger,
+        help_text="Statement of invoices/payments for a party, or movement history for a product.",
     ),
     "help": CommandSpec(
         name="help",
