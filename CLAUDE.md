@@ -8,6 +8,11 @@
 > `docs/`. If this file and a doc file disagree, the doc file wins for
 > implementation detail, and this file wins for philosophy/priority.
 
+> **Picking up mid-build?** Read [`HANDOFF.md`](HANDOFF.md) first. It
+> records current state, the build order, and — importantly — which
+> remaining tasks must not be attempted by a smaller model. If you are
+> not Opus, check `HANDOFF.md` §3 before starting.
+
 ## What this is
 
 A production-grade ERP, operated entirely from WhatsApp, for a small
