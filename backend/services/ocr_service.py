@@ -36,7 +36,7 @@ ZERO = decimal.Decimal("0")
 
 _ALNUM = re.compile(r"[^A-Za-z0-9]")
 # how far the sheet's stated total KG may drift from qty x kg before the
-# computed value is preferred
+# disagreement is raised with the user
 _TOTAL_DRIFT_TOLERANCE = decimal.Decimal("0.02")
 _TOTAL_WORD = re.compile(r"^\s*(grand\s*)?totals?\b", re.IGNORECASE)
 # the template's own column labels, for spotting a header band read as data
@@ -70,6 +70,18 @@ _HEADER_WORDS = {
 class ExistingAttachment:
     attachment_id: uuid.UUID
     created_at: datetime.datetime
+
+
+@dataclasses.dataclass(frozen=True)
+class _Quantities:
+    """What one row's quantity columns yield: the value used for costing,
+    the two components it was cross-checked against, and the disagreement
+    to raise with the user if they don't reconcile."""
+
+    costing: decimal.Decimal | None
+    pieces: decimal.Decimal | None
+    per_unit: decimal.Decimal | None
+    mismatch: str | None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -267,12 +279,8 @@ class OcrService:
         return description.lower() in _HEADER_WORDS or code.lower() in _HEADER_WORDS
 
     @classmethod
-    def _costing_quantity(
-        cls, row: ExtractedRow
-    ) -> tuple[decimal.Decimal | None, decimal.Decimal | None, decimal.Decimal | None]:
-        """(costing_qty, pieces, weight_per_unit).
-
-        Textile is costed per KG, so the quantity that drives inventory
+    def _costing_quantity(cls, row: ExtractedRow) -> _Quantities:
+        """Textile is costed per KG, so the quantity that drives inventory
         and line_total is total KG -- the sheet's Qty column counts rolls
         (docs/04_Purchases.md §12). Falls back to pieces for product types
         that carry no weight columns at all.
@@ -285,24 +293,25 @@ class OcrService:
             else None
         )
         computed = pieces * per_unit if pieces is not None and per_unit is not None else None
+        mismatch: str | None = None
         if total is None:
             total = computed
         elif computed is not None and computed > ZERO:
             # The sheet states qty, kg/unit and total kg, so the three are
-            # checkable against each other. A misread digit in any one of
-            # them shows up here; trust the product of the two simpler
-            # cells over the wider total cell, and flag it (§7 -- a wrong
-            # silent value is worse than a visible question).
+            # checkable against each other, and a misread digit in any one
+            # of them shows up here. Which one is wrong is not knowable
+            # from the numbers alone -- an earlier version picked the
+            # computed value and silently overwrote correct totals. So
+            # keep what the sheet states and ask (§7).
             drift = abs(total - computed) / computed
             if drift > _TOTAL_DRIFT_TOLERANCE:
-                logger.info(
-                    "ocr_total_weight_mismatch",
-                    stated=str(total),
-                    computed=str(computed),
+                logger.info("ocr_total_weight_mismatch", stated=str(total), computed=str(computed))
+                mismatch = (
+                    f"total KG says {total}, but {pieces} x {per_unit} = {computed}. "
+                    f"Using {total} — reply with the right number if that's wrong"
                 )
-                total = computed
         costing = total if total is not None else pieces
-        return costing, pieces, per_unit
+        return _Quantities(costing=costing, pieces=pieces, per_unit=per_unit, mismatch=mismatch)
 
     async def _resolve_code(
         self, org_id: uuid.UUID, row: ExtractedRow, supplier_id: uuid.UUID | None
@@ -366,10 +375,13 @@ class OcrService:
             if note:
                 auto_corrections.append(f"Line {index}: {note}")
 
-            qty, pieces, per_unit = self._costing_quantity(row)
+            quantities = self._costing_quantity(row)
+            qty, pieces, per_unit = quantities.costing, quantities.pieces, quantities.per_unit
             if qty is None:
                 low_confidence.append(f"Line {index}, Qty: couldn't read this — what should it be?")
                 qty = ZERO
+            if quantities.mismatch:
+                low_confidence.append(f"Line {index}: {quantities.mismatch}")
 
             description_field = row.fields.get("description")
             description = description_field.text.strip() if description_field else None

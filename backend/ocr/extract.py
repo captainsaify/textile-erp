@@ -14,7 +14,11 @@ from rapidfuzz import fuzz
 from backend.ocr.engines import CellText, DualEngine
 from backend.ocr.table_detect import Cell, Grid
 
-HEADER_MATCH_THRESHOLD = 70  # §5: rapidfuzz ratio >= 0.7
+# §5 puts this at 0.7; 0.65 in practice, because denoising turns a real
+# sheet's "QTY" into "Qry" (ratio 66.7) and dropping the quantity column
+# is far worse than the false match risk across a vocabulary this small
+# and distinctive.
+HEADER_MATCH_THRESHOLD = 65
 HEADER_SCAN_ROWS = 2  # §5: first 1-2 rows are header candidates
 
 AUTO_ACCEPT_CONFIDENCE = 0.90  # §7

@@ -28,7 +28,7 @@ class PreparedImage:
 def decode(data: bytes) -> np.ndarray:
     """Bytes -> BGR image. Raises ValueError on anything undecodable."""
     buffer = np.frombuffer(data, dtype=np.uint8)
-    image = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+    image: np.ndarray | None = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError("could not decode image data")
     return image
@@ -50,17 +50,22 @@ def render_pdf_pages(data: bytes, dpi: int = 300) -> list[bytes]:
 
 
 def estimate_skew(binary: np.ndarray) -> float:
-    """Dominant text-line angle in degrees (§2 step 2)."""
+    """Correction angle in degrees, ready to hand to `rotate` (§2 step 2)."""
     coords = np.column_stack(np.where(binary > 0))
     if coords.shape[0] < 50:
         return 0.0
-    angle = cv2.minAreaRect(coords.astype(np.float32))[-1]
-    # minAreaRect reports [0, 90); map to a signed small correction
-    if angle > 45:
-        angle -= 90
+    # np.where gives (row, col); minAreaRect wants (x, y), and feeding it
+    # the transposed pair negates the angle it reports.
+    points = np.column_stack((coords[:, 1], coords[:, 0])).astype(np.float32)
+    angle = float(cv2.minAreaRect(points)[-1])
+    # OpenCV has reported this in both [-90, 0] and (0, 90] across
+    # versions, and which of the two edges counts as "width" flips with
+    # the ink block's aspect ratio. Folding into (-45, 45] makes every
+    # convention land on the same small signed correction.
+    angle = (angle + 45.0) % 90.0 - 45.0
     if abs(angle) > MAX_DESKEW_DEGREES:
         return 0.0
-    return float(angle)
+    return angle
 
 
 def rotate(image: np.ndarray, angle: float) -> np.ndarray:
@@ -68,20 +73,21 @@ def rotate(image: np.ndarray, angle: float) -> np.ndarray:
         return image
     height, width = image.shape[:2]
     matrix = cv2.getRotationMatrix2D((width / 2, height / 2), angle, 1.0)
-    return cv2.warpAffine(
+    rotated: np.ndarray = cv2.warpAffine(
         image,
         matrix,
         (width, height),
         flags=cv2.INTER_CUBIC,
         borderMode=cv2.BORDER_REPLICATE,
     )
+    return rotated
 
 
 def binarize(gray: np.ndarray) -> np.ndarray:
     """Adaptive threshold, ink=white (§2 step 4). Gaussian + a block size
     large enough to span a text line but small enough to track the
     lighting gradient across a hand-held photo."""
-    return cv2.adaptiveThreshold(
+    thresholded: np.ndarray = cv2.adaptiveThreshold(
         gray,
         255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -89,6 +95,7 @@ def binarize(gray: np.ndarray) -> np.ndarray:
         blockSize=25,
         C=10,
     )
+    return thresholded
 
 
 def _order_corners(points: np.ndarray) -> np.ndarray:
@@ -134,7 +141,8 @@ def warp_to_quad(gray: np.ndarray, quad: np.ndarray) -> np.ndarray:
         [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]], dtype=np.float32
     )
     matrix = cv2.getPerspectiveTransform(quad, destination)
-    return cv2.warpPerspective(gray, matrix, (width, height), flags=cv2.INTER_CUBIC)
+    warped: np.ndarray = cv2.warpPerspective(gray, matrix, (width, height), flags=cv2.INTER_CUBIC)
+    return warped
 
 
 def prepare(data: bytes, *, denoise: bool = True) -> PreparedImage:

@@ -19,7 +19,8 @@ from backend.api.formatting import fmt_date, fmt_qty
 from backend.core.exceptions import DomainError, ValidationError
 from backend.core.logging import get_logger
 from backend.ocr.engines import DualEngine, PaddleEngine, TesseractEngine
-from backend.ocr.pipeline import OcrFailure, parse_sheet
+from backend.ocr.pipeline import OcrFailure, ParsedSheet, parse_sheet
+from backend.ocr.vision_engine import VisionSheetReader, VisionUnavailableError
 from backend.services.ocr_service import OcrService
 from backend.services.purchase_service import Draft, PurchaseService
 from backend.services.session_service import (
@@ -173,7 +174,6 @@ async def process_purchase_photo(
     """Photo/PDF -> attachment -> OCR -> draft -> preview. Runs in the
     request's background task; never raises into the caller."""
     org_id = ctx.user.org_id
-    settings_engine = None
     async with ctx.session_factory() as session:
         service = OcrService(session)
         sha256_hash = service.hash_bytes(data)
@@ -196,13 +196,49 @@ async def process_purchase_photo(
                 "use the 'purchase' command to enter this manually."
             )
 
-    from backend.core.config import get_settings
-
-    settings_engine = get_settings().ocr_primary_engine
     import asyncio
 
+    from backend.core.config import get_settings
+    from backend.ocr.extract import ExtractionResult
+
+    settings = get_settings()
+    sheet: ParsedSheet | None = None
+    engine_used = "local"
+    supplier_hint = ""
+    invoice_hint = ""
+
+    # Vision first: it reads the table as a table, so an unnamed column or a
+    # slightly angled photo isn't a silent field shift. Any failure -- no
+    # key, refusal, transport -- falls through to the local pipeline.
+    if settings.ocr_use_vision:
+        reader = VisionSheetReader()
+        if reader.available():
+            try:
+                vision = await asyncio.to_thread(reader.read_sheet, data, mime_type)
+                if vision.rows:
+                    sheet = ParsedSheet(
+                        extraction=ExtractionResult(
+                            columns=[],
+                            rows=vision.rows,
+                            unmapped_headers=[],
+                            grid_confidence=1.0,
+                            engines=[f"claude-vision:{vision.model}"],
+                        ),
+                        deskew_angle=0.0,
+                        cropped=False,
+                        page_count=1,
+                    )
+                    engine_used = "vision"
+                    supplier_hint = vision.supplier_name
+                    invoice_hint = vision.invoice_no
+            except VisionUnavailableError as exc:
+                logger.warning("vision_read_failed_falling_back", error=str(exc))
+
     try:
-        sheet = await asyncio.to_thread(parse_sheet, data, mappings, build_engine(settings_engine))
+        if sheet is None:
+            sheet = await asyncio.to_thread(
+                parse_sheet, data, mappings, build_engine(settings.ocr_primary_engine)
+            )
     except OcrFailure as exc:
         async with ctx.session_factory() as session, session.begin():
             await OcrService(session).mark_attachment(attachment_id, "failed")
@@ -219,10 +255,16 @@ async def process_purchase_photo(
             "command to enter it manually."
         )
 
+    assert sheet is not None  # set by vision or parse_sheet, else we returned above
     async with ctx.session_factory() as session:
         service = OcrService(session)
         async with session.begin():
-            build = await service.build_draft(org_id, sheet)
+            build = await service.build_draft(
+                org_id,
+                sheet,
+                supplier_name=supplier_hint,
+                invoice_no=invoice_hint,
+            )
             await service.mark_attachment(
                 attachment_id,
                 "processed",
@@ -231,6 +273,7 @@ async def process_purchase_photo(
                     "columns": [c.field for c in sheet.extraction.columns],
                     "grid_confidence": sheet.extraction.grid_confidence,
                     "engines": sheet.extraction.engines,
+                    "engine_used": engine_used,
                 },
             )
 

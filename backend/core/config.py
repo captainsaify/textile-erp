@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     # always the fallback, and an unavailable engine degrades silently.
     ocr_primary_engine: str = "paddle"
 
+    # Read sheets with Claude vision before falling back to local OCR.
+    # Local OCR's accuracy is bounded by grid detection on a photo; a
+    # vision model reads the table as a table. Needs anthropic_api_key.
+    ocr_use_vision: bool = True
+    vision_model: str = "claude-opus-5"
+
     @property
     def is_local(self) -> bool:
         return self.environment == "local"

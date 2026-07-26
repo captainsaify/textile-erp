@@ -24,6 +24,7 @@ dependencies = [
     "pytesseract>=0.3.13",
     "pillow>=11.0",
     "pdf2image>=1.17",
+    "anthropic>=0.69",
 ]
 
 [dependency-groups]
@@ -57,7 +58,7 @@ exclude = ["alembic/versions"]
 # OCR engines ship no type stubs; their call sites are narrowly wrapped
 # in backend/ocr/engines.py and guarded at runtime.
 [[tool.mypy.overrides]]
-module = ["pytesseract.*", "paddleocr.*", "pdf2image.*"]
+module = ["pytesseract.*", "paddleocr.*", "pdf2image.*", "cv2.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

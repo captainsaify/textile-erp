@@ -108,9 +108,18 @@ def test_blank_image_reports_failure() -> None:
         parse_sheet(bytes(buffer), TEXTILE_MAPPINGS)
 
 
-def test_deskew_corrects_rotation() -> None:
-    prepared = prepare(rotated_sheet_bytes(3.0), denoise=False)
-    assert abs(prepared.deskew_angle) > 0.5  # detected and corrected something
+@pytest.mark.parametrize("tilt", [3.0, -3.0, 7.0, -7.0])
+def test_deskew_corrects_rotation(tilt: float) -> None:
+    """Asserting only 'some angle was detected' let a sign inversion
+    through: negative tilts were rotated further out of true."""
+    from backend.ocr.preprocess import binarize, estimate_skew
+
+    prepared = prepare(rotated_sheet_bytes(tilt), denoise=False)
+    assert prepared.deskew_angle == pytest.approx(-tilt, abs=0.5)
+    # and the result is much closer to level than it started. Not an
+    # absolute bound: rotating the fixture leaves clipped corners that
+    # bias the residual measurement more the further it is tilted.
+    assert abs(estimate_skew(binarize(prepared.gray))) < abs(tilt) / 2
 
 
 def test_parse_sheet_reads_codes_and_quantities(engine: DualEngine) -> None:

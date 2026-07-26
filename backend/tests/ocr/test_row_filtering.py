@@ -50,26 +50,25 @@ def test_blank_filler_rows_are_dropped() -> None:
 
 
 def test_costing_quantity_prefers_total_kg() -> None:
-    qty, pieces, per_unit = OcrService._costing_quantity(
-        row(qty="10", weight_kg="8.2", total_weight_kg="82")
-    )
-    assert qty == D("82")  # KG drives costing, not the 10 rolls
-    assert pieces == D("10")
-    assert per_unit == D("8.2")
+    q = OcrService._costing_quantity(row(qty="10", weight_kg="8.2", total_weight_kg="82"))
+    assert q.costing == D("82")  # KG drives costing, not the 10 rolls
+    assert q.pieces == D("10")
+    assert q.per_unit == D("8.2")
+    assert q.mismatch is None
 
 
 def test_costing_quantity_multiplies_when_total_missing() -> None:
-    qty, pieces, per_unit = OcrService._costing_quantity(row(qty="4", weight_kg="2.5"))
-    assert qty == D("10.0")
-    assert pieces == D("4")
-    assert per_unit == D("2.5")
+    q = OcrService._costing_quantity(row(qty="4", weight_kg="2.5"))
+    assert q.costing == D("10.0")
+    assert q.pieces == D("4")
+    assert q.per_unit == D("2.5")
 
 
 def test_costing_quantity_falls_back_to_pieces() -> None:
-    qty, pieces, per_unit = OcrService._costing_quantity(row(qty="7"))
-    assert qty == D("7")
-    assert pieces == D("7")
-    assert per_unit is None
+    q = OcrService._costing_quantity(row(qty="7"))
+    assert q.costing == D("7")
+    assert q.pieces == D("7")
+    assert q.per_unit is None
 
 
 def test_totals_row_of_bare_rules_is_dropped() -> None:
@@ -77,16 +76,19 @@ def test_totals_row_of_bare_rules_is_dropped() -> None:
     assert OcrService._is_noise_row(row(code="|", description="||", total_weight_kg="27280"))
 
 
-def test_stated_total_losing_to_computed_when_they_disagree() -> None:
-    # sheet says 2 kg but states 82 rolls x 90 kg -- a misread digit
-    qty, pieces, per_unit = OcrService._costing_quantity(
-        row(qty="82", weight_kg="90", total_weight_kg="2")
-    )
-    assert qty == D("7380")
-    assert pieces == D("82")
+def test_disagreeing_total_is_flagged_not_overruled() -> None:
+    """Preferring the computed value here silently replaced correct
+    totals on a real sheet (a 1520 became 28800). Which cell misread is
+    not decidable from the numbers, so the sheet's own figure stands and
+    the user is asked."""
+    q = OcrService._costing_quantity(row(qty="82", weight_kg="90", total_weight_kg="2"))
+    assert q.costing == D("2")  # what the sheet states
+    assert q.mismatch is not None
+    assert "7380" in q.mismatch  # and what qty x kg would make it
 
 
 def test_stated_total_kept_when_consistent() -> None:
     # rounding slack within tolerance leaves the sheet's own figure alone
-    qty, _, _ = OcrService._costing_quantity(row(qty="3", weight_kg="10.1", total_weight_kg="30.3"))
-    assert qty == D("30.3")
+    q = OcrService._costing_quantity(row(qty="3", weight_kg="10.1", total_weight_kg="30.3"))
+    assert q.costing == D("30.3")
+    assert q.mismatch is None
