@@ -94,12 +94,19 @@ class Product(UUIDPkMixin, OrgScopedMixin, Base):
     __tablename__ = "products"
     __table_args__ = (
         # Case-insensitive, soft-delete-aware code uniqueness -- §3.7 + §4.
+        # Scoped by brand: suppliers reuse short codes like VVP or MJP
+        # across brands, so a code is only unique *within* a brand.
+        # NULLS NOT DISTINCT keeps that honest for brandless products --
+        # without it Postgres treats every NULL brand as unique and the
+        # same unbranded code could be inserted twice.
         Index(
             "products_org_code_active_uq",
             "org_id",
             text("upper(code)"),
+            "brand_id",
             unique=True,
             postgresql_where=text("deleted_at IS NULL"),
+            postgresql_nulls_not_distinct=True,
         ),
         Index(
             "idx_products_org_type",

@@ -238,11 +238,13 @@ class PurchaseService:
             return best
         return None
 
-    async def resolve_product(self, org_id: uuid.UUID, code: str) -> Product | None:
-        exact = await self._products.get_by_code(org_id, code)
+    async def resolve_product(
+        self, org_id: uuid.UUID, code: str, brand_id: uuid.UUID | None = None
+    ) -> Product | None:
+        exact = await self._products.get_by_code(org_id, code, brand_id)
         if exact is not None:
             return exact
-        candidates = await self._products.search(org_id, code, limit=1)
+        candidates = await self._products.search(org_id, code, limit=1, brand_id=brand_id)
         if (
             candidates
             and fuzz.ratio(candidates[0].code.lower(), code.lower()) >= PRODUCT_MATCH_THRESHOLD
@@ -283,10 +285,14 @@ class PurchaseService:
         )
         return supplier
 
-    async def create_product(self, actor: User, code: str, description: str) -> Product:
+    async def create_product(
+        self, actor: User, code: str, description: str, brand_id: uuid.UUID | None = None
+    ) -> Product:
         """New product on the org's (single, for now) product type with
         that type's default unit -- never auto-created without the user
-        asking (docs/04_Purchases.md §10)."""
+        asking (docs/04_Purchases.md §10). The brand is part of the
+        product's identity: the same code under a different brand is a
+        different product, not a duplicate."""
         from sqlalchemy import select
 
         from backend.models import ProductType
@@ -301,6 +307,7 @@ class PurchaseService:
             product_type_id=product_type.id,
             code=code.upper(),
             description=description,
+            brand_id=brand_id,
             unit_id=product_type.default_unit_id,
             created_by=actor.id,
         )
@@ -312,7 +319,11 @@ class PurchaseService:
             action="product.created",
             entity_type="products",
             entity_id=product.id,
-            after_state={"code": product.code, "description": description},
+            after_state={
+                "code": product.code,
+                "description": description,
+                "brand_id": str(brand_id) if brand_id else None,
+            },
         )
         return product
 
@@ -469,6 +480,7 @@ class PurchaseService:
                     purchase_header_id=header.id,
                     line_no=index + 1,
                     product_id=line.product_id,
+                    description=line.description,
                     qty=line.qty,
                     weight_kg=line.weight_per_unit,
                     total_weight_kg=line.qty if line.weight_per_unit is not None else None,

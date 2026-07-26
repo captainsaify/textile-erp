@@ -154,13 +154,23 @@ async def handle_details(args: str, ctx: RequestContext) -> CommandResult:
             async with session.begin():
                 brand = await service.resolve_or_create_brand(ctx.user.org_id, draft.brand_name)
                 draft.brand_id = brand.id
+        # Re-resolved now, not only when unresolved: the brand arrives with
+        # this command, and codes are only unique within a brand, so a
+        # match made before the brand was known may point at the wrong
+        # brand's product.
         for line in draft.lines:
-            if line.product_id is None and line.code:
-                product = await service.resolve_product(ctx.user.org_id, line.code)
-                if product is not None:
-                    line.product_id = product.id
-                    line.resolved_code = product.code
-                    line.unit_code = product.unit.code
+            if not line.code:
+                continue
+            product = await service.resolve_product(ctx.user.org_id, line.code, draft.brand_id)
+            if product is not None:
+                line.product_id = product.id
+                line.resolved_code = product.code
+                line.unit_code = product.unit.code
+            elif draft.brand_id is not None:
+                # ambiguous or foreign-brand match -- let it be created
+                # under this brand rather than silently reusing another's
+                line.product_id = None
+                line.resolved_code = None
 
     await sessions.set(
         ctx.user.org_id, ctx.user.id, AWAITING_PURCHASE_CONFIRMATION, draft.to_context()

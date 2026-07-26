@@ -64,17 +64,22 @@ class StockService:
             totals=await self._inventory.totals(org_id),
         )
 
-    async def detail(self, org_id: uuid.UUID, code: str) -> StockDetail | None:
-        product = await self._products.get_by_code(org_id, code)
-        if product is None:
-            return None
-        inventory = await self._inventory.get_for_product(org_id, product.id)
-        return StockDetail(
-            product=product,
-            qty_on_hand=inventory.qty_on_hand if inventory else ZERO,
-            weighted_avg_cost=inventory.weighted_avg_cost if inventory else ZERO,
-            last_movement=await self._inventory.last_movement(org_id, product.id),
-        )
+    async def details(self, org_id: uuid.UUID, code: str) -> list[StockDetail]:
+        """Every product carrying this code -- more than one when brands
+        share it. The caller shows them all rather than picking, since
+        which brand was meant isn't knowable from the code alone."""
+        details: list[StockDetail] = []
+        for product in await self._products.list_by_code(org_id, code):
+            inventory = await self._inventory.get_for_product(org_id, product.id)
+            details.append(
+                StockDetail(
+                    product=product,
+                    qty_on_hand=inventory.qty_on_hand if inventory else ZERO,
+                    weighted_avg_cost=inventory.weighted_avg_cost if inventory else ZERO,
+                    last_movement=await self._inventory.last_movement(org_id, product.id),
+                )
+            )
+        return details
 
     async def suggest_codes(self, org_id: uuid.UUID, query: str) -> list[str]:
         return [p.code for p in await self._products.search(org_id, query, limit=3)]

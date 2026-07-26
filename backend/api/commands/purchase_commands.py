@@ -240,7 +240,7 @@ async def _resolve_draft(draft: Draft, ctx: RequestContext) -> Draft:
                 draft.brand_id = brand.id
         for line in draft.lines:
             if line.product_id is None:
-                product = await service.resolve_product(org_id, line.code)
+                product = await service.resolve_product(org_id, line.code, draft.brand_id)
                 if product is not None:
                     line.product_id = product.id
                     line.resolved_code = product.code
@@ -317,7 +317,9 @@ async def handle_purchase_session_reply(
                     if any(c == line.code for c in created):
                         continue
                     assert line.description is not None
-                    await service.create_product(ctx.user, line.code, line.description)
+                    await service.create_product(
+                        ctx.user, line.code, line.description, draft.brand_id
+                    )
                     created.append(line.code)
         draft = await _resolve_draft(draft, ctx)
         await sessions.set(
@@ -351,8 +353,10 @@ async def handle_purchase_session_reply(
         async with ctx.session_factory() as session:
             service = PurchaseService(session)
             async with session.begin():
-                product = await service.create_product(ctx.user, code, described.strip())
-            unit_code = await service.resolve_product(ctx.user.org_id, code)
+                product = await service.create_product(
+                    ctx.user, code, described.strip(), draft.brand_id
+                )
+            unit_code = await service.resolve_product(ctx.user.org_id, code, draft.brand_id)
             for line in draft.lines:
                 if line.code == code:
                     line.product_id = product.id

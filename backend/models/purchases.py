@@ -131,6 +131,11 @@ class PurchaseLine(UUIDPkMixin, OrgScopedMixin, Base):
     product_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("products.id"), nullable=False
     )
+    # The description exactly as it appeared on this invoice. The
+    # canonical name lives on products.description; this records what the
+    # supplier called it that day, which drifts and is worth keeping for
+    # audit against the original sheet.
+    description: Mapped[str | None] = mapped_column(String)
     qty: Mapped[decimal.Decimal] = mapped_column(QTY, nullable=False)
     weight_kg: Mapped[decimal.Decimal | None] = mapped_column(QTY)
     total_weight_kg: Mapped[decimal.Decimal | None] = mapped_column(QTY)

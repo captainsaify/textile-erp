@@ -64,12 +64,27 @@ async def handle_stock(args: str, ctx: RequestContext) -> CommandResult:
                 reply="\n".join([f"{title} ({len(rows)} items):", *_low_stock_lines(rows)])
             )
 
-        detail = await service.detail(org_id, sub)
-        if detail is None:
+        found = await service.details(org_id, sub)
+        if not found:
             suggestions = await service.suggest_codes(org_id, sub)
             hint = f" Did you mean {', '.join(suggestions)}?" if suggestions else ""
             return CommandResult(reply=f"Product '{sub}' not found.{hint}")
 
+        if len(found) > 1:
+            # the same code under several brands -- show each rather than
+            # guessing which one was meant
+            lines = [f"📦 {sub.upper()} is stocked under {len(found)} brands:"]
+            for entry in found:
+                label = entry.product.brand.name if entry.product.brand else "no brand"
+                unit_code = entry.product.unit.code
+                lines.append(
+                    f"• {label} — {entry.product.description}: "
+                    f"{fmt_qty(entry.qty_on_hand)} {unit_code} "
+                    f"@ {fmt_money(entry.weighted_avg_cost)}/{unit_code}"
+                )
+            return CommandResult(reply="\n".join(lines))
+
+        detail = found[0]
         product = detail.product
         unit = product.unit.code
         brand = f" ({product.brand.name})" if product.brand else ""

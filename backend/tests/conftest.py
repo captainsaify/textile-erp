@@ -86,6 +86,7 @@ _PURGE_ORDER = (
     "ocr_learning_dictionary",
     "attachments",
     "products",
+    "brands",  # after products: products.brand_id references it
     "suppliers",
     "customers",
     "whatsapp_sessions",

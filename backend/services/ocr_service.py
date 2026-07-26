@@ -314,7 +314,11 @@ class OcrService:
         return _Quantities(costing=costing, pieces=pieces, per_unit=per_unit, mismatch=mismatch)
 
     async def _resolve_code(
-        self, org_id: uuid.UUID, row: ExtractedRow, supplier_id: uuid.UUID | None
+        self,
+        org_id: uuid.UUID,
+        row: ExtractedRow,
+        supplier_id: uuid.UUID | None,
+        brand_id: uuid.UUID | None = None,
     ) -> tuple[str, uuid.UUID | None, str | None, str | None]:
         """Returns (code_for_draft, product_id, unit_code, auto_correction_note)."""
         field = row.fields.get("code")
@@ -330,16 +334,18 @@ class OcrService:
         if not raw:
             description = row.fields.get("description")
             if description and description.text.strip():
-                matches = await self._products.search(org_id, description.text.strip(), limit=1)
+                matches = await self._products.search(
+                    org_id, description.text.strip(), limit=1, brand_id=brand_id
+                )
                 if matches:
                     return matches[0].code, matches[0].id, matches[0].unit.code, note
             return "", None, None, note
 
-        exact = await self._products.get_by_code(org_id, raw)
+        exact = await self._products.get_by_code(org_id, raw, brand_id)
         if exact is not None:
             return exact.code, exact.id, exact.unit.code, note
 
-        matches = await self._products.search(org_id, raw, limit=1)
+        matches = await self._products.search(org_id, raw, limit=1, brand_id=brand_id)
         if matches:
             from rapidfuzz import fuzz
 
@@ -357,6 +363,7 @@ class OcrService:
         supplier_name: str = "",
         invoice_no: str = "",
         invoice_date: datetime.date | None = None,
+        brand_id: uuid.UUID | None = None,
     ) -> DraftBuild:
         """ParsedSheet -> the same Draft the typed command produces, so
         both paths share one confirmation flow."""
@@ -371,7 +378,9 @@ class OcrService:
                 skipped += 1
                 continue
             index += 1
-            code, product_id, unit_code, note = await self._resolve_code(org_id, row, supplier_id)
+            code, product_id, unit_code, note = await self._resolve_code(
+                org_id, row, supplier_id, brand_id
+            )
             if note:
                 auto_corrections.append(f"Line {index}: {note}")
 
@@ -418,7 +427,7 @@ class OcrService:
             supplier_name=supplier_name,
             invoice_no=invoice_no,
             invoice_date=invoice_date or datetime.date.today(),
-            brand_id=None,
+            brand_id=brand_id,
             brand_name=None,
             lines=lines,
             freight=ZERO,

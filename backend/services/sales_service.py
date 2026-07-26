@@ -231,6 +231,13 @@ class SalesService:
             if line.product_id is None:
                 product = await self._products.get_by_code(org_id, line.code)
                 if product is None:
+                    carriers = await self._products.list_by_code(org_id, line.code)
+                    if len(carriers) > 1:
+                        # the code exists but under several brands. Fuzzy
+                        # search would happily return one of them; selling
+                        # the wrong brand's stock is worse than asking.
+                        continue
+                if product is None:
                     matches = await self._products.search(org_id, line.code, limit=1)
                     product = matches[0] if matches else None
                 if product is not None:
