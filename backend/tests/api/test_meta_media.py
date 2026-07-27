@@ -100,8 +100,10 @@ async def test_photo_is_fetched_and_parsed(
 
     assert client.fetched == ["MEDIA123"]
     bodies = [body for _, body in client.sent]
-    assert any("Reading your sheet" in body for body in bodies)
-    assert any("Read 3 items from your sheet" in body for body in bodies), bodies
+    # OCR has not run yet -- the photo is stored and its purpose asked
+    # first, so a mis-sent picture never spends a vision call (docs/20 §2)
+    assert any("What is it?" in body for body in bodies), bodies
+    assert not any("Read 3 items" in body for body in bodies), bodies
     # never the text-only brush-off
     assert not any("only read text commands" in body for body in bodies)
 

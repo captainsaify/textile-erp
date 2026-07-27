@@ -39,7 +39,7 @@ class FakeSender:
 
 
 @pytest.fixture
-async def redis_client() -> AsyncIterator[aioredis.Redis]:
+async def redis_client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[aioredis.Redis]:
     client = aioredis.from_url(  # type: ignore[no-untyped-call]
         "redis://localhost:6379/9", decode_responses=True
     )
@@ -47,6 +47,10 @@ async def redis_client() -> AsyncIterator[aioredis.Redis]:
         await client.ping()
     except Exception:  # noqa: BLE001 -- unreachable Redis means skip, not error
         pytest.skip("local Redis not reachable")
+    # Command handlers build SessionService without an explicit client and
+    # so reach for the global one; in production that *is* this client, and
+    # a test where the two differ tests a split brain that cannot happen.
+    monkeypatch.setattr("backend.core.redis._client", client)
     yield client
     await client.aclose()
 

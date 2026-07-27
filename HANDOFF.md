@@ -58,8 +58,8 @@ implementation is most dangerous.
   Claude vision, vision-first with automatic fallback.
 - Celery workers, Beat schedule, nightly reconciliation, Excel export,
   backup/restore, and the full Docker/Nginx deployment layer.
-- 270 tests pass, fixed and random order. `mypy --strict` clean across
-  128 files. `ruff` clean.
+- 343 tests pass, fixed and random order. `mypy --strict` clean across
+  141 files. `ruff` clean.
 
 **Live OCR result on the user's real 26-item purchase sheet:** all 26
 rows correct, confirmed independently — the costing quantities sum to
@@ -79,8 +79,9 @@ exist for the remaining work:
   **Phases 1 and 2 done.** Phase 3 (Flows) deliberately not built; doc
   20 supersedes it, see that doc's §11.
 - [`docs/20_ConversationalIntake.md`](docs/20_ConversationalIntake.md) —
-  photo → intent → one question at a time. **Now unblocked; this is the
-  next task.**
+  photo → intent → one question at a time. **Phase 1 done** (the OCR
+  intake path); Phases 2–3 (command wizards, main menu, handwriting
+  confirmation) are the next task.
 - [`docs/21_WebDashboard.md`](docs/21_WebDashboard.md) — dashboard
   forms, no-build stack, deployment on `example.com`.
 
@@ -108,7 +109,15 @@ fine (`openssl req -x509 -newkey rsa:2048 -nodes -days 365 -keyout
 docker/certs/privkey.pem -out docker/certs/fullchain.pem -subj
 /CN=localhost`). That directory is gitignored.
 
-**Two traps this shook out, both now pinned by tests:**
+**One trap from the intake work, now pinned by a test:** a photo is
+stored and its purpose asked *before* any OCR runs. A vision call costs
+roughly ₹4–5, and the old flow spent it on every mis-sent picture. The
+consequence for anyone editing this: `process_purchase_photo` no longer
+returns a draft — it returns the intent question, and
+`read_stored_sheet` is what actually reads the file once the answer
+arrives.
+
+**Two traps the deployment work shook out, both now pinned by tests:**
 
 1. **`/app` is root-owned on purpose** — the app must not be able to
    rewrite its own code. Anything needing to write goes under `/data`.

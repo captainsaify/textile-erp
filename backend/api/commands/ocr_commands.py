@@ -9,21 +9,27 @@ for via `details ...`, the template's required_manual_fields.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import decimal
 import re
+import uuid
+from pathlib import Path
 
 from backend.api.command_types import CommandResult, RequestContext
+from backend.api.commands.intake_commands import ask_intent, begin_slots, missing_slots
 from backend.api.commands.purchase_commands import preview_result
 from backend.api.formatting import fmt_date, fmt_qty
 from backend.core.exceptions import DomainError, ValidationError
 from backend.core.logging import get_logger
+from backend.models import Attachment
 from backend.ocr.engines import DualEngine, PaddleEngine, TesseractEngine
 from backend.ocr.pipeline import OcrFailure, ParsedSheet, parse_sheet
 from backend.ocr.vision_engine import VisionSheetReader, VisionUnavailableError
 from backend.services.ocr_service import OcrService
 from backend.services.purchase_service import Draft, PurchaseService
 from backend.services.session_service import (
+    AWAITING_INTENT,
     AWAITING_PURCHASE_CONFIRMATION,
     SessionService,
 )
@@ -98,8 +104,28 @@ def render_ocr_result(
         lines.append(
             f"ℹ️ That PDF has {page_count} pages; I read page 1. Send the other pages separately."
         )
-    lines.append(DETAILS_PROMPT)
     return "\n".join(lines)
+
+
+#: Date formats a sheet actually prints, most specific first.
+_DATE_HINT_FORMATS = ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%y", "%d/%m/%y", "%d.%m.%Y")
+
+
+def apply_date_hint(draft: Draft, hint: str) -> bool:
+    """Set the draft's date from what the sheet printed. Returns whether
+    the sheet actually stated a date -- an unreadable or absent one
+    becomes a question rather than today's date silently standing in."""
+    text = hint.strip()
+    if not text:
+        return False
+    for fmt in _DATE_HINT_FORMATS:
+        try:
+            draft.invoice_date = datetime.datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+        return True
+    logger.info("ocr_invoice_date_unparsed", value=text)
+    return False
 
 
 def apply_details(draft: Draft, args: str) -> Draft:
@@ -149,6 +175,17 @@ async def handle_details(args: str, ctx: RequestContext) -> CommandResult:
     except DomainError as exc:
         return CommandResult(reply=exc.message)
 
+    draft = await resolve_after_details(draft, ctx)
+    await sessions.set(
+        ctx.user.org_id, ctx.user.id, AWAITING_PURCHASE_CONFIRMATION, draft.to_context()
+    )
+    return preview_result(draft)
+
+
+async def resolve_after_details(draft: Draft, ctx: RequestContext) -> Draft:
+    """Match the draft against the catalogue once supplier/brand are
+    known. Shared by `details` and the slot machine so both produce an
+    identically-resolved draft (docs/20 §10)."""
     async with ctx.session_factory() as session:
         service = PurchaseService(session)
         supplier = await service.resolve_supplier(ctx.user.org_id, draft.supplier_name)
@@ -176,18 +213,19 @@ async def handle_details(args: str, ctx: RequestContext) -> CommandResult:
                 # under this brand rather than silently reusing another's
                 line.product_id = None
                 line.resolved_code = None
-
-    await sessions.set(
-        ctx.user.org_id, ctx.user.id, AWAITING_PURCHASE_CONFIRMATION, draft.to_context()
-    )
-    return preview_result(draft)
+    return draft
 
 
 async def process_purchase_photo(
     data: bytes, mime_type: str, media_id: str | None, ctx: RequestContext
 ) -> CommandResult:
-    """Photo/PDF -> attachment -> OCR -> draft -> preview. Runs in the
-    request's background task; never raises into the caller."""
+    """Store the photo and ask what it is. OCR does *not* run yet.
+
+    Asking first means a mis-sent picture never spends a vision call,
+    and the extraction can be told what it is reading
+    (docs/20_ConversationalIntake.md §2). The bytes are already safely
+    on disk as an attachment, so the answer can arrive minutes later.
+    """
     org_id = ctx.user.org_id
     async with ctx.session_factory() as session:
         service = OcrService(session)
@@ -204,12 +242,40 @@ async def process_purchase_photo(
                 ctx.user, data=data, mime_type=mime_type, whatsapp_media_id=media_id
             )
             attachment_id = attachment.id
-            mappings = await service.resolve_template(org_id)
-        if not mappings:
-            return CommandResult(
-                reply="No OCR template is configured for this business yet — "
-                "use the 'purchase' command to enter this manually."
-            )
+
+    await SessionService(ctx.session_factory).set(
+        org_id, ctx.user.id, AWAITING_INTENT, {"attachment_id": str(attachment_id)}
+    )
+    return ask_intent()
+
+
+async def read_stored_sheet(attachment_id_text: str, ctx: RequestContext) -> CommandResult:
+    """Now that we know it's a purchase, read it -- then ask only for
+    what the sheet didn't carry."""
+    org_id = ctx.user.org_id
+    try:
+        attachment_id = uuid.UUID(attachment_id_text)
+    except ValueError:
+        return CommandResult(reply="That photo has expired — please send it again.")
+
+    async with ctx.session_factory() as session:
+        service = OcrService(session)
+        attachment = await session.get(Attachment, attachment_id)
+        if attachment is None or attachment.org_id != org_id:
+            return CommandResult(reply="That photo has expired — please send it again.")
+        mappings = await service.resolve_template(org_id)
+        file_path, mime_type = attachment.file_path, attachment.mime_type
+    if not mappings:
+        return CommandResult(
+            reply="No OCR template is configured for this business yet — "
+            "use the 'purchase' command to enter this manually."
+        )
+    try:
+        data = Path(file_path).read_bytes()
+    except OSError:
+        return CommandResult(reply="I can't find that photo any more — please send it again.")
+
+    await ctx.say("📸 Reading your sheet, one moment…")
 
     import asyncio
 
@@ -221,6 +287,7 @@ async def process_purchase_photo(
     engine_used = "local"
     supplier_hint = ""
     invoice_hint = ""
+    date_hint = ""
 
     # Vision first: it reads the table as a table, so an unnamed column or a
     # slightly angled photo isn't a silent field shift. Any failure -- no
@@ -246,6 +313,7 @@ async def process_purchase_photo(
                     engine_used = "vision"
                     supplier_hint = vision.supplier_name
                     invoice_hint = vision.invoice_no
+                    date_hint = vision.invoice_date
             except VisionUnavailableError as exc:
                 logger.warning("vision_read_failed_falling_back", error=str(exc))
 
@@ -293,16 +361,20 @@ async def process_purchase_photo(
                 },
             )
 
-    await SessionService(ctx.session_factory).set(
-        org_id, ctx.user.id, AWAITING_PURCHASE_CONFIRMATION, build.draft.to_context()
+    # A Draft always carries *some* date (it defaults to today), so
+    # "did the sheet state one?" can only be answered here, from the hint.
+    date_known = apply_date_hint(build.draft, date_hint)
+
+    # gap analysis, then one question per gap -- instead of a template
+    # the partner has to memorise (docs/20 §2)
+    queue = missing_slots(build.draft, date_known=date_known)
+    detail = render_ocr_result(
+        build.draft,
+        low_confidence=build.low_confidence_notes,
+        auto_corrections=build.auto_corrections,
+        unmapped_headers=build.unmapped_headers,
+        hard_to_read=build.hard_to_read,
+        page_count=sheet.page_count,
     )
-    return CommandResult(
-        reply=render_ocr_result(
-            build.draft,
-            low_confidence=build.low_confidence_notes,
-            auto_corrections=build.auto_corrections,
-            unmapped_headers=build.unmapped_headers,
-            hard_to_read=build.hard_to_read,
-            page_count=sheet.page_count,
-        )
-    )
+    started = await begin_slots(build.draft, queue, ctx)
+    return dataclasses.replace(started, reply=f"{detail}\n\n{started.reply}")

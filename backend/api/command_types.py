@@ -19,6 +19,15 @@ class RequestContext:
     user: User
     session_factory: async_sessionmaker[AsyncSession]
     message_id: str | None = None
+    #: Send an interim line *before* slow work finishes -- a vision OCR
+    #: call takes long enough that silence reads as a dead bot. Set by
+    #: the dispatcher; None wherever a handler is called directly.
+    ack: Callable[[str], Awaitable[object]] | None = None
+
+    async def say(self, text: str) -> None:
+        """Best-effort progress line; never fails the command."""
+        if self.ack is not None:
+            await self.ack(text)
 
 
 @dataclass(frozen=True)

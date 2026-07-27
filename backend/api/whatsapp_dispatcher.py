@@ -13,6 +13,7 @@ person, so RBAC and audit attribution are per-user even in a group.
 
 from __future__ import annotations
 
+import dataclasses
 import time
 import uuid
 from dataclasses import dataclass
@@ -46,6 +47,11 @@ _DEDUP_TTL_SECONDS = 24 * 60 * 60  # docs/08_WhatsApp.md §3, transport layer
 _RATE_WINDOW_SECONDS = 60
 _LOCK_TIMEOUT_SECONDS = 30
 _LOCK_WAIT_SECONDS = 5
+
+#: Commands that *continue* an intake wizard instead of abandoning it:
+#: `details ...` fills every remaining slot in one message, which is the
+#: same wizard reaching the same draft (docs/20 §5, §12).
+_WIZARD_CONTINUATIONS = frozenset({"details"})
 
 UNSUPPORTED_MEDIA_REPLY = "I can only read text commands for now. Send 'help' to see what I can do."
 BUSY_REPLY = "⏳ Still working on your previous message — try again in a moment."
@@ -209,7 +215,10 @@ class WhatsAppDispatcher:
         from backend.api.commands.ocr_commands import process_purchase_photo
 
         context = RequestContext(
-            user=user, session_factory=self._session_factory, message_id=media.message_id
+            user=user,
+            session_factory=self._session_factory,
+            message_id=media.message_id,
+            ack=lambda body: self._client.send_text(media.reply_to, body),
         )
         logger.info(
             "whatsapp_media",
@@ -218,11 +227,10 @@ class WhatsAppDispatcher:
             mime_type=media.mime_type,
             bytes=len(media.data),
         )
-        await self._client.send_text(media.reply_to, "📸 Reading your sheet, one moment…")
         result = await process_purchase_photo(
             media.data, media.mime_type, media.message_id, context
         )
-        await self._client.send_text(media.reply_to, result.reply)
+        await self._deliver(media.reply_to, result)
 
     async def _handle(self, message: InboundMessage, user: User) -> CommandResult | None:
         if message.kind != "text" or message.text is None:
@@ -236,7 +244,33 @@ class WhatsAppDispatcher:
             user=user,
             session_factory=self._session_factory,
             message_id=message.message_id,
+            ack=lambda body: self._client.send_text(message.reply_to, body),
         )
+
+        from backend.api.commands.intake_commands import handle_intent_reply, handle_slot_reply
+        from backend.services.session_service import (
+            AWAITING_INTENT,
+            AWAITING_PURCHASE_CONFIRMATION,
+            AWAITING_RETURN_REFUND_CHOICE,
+            AWAITING_SALE_CONFIRMATION,
+            AWAITING_SETTLEMENT_CONFIRMATION,
+            AWAITING_SLOT,
+            IDLE,
+            SessionService,
+        )
+
+        sessions = SessionService(self._session_factory, self._redis)
+        session_state = await sessions.get(user.org_id, user.id)
+
+        # An intake wizard answers first, because most answers are free
+        # text -- but a *recognised* command still wins, so nobody is
+        # trapped in a mode (docs/20_ConversationalIntake.md §5).
+        if session_state.state == AWAITING_INTENT and spec is None:
+            return await handle_intent_reply(text, context, session_state)
+        if session_state.state == AWAITING_SLOT and (
+            spec is None or keyword in _WIZARD_CONTINUATIONS
+        ):
+            return await handle_slot_reply(text, context, session_state)
 
         if spec is None:
             # not a command: an active session interprets it as a reply in
@@ -246,17 +280,7 @@ class WhatsAppDispatcher:
             from backend.api.commands.settlement_commands import (
                 handle_settlement_session_reply,
             )
-            from backend.services.session_service import (
-                AWAITING_PURCHASE_CONFIRMATION,
-                AWAITING_RETURN_REFUND_CHOICE,
-                AWAITING_SALE_CONFIRMATION,
-                AWAITING_SETTLEMENT_CONFIRMATION,
-                SessionService,
-            )
 
-            session_state = await SessionService(self._session_factory, self._redis).get(
-                user.org_id, user.id
-            )
             if session_state.state == AWAITING_PURCHASE_CONFIRMATION:
                 return await handle_purchase_session_reply(text, context, session_state)
             if session_state.state == AWAITING_SALE_CONFIRMATION:
@@ -272,6 +296,24 @@ class WhatsAppDispatcher:
             )
         if not role_at_least(user.role, spec.min_role):
             return CommandResult(reply=f"You don't have permission to use '{spec.name}'.")
+
+        if session_state.state in {AWAITING_INTENT, AWAITING_SLOT}:
+            # abandon, and say so -- silently dropping a half-answered
+            # purchase would look like the answers were saved
+            await sessions.set(user.org_id, user.id, IDLE, {})
+            logger.info(
+                "whatsapp_command",
+                command=spec.name,
+                user_id=str(user.id),
+                org_id=str(user.org_id),
+                message_id=message.message_id,
+            )
+            abandoned = await spec.handler(args.strip(), context)
+            return dataclasses.replace(
+                abandoned,
+                reply=f"{abandoned.reply}\n\n_(I've dropped the half-finished purchase — "
+                "send the photo again to restart it.)_",
+            )
 
         logger.info(
             "whatsapp_command",

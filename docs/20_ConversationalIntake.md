@@ -218,9 +218,17 @@ where the other conversational state already lives.
 
 ## 11. Phasing {#phasing}
 
-**Phase 1 — the OCR intake path.** Intent buttons, gap analysis, slot
-filling for supplier/invoice/date/rate. This is the flow that has
-actually failed in use, twice.
+**Phase 1 — the OCR intake path. ✅ Built.** Intent buttons, gap
+analysis, slot filling for supplier/invoice/date/rate. This is the flow
+that has actually failed in use, twice.
+
+Where it lives: `backend/api/commands/intake_commands.py` (the intent
+gate and the slot machine), `read_stored_sheet()` in
+`ocr_commands.py` (OCR runs *after* intent is answered, so a mis-sent
+photo never spends a vision call), and the `AWAITING_INTENT` /
+`AWAITING_SLOT` routing in `whatsapp_dispatcher.py`. `details ...`
+survives as a one-shot that fills every remaining slot in one message,
+and is tested for equivalence with answering them one at a time.
 
 **Phase 2 — command wizards.** `paid`, `received`, `sale`, `expense`,
 `export` ask for missing arguments instead of printing usage.

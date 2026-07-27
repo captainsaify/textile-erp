@@ -140,3 +140,68 @@ async def test_delivery_statuses_are_ignored(
     }
     await _process(dispatcher, payload)
     assert fake_sender.sent == []
+
+
+async def test_recognised_command_mid_wizard_runs_and_abandons_the_draft(
+    dispatcher: WhatsAppDispatcher,
+    fake_sender: FakeSender,
+    staff_user: User,
+    session_factory: Any,
+    redis_client: Any,
+) -> None:
+    """Someone who types `stock` mid-wizard wants stock, not to name it
+    as their supplier (docs/20_ConversationalIntake.md §5). The wizard is
+    dropped and says so -- silence would look like the answers were kept.
+    """
+    from backend.services.session_service import AWAITING_SLOT, IDLE, SessionService
+
+    assert staff_user.whatsapp_number is not None
+    sessions = SessionService(session_factory, redis_client)
+    await sessions.set(
+        staff_user.org_id,
+        staff_user.id,
+        AWAITING_SLOT,
+        {"draft": {}, "queue": ["supplier"], "filled": {}},
+    )
+
+    await _process(dispatcher, meta_payload(text_message(staff_user.whatsapp_number, "stock")))
+
+    reply = fake_sender.sent[0][1]
+    assert "Which supplier" not in reply
+    assert "dropped the half-finished purchase" in reply
+    state = await sessions.get(staff_user.org_id, staff_user.id)
+    assert state.state == IDLE
+
+
+async def test_free_text_mid_wizard_is_an_answer_not_an_unknown_command(
+    dispatcher: WhatsAppDispatcher,
+    fake_sender: FakeSender,
+    staff_user: User,
+    session_factory: Any,
+    redis_client: Any,
+) -> None:
+    from backend.services.session_service import AWAITING_SLOT, SessionService
+    from backend.tests.api.test_conversational_intake import make_draft
+
+    assert staff_user.whatsapp_number is not None
+    sessions = SessionService(session_factory, redis_client)
+    await sessions.set(
+        staff_user.org_id,
+        staff_user.id,
+        AWAITING_SLOT,
+        {
+            "draft": make_draft().to_context(),
+            "queue": ["supplier", "invoice_no"],
+            "filled": {},
+        },
+    )
+
+    await _process(
+        dispatcher, meta_payload(text_message(staff_user.whatsapp_number, "Wagdia Textiles"))
+    )
+
+    reply = fake_sender.sent[0][1]
+    assert "I don't recognize" not in reply
+    assert "What's the invoice number?" in reply
+    state = await sessions.get(staff_user.org_id, staff_user.id)
+    assert state.context["filled"] == {"supplier": "Wagdia Textiles"}

@@ -29,6 +29,10 @@ AWAITING_PURCHASE_CONFIRMATION = "awaiting_purchase_confirmation"
 AWAITING_SALE_CONFIRMATION = "awaiting_sale_confirmation"
 AWAITING_SETTLEMENT_CONFIRMATION = "awaiting_settlement_confirmation"
 AWAITING_RETURN_REFUND_CHOICE = "awaiting_return_refund_choice"
+#: docs/20_ConversationalIntake.md -- what is this photo, and then one
+#: question per field the sheet didn't carry
+AWAITING_INTENT = "awaiting_intent"
+AWAITING_SLOT = "awaiting_slot"
 
 
 @dataclasses.dataclass(frozen=True)

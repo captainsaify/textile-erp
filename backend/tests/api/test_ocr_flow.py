@@ -14,9 +14,9 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.api.command_types import CommandResult, RequestContext
+from backend.api.commands.intake_commands import handle_intent_reply, handle_slot_reply
 from backend.api.commands.ocr_commands import (
     apply_details,
-    handle_details,
     process_purchase_photo,
 )
 from backend.api.commands.purchase_commands import handle_purchase_session_reply
@@ -62,6 +62,20 @@ def attachments_dir(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setenv("ATTACHMENTS_DIR", str(tmp_path))
     get_settings.cache_clear()
+
+
+async def _photo(data: bytes, media_id: str, ctx: RequestContext) -> CommandResult:
+    """Send a photo and answer the intent question with 'a purchase' --
+    OCR only runs once that is answered (docs/20 §2)."""
+    stored = await process_purchase_photo(data, "image/jpeg", media_id, ctx)
+    assert "What is it?" in stored.reply
+    state = await SessionService(ctx.session_factory).get(ctx.user.org_id, ctx.user.id)
+    return await handle_intent_reply("intake purchase", ctx, state)
+
+
+async def _slot_reply(text: str, ctx: RequestContext) -> CommandResult:
+    state = await SessionService(ctx.session_factory).get(ctx.user.org_id, ctx.user.id)
+    return await handle_slot_reply(text, ctx, state)
 
 
 async def _session_reply(text: str, ctx: RequestContext) -> CommandResult:
@@ -113,11 +127,13 @@ async def test_photo_to_confirmed_purchase(
     attachments_dir: None,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    result = await process_purchase_photo(sheet_bytes(), "image/jpeg", "wamid.1", ctx)
+    result = await _photo(sheet_bytes(), "wamid.1", ctx)
     assert "📸 Read 3 items from your sheet:" in result.reply
     assert "TRP" in result.reply and "MJP" in result.reply
     assert "100.0" in result.reply
-    assert "details Supplier:" in result.reply
+    # the wizard asks rather than printing a template to memorise
+    assert "details Supplier:" not in result.reply
+    assert "Which supplier is this from?" in result.reply
 
     async with session_factory() as session:
         status, mime = (
@@ -126,9 +142,11 @@ async def test_photo_to_confirmed_purchase(
         assert status == "processed"
         assert mime == "image/jpeg"
 
-    # the sheet has no supplier/invoice/rate -- those are manual fields
-    result = await handle_details(
-        "Supplier: Shree Textiles Invoice: INV-4521 Date: 24-07-2026 Rate: 150 Freight: 500",
+    # the sheet has no supplier/invoice/rate -- `details` answers every
+    # remaining slot in one message instead of one at a time
+    result = await _slot_reply(
+        "details Supplier: Shree Textiles Invoice: INV-4521 Date: 24-07-2026 "
+        "Rate: 150 Freight: 500",
         ctx,
     )
     assert "Purchase draft ready" in result.reply
@@ -175,7 +193,7 @@ async def test_unreadable_image_offers_manual_entry(
 
     ok, buffer = cv2.imencode(".png", np.full((300, 400), 255, dtype=np.uint8))
     assert ok
-    result = await process_purchase_photo(bytes(buffer), "image/jpeg", "wamid.3", ctx)
+    result = await _photo(bytes(buffer), "wamid.3", ctx)
     assert "couldn't find a purchase table" in result.reply
     assert "'purchase' command" in result.reply
 
