@@ -46,25 +46,37 @@ implementation is most dangerous.
   (`partner_capital.status`/`.posted_at` per §2b, then
   `purchase_lines.returned_qty` per §3.1).
 - WhatsApp transport via **Meta Cloud API** (the working one).
-- 26 commands: `purchase` `sale` `return` `received` `paid` `stock`
-  (+ `stock CODE`) `search` `expense` `income` `cash` `bank` `edit`
-  `undo` `delete` `settings` `help`,
+- **All 27 spec'd commands are built**: `purchase` `sale` `return`
+  `received` `paid` `stock` (+ `stock CODE`) `search` `expense` `income`
+  `cash` `bank` `edit` `undo` `delete` `export` `backup` `restore`
+  `settings` `help`,
   plus `details` (the OCR follow-up step, not in the spec's command
   list), the reporting six from §2a (`dashboard` `summary` `profit`
   `supplier` `customer` `ledger`), and §2b's `capital` `withdraw`
   `approve` `reject`.
 - OCR: local pipeline (OpenCV → table detect → Paddle/Tesseract) **and**
   Claude vision, vision-first with automatic fallback.
-- 243 tests pass, fixed and random order. `mypy --strict` clean across
-  114 files. `ruff` clean.
+- Celery workers, Beat schedule, nightly reconciliation, Excel export,
+  backup/restore, and the full Docker/Nginx deployment layer.
+- 270 tests pass, fixed and random order. `mypy --strict` clean across
+  128 files. `ruff` clean.
 
 **Live OCR result on the user's real 26-item purchase sheet:** all 26
 rows correct, confirmed independently — the costing quantities sum to
 27,280 KG, which is the grand total printed on the sheet. Local OCR
 managed 20/26 on the same image. Vision cost $0.054, took 18.1s.
 
-**Empty directories — nothing built yet:** `backend/workers/`,
-`backend/reports/`, `frontend/`, `docker/`. Celery is not installed.
+**What is NOT built:** `frontend/` is still empty, and the REST API in
+`docs/10_API.md` does not exist — the only HTTP surface today is
+`/healthz` plus the WhatsApp webhook and bridge endpoints. The web
+dashboard needs that API underneath it, so the two are one piece of
+work, not two.
+
+**Not verified:** the Docker images have never been built. Docker isn't
+installed in the environment they were written in, so the manifests are
+structurally tested (see `backend/tests/test_deployment_config.py`) but
+`docker compose build` has not been run even once. Expect to fix real
+things on the first attempt.
 
 ---
 
@@ -75,12 +87,8 @@ Opus-required.** If you are Sonnet and asked to "continue", the honest
 answer is that the next task needs a model switch — say so rather than
 picking the least-dangerous-looking item from §3.
 
-3.1 and 3.2 are done. Next is Celery + the nightly reconciliation job
-(3.3) — the acceptance criterion in `CLAUDE.md` that inventory always
-balances is currently asserted per-wave in tests but never checked
-against live data. After that: the Excel export (3.4, needs
-`backend/reports/` and Celery first), then `backup`/`restore` (3.6),
-then the frontend and deployment, neither of which has been started.
+**All of §3 is done**, along with the deployment layer. The only work
+left is §8 below: the REST API and the web dashboard.
 
 ### 2a. The reporting six — ✅ done (2026-07-27, Sonnet)
 
@@ -186,7 +194,12 @@ there's a test pinning that 100x boundary.
 
 ---
 
-## 3. Opus-required — STOP and ask for a switch
+## 3. Opus-required work — all complete
+
+Kept in full below: the reasoning is what a future change to any of
+these has to respect, and each entry names the branch that must not be
+"simplified". The escalation rule in §0 still applies to *new* work of
+the same shape.
 
 ### 3.1 `return` — ✅ done (2026-07-27, Opus)
 
@@ -215,7 +228,7 @@ there's a test pinning that 100x boundary.
   opens its own transaction and re-validates, so a refund parked for
   minutes can't act on stale quantities.
 
-### 3.2 `edit` / `undo` / `delete`
+### 3.2 `edit` / `undo` / `delete` — ✅ done (2026-07-27, Opus)
 **Why:** each must reverse inventory movements *and* post compensating
 journal entries *and* soft-delete only *and* stay auditable. They are
 inverses of each other, so they have to be designed together — building
@@ -223,32 +236,38 @@ inverses of each other, so they have to be designed together — building
 subtlest work left in the project.
 Spec: `docs/04_Purchases.md`, `docs/06_Accounting.md`, `docs/14_Security.md`.
 
-### 3.3 Celery workers + nightly reconciliation
-**Why:** the reconciliation job is a stated acceptance criterion in
-`CLAUDE.md` — `inventory.qty_on_hand` must equal the signed sum of
-`inventory_movements` for every product. It runs concurrently with live
-mutations, against monthly-partitioned tables, and a subtly wrong query
-reports "all balanced" forever while drift accumulates.
-Spec: `docs/11_BackgroundWorkers.md`.
+### 3.3 Celery + reconciliation — ✅ done (2026-07-27, Opus)
 
-### 3.4 Excel export golden-file work
-**Why:** `docs/13_Reports.md` §5 requires the purchases export to match
-the partners' existing sheet *byte-for-byte* — column order, headers,
-number formats — verified against `wagdia textile company.xlsx` by a
-visual-diff test. Fiddly `openpyxl` format-matching against real files,
-and the whole point is defeated by "close enough".
-(The rest of `backend/reports/` — plumbing, the Celery job wrapper, the
-signed download link — is Sonnet-safe. It's the workbook builder that
-isn't.)
+`backend/workers/` and `backend/services/reconciliation_service.py`.
+The rule to preserve: **reconciliation detects, it never repairs.**
+Tests tamper with a cached balance and assert both that the mismatch is
+reported *and* that the wrong number is still there afterwards. A
+"helpful" auto-correct would destroy the only evidence that something
+upstream is broken. A successful run is recorded too — without the
+`reconciliation_runs` row, "nothing was wrong" and "the job never
+fired" are the same silence.
+
+### 3.4 Excel export — ✅ done (2026-07-27, Opus)
+
+`backend/reports/excel/`. The purchases sheet keeps the partners'
+column order (S.NO | QTY | DESCRIPTION | CODE | LABEL | KG | T.KG) with
+a bold totals row; a test pins that order so a refactor can't drift it.
+`COLUMNS` is a module constant in the same config-over-code shape as
+`ocr_templates`, so a second product type brings its own list.
 
 ### 3.5 Any migration touching money/quantity columns or partitions
+*(still applies to future migrations)*
 **Why:** `NUMERIC` precision changes and partitioned-table DDL are
 one-way in production. See §5 for the `alembic check` trap.
 
-### 3.6 `backup` / `restore`
-**Why:** `restore` overwrites live business data. Destructive and
-irreversible; wants the stronger model and an explicit human
-confirmation step.
+### 3.6 `backup` / `restore` — ✅ done (2026-07-27, Opus)
+
+`backend/services/backup_service.py`. **Verify before pruning**: the new
+dump is checksummed and its archive table-of-contents read back with
+`pg_restore --list` before any old backup is deleted, because a pg_dump
+that exits 0 having written a truncated file is the failure that stays
+invisible until the day it matters. `restore` requires the backup's
+name typed twice.
 
 ---
 
@@ -353,3 +372,50 @@ a second product type needs only new rows, not new code.
 
 The last one is worth re-testing once `export` exists — export templates
 are the most likely place for textile assumptions to have leaked in.
+
+
+---
+
+## 8. What's left — the REST API and web dashboard
+
+Everything in §2 and §3 is built. What remains is one piece of work in
+two layers, and it is **Opus-optional** — nothing here can produce a
+silently wrong number, because it is all read paths over figures the
+WhatsApp side already computes.
+
+### 8.1 REST API (`docs/10_API.md`)
+
+Does not exist. Today's HTTP surface is `/healthz`, the WhatsApp webhook
+and the bridge endpoints — nothing else. Needed: JWT auth
+(`jwt_signing_key` is already in config and unused), then read endpoints
+for dashboard, stock, ledgers, reports and the report-job polling route
+`report_jobs` was designed for.
+
+**Reuse the services, don't reimplement.** `DashboardService`,
+`ProfitService`, `StockService` and the repositories already produce
+every figure the dashboard needs; an endpoint that recomputes one of
+them its own way is how the web dashboard and WhatsApp start disagreeing
+about today's profit, which docs/12_Dashboard.md §1 explicitly forbids.
+
+Two endpoints the backend is already shaped for but doesn't expose:
+`POST /inventory/reconcile` (acknowledge a mismatch — see
+`reconciliation_runs.acknowledged_at`, written for it and never yet set)
+and `GET /reports/export/{job_id}`.
+
+### 8.2 Web dashboard (`frontend/`, `docs/12_Dashboard.md`)
+
+Empty directory. Read-heavy admin views; the compose file has no
+frontend service yet either (the doc's illustrative one referenced a
+Dockerfile that was never written — add both together).
+
+Remember the ordering constraint from `CLAUDE.md` philosophy #5: the
+dashboard is read-heavy *by design* and must never become the only way
+to do something. Every mutating action stays available on WhatsApp.
+
+### 8.3 Also outstanding
+
+- **The Docker images have never been built.** See §1.
+- **Redis caching for the dashboard** (docs/12_Dashboard.md §4) is still
+  not wired in — see the note in §2a. Do it as its own focused pass.
+- `docs/07_OCR.md` still describes only Paddle/Tesseract; the Claude
+  vision engine is documented in code but not in the spec.
