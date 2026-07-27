@@ -45,16 +45,16 @@ implementation is most dangerous.
 - 30-table schema, migrations, seeds. Migration head: `c8e2f0b41d73`
   (adds `partner_capital.status` / `.posted_at` — see §2b).
 - WhatsApp transport via **Meta Cloud API** (the working one).
-- 21 commands: `purchase` `sale` `received` `paid` `stock` (+ `stock
-  CODE`) `search` `expense` `income` `cash` `bank` `help`, plus
-  `details` (the OCR follow-up step, not in the spec's command list),
-  the reporting six from §2a (`dashboard` `summary` `profit` `supplier`
-  `customer` `ledger`), and §2b's `capital` `withdraw` `approve`
-  `reject`.
+- 22 commands: `purchase` `sale` `received` `paid` `stock` (+ `stock
+  CODE`) `search` `expense` `income` `cash` `bank` `settings` `help`,
+  plus `details` (the OCR follow-up step, not in the spec's command
+  list), the reporting six from §2a (`dashboard` `summary` `profit`
+  `supplier` `customer` `ledger`), and §2b's `capital` `withdraw`
+  `approve` `reject`.
 - OCR: local pipeline (OpenCV → table detect → Paddle/Tesseract) **and**
   Claude vision, vision-first with automatic fallback.
-- 172 tests pass, fixed and random order. `mypy --strict` clean across
-  104 files. `ruff` clean.
+- 190 tests pass, fixed and random order. `mypy --strict` clean across
+  107 files. `ruff` clean.
 
 **Live OCR result on the user's real 26-item purchase sheet:** all 26
 rows correct, confirmed independently — the costing quantities sum to
@@ -66,7 +66,17 @@ managed 20/26 on the same image. Vision cost $0.054, took 18.1s.
 
 ---
 
-## 2. Sonnet-safe work, in the order I'd do it
+## 2. Sonnet-safe work — ✅ all done
+
+Everything in this section is built. **What remains is §3, which is
+Opus-required.** If you are Sonnet and asked to "continue", the honest
+answer is that the next task needs a model switch — say so rather than
+picking the least-dangerous-looking item from §3.
+
+Suggested order once on Opus: `return` (3.1), then the
+`edit`/`undo`/`delete` trio (3.2) since `return` establishes the
+movement-reversal pattern they reuse, then Celery + reconciliation
+(3.3) which is what actually proves inventory balances.
 
 ### 2a. The reporting six — ✅ done (2026-07-27, Sonnet)
 
@@ -145,10 +155,30 @@ the fan-out runs, so a send failure is logged, never raised.
 `settings` table. The `settings` *command* still doesn't exist (§2c),
 but three thresholds already read from it.
 
-### 2c. `settings` ← **start here**
+### 2c. `settings` — ✅ done (2026-07-27, Opus)
 
-Key/value reads and writes on the `settings` table. The simplest
-remaining command. Spec: `docs/08_WhatsApp.md`.
+`backend/core/settings_registry.py` is now the single home of every
+default; services read through `SettingsRepository` rather than holding
+their own constant, and a test asserts each accessor returns the
+registry value when nothing is stored.
+
+**Only keys something actually reads are registered** (7 today).
+docs/ names about twenty; the rest — `backup_retention_days`,
+`report_link_expiry_days`, `undo_window_hours`, `week_start_day`,
+`large_adjustment_value_threshold`, `low_stock_check_hour`, the OCR
+thresholds — are deliberately absent, because a key a partner can set
+that changes no behaviour is a placeholder pretending to be a feature.
+**When you build a feature that reads one, add its key to the registry
+in the same change.** That's the intended growth path, not an oversight
+to "fix" by bulk-adding the missing keys.
+
+`base_currency` / `timezone` stay columns on `organizations` and must
+not become settings rows: `business_today()` reads the column, so a
+second source of truth would silently date entries wrong.
+
+Note `below_cost_sale_tolerance_percent` is entered as a percent and
+consumed as a fraction (`below_cost_tolerance()` divides by 100) —
+there's a test pinning that 100x boundary.
 
 ---
 
