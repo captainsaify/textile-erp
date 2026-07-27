@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from backend.api.interactive import Interactive
 from backend.models import User
 from backend.models.enums import UserRole
 
@@ -29,6 +30,11 @@ class CommandResult:
     #: Delivered after the reply, best-effort: a partner being
     #: unreachable must not undo a committed transaction.
     notifications: tuple[tuple[str, str], ...] = ()
+    #: Optional buttons/list menu accompanying `reply`
+    #: (docs/19_InteractiveMessages.md). `reply` is always sent and is
+    #: always sufficient on its own -- a transport that can't render
+    #: this degrades to text and the flow still completes.
+    interactive: Interactive | None = None
 
 
 CommandHandler = Callable[[str, RequestContext], Awaitable[CommandResult]]

@@ -22,6 +22,7 @@ from redis.exceptions import LockError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.api.commands.purchase_commands import handle_purchase_session_reply
+from backend.api.interactive import as_text
 from backend.api.whatsapp_commands import (
     COMMAND_REGISTRY,
     CommandResult,
@@ -156,8 +157,25 @@ class WhatsAppDispatcher:
             await self._client.send_text(message.reply_to, BUSY_REPLY)
             return
         if reply is not None:
-            await self._client.send_text(message.reply_to, reply.reply)
+            await self._deliver(message.reply_to, reply)
             await self._notify(reply)
+
+    async def _deliver(self, to_number: str, result: CommandResult) -> None:
+        """`reply` always goes out; the interactive payload follows only
+        if the transport can render it. Two messages, not one: a button
+        message's body caps at 1024 chars, which several replies exceed
+        (docs/19 §5), and truncating would hide the very line items the
+        user is being asked to check."""
+        await self._client.send_text(to_number, result.reply)
+        if result.interactive is None:
+            return
+        sender = getattr(self._client, "send_interactive", None)
+        if sender is None:
+            # bridge transport: the options are already listed as text
+            await self._client.send_text(to_number, as_text(result.interactive))
+            return
+        if not await sender(to_number, result.interactive):
+            await self._client.send_text(to_number, as_text(result.interactive))
 
     async def _notify(self, result: CommandResult) -> None:
         """Fan out to third parties (the dual-approval request in
@@ -291,13 +309,19 @@ def _default_sender() -> SupportsSendText:
 
 
 def _from_meta(message: WebhookMessage) -> InboundMessage:
+    """A tapped button or picked list row is carried as *text* -- its id
+    is the string the user would have typed (docs/19 §7). Every handler
+    and every existing test therefore sees one input shape, and the
+    tapped and typed paths cannot drift apart."""
     sender = normalize_whatsapp_number(message.from_number)
+    choice = message.choice_id
+    body = choice if choice is not None else (message.text.body if message.text else None)
     return InboundMessage(
         message_id=message.id,
         sender_number=sender,
         reply_to=sender,
-        kind=message.type,
-        text=message.text.body if message.text is not None else None,
+        kind="text" if body is not None else message.type,
+        text=body,
     )
 
 

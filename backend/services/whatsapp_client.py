@@ -15,6 +15,7 @@ from typing import Protocol
 
 import httpx
 
+from backend.api.interactive import Interactive, to_cloud_api
 from backend.core.config import get_settings
 from backend.core.logging import get_logger
 
@@ -28,6 +29,14 @@ class SupportsSendText(Protocol):
     lets tests substitute a recorder without a network client."""
 
     async def send_text(self, to_number: str, body: str) -> bool: ...
+
+
+class SupportsSendInteractive(Protocol):
+    """Cloud API only. The dispatcher checks for this at runtime and
+    falls back to send_text, so the bridge transport needs no changes
+    (docs/19_InteractiveMessages.md §3)."""
+
+    async def send_interactive(self, to_number: str, payload: Interactive) -> bool: ...
 
 
 class SupportsFetchMedia(Protocol):
@@ -54,15 +63,23 @@ class WhatsAppClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
+    async def send_interactive(self, to_number: str, payload: Interactive) -> bool:
+        """Send buttons or a list menu. Same retry semantics as text."""
+        return await self._post(to_cloud_api(payload, to_number))
+
     async def send_text(self, to_number: str, body: str) -> bool:
         """Send a plain text message. Returns delivery-accepted, never raises."""
-        payload = {
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": to_number.lstrip("+"),
-            "type": "text",
-            "text": {"preview_url": False, "body": body},
-        }
+        return await self._post(
+            {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to_number.lstrip("+"),
+                "type": "text",
+                "text": {"preview_url": False, "body": body},
+            }
+        )
+
+    async def _post(self, payload: dict[str, object]) -> bool:
         url = f"/{self._phone_number_id}/messages"
         for attempt, delay in enumerate((*_RETRY_DELAYS_SECONDS, None)):
             try:
@@ -83,7 +100,7 @@ class WhatsAppClient:
             if delay is None:
                 break
             await asyncio.sleep(delay)
-        logger.error("whatsapp_send_failed", to=to_number)
+        logger.error("whatsapp_send_failed", to=payload.get("to"))
         return False
 
 

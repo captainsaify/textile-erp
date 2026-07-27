@@ -26,6 +26,26 @@ class WebhookMedia(_WebhookModel):
     filename: str | None = None
 
 
+class WebhookInteractiveReply(_WebhookModel):
+    id: str = ""
+    title: str = ""
+    description: str = ""
+
+
+class WebhookInteractive(_WebhookModel):
+    """A tapped button or picked list row -- docs/19 §7. Both shapes
+    carry an `id`, which is the string the user would have typed."""
+
+    type: str = ""
+    button_reply: WebhookInteractiveReply | None = None
+    list_reply: WebhookInteractiveReply | None = None
+
+    @property
+    def choice_id(self) -> str | None:
+        reply = self.button_reply or self.list_reply
+        return reply.id or None if reply else None
+
+
 class WebhookMessage(_WebhookModel):
     id: str
     from_number: str = Field(alias="from")
@@ -34,10 +54,16 @@ class WebhookMessage(_WebhookModel):
     text: WebhookTextBody | None = None
     image: WebhookMedia | None = None
     document: WebhookMedia | None = None
+    interactive: WebhookInteractive | None = None
 
     @property
     def media(self) -> WebhookMedia | None:
         return self.image or self.document
+
+    @property
+    def choice_id(self) -> str | None:
+        """The tapped option's id, if this was an interactive reply."""
+        return self.interactive.choice_id if self.interactive else None
 
 
 class WebhookMetadata(_WebhookModel):
