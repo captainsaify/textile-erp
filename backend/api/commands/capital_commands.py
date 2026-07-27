@@ -10,8 +10,9 @@ import decimal
 import re
 
 from backend.api.amounts import parse_amount
-from backend.api.command_types import CommandResult, RequestContext
+from backend.api.command_types import CommandResult, Notification, RequestContext
 from backend.api.formatting import fmt_money
+from backend.api.interactive import Buttons, Choice
 from backend.core.exceptions import DomainError, ValidationError
 from backend.services.capital_service import (
     CapitalPosted,
@@ -102,9 +103,22 @@ def _render_pending(pending: WithdrawalPending) -> CommandResult:
         f'Reply "approve withdraw {pending.short_id}" or '
         f'"reject withdraw {pending.short_id}".'
     )
+    approve = Buttons(
+        body=(
+            f"{pending.partner_name} wants to withdraw {fmt_money(pending.amount)} ({pending.via})."
+        ),
+        choices=(
+            Choice(id=f"approve withdraw {pending.short_id}", title="Approve"),
+            Choice(id=f"reject withdraw {pending.short_id}", title="Reject"),
+        ),
+        footer="Needs a second partner.",
+    )
     return CommandResult(
         reply=reply,
-        notifications=tuple((number, body) for _, number in pending.approvers),
+        notifications=tuple(
+            Notification(to_number=number, body=body, interactive=approve)
+            for _, number in pending.approvers
+        ),
     )
 
 

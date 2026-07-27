@@ -217,7 +217,8 @@ async def test_large_withdrawal_moves_nothing_until_approved(
 async def test_large_withdrawal_notifies_the_other_partner(pair: Pair) -> None:
     result = await handle_withdraw("Rahul 30000 bank", pair.rahul_ctx)
     assert len(result.notifications) == 1
-    number, body = result.notifications[0]
+    note = result.notifications[0]
+    number, body = note.to_number, note.body
     assert number == pair.farida_ctx.user.whatsapp_number
     assert "Rahul requested a capital withdrawal" in body
     assert "approve withdraw" in body
@@ -229,7 +230,7 @@ async def test_requester_cannot_approve_their_own_withdrawal(
     """§8's entire purpose -- checked server-side, not just assumed
     because it arrives from a different phone."""
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0][1].split("approve withdraw ")[1].split('"')[0]
+    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
 
     result = await handle_approve(f"withdraw {reference}", pair.rahul_ctx)
     assert "can't approve your own" in result.reply
@@ -241,7 +242,7 @@ async def test_second_partner_approval_posts_the_withdrawal(
 ) -> None:
     await handle_capital("Rahul 100000 cash", pair.rahul_ctx)
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0][1].split("approve withdraw ")[1].split('"')[0]
+    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
 
     result = await handle_approve(f"withdraw {reference}", pair.farida_ctx)
     assert "✅ Approved." in result.reply
@@ -257,7 +258,7 @@ async def test_approval_recomputes_against_the_balance_at_approval_time(
     balance as it stands then, not as it stood at request time."""
     await handle_capital("Rahul 100000 cash", pair.rahul_ctx)
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0][1].split("approve withdraw ")[1].split('"')[0]
+    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
 
     # someone tops Rahul up while the withdrawal sits pending
     await handle_capital("Rahul 20000 cash", pair.rahul_ctx)
@@ -272,7 +273,7 @@ async def test_rejection_leaves_balances_untouched(
 ) -> None:
     await handle_capital("Rahul 100000 cash", pair.rahul_ctx)
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0][1].split("approve withdraw ")[1].split('"')[0]
+    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
 
     result = await handle_reject(f"withdraw {reference}", pair.farida_ctx)
     assert "🚫 Rejected" in result.reply
@@ -284,7 +285,7 @@ async def test_a_rejected_request_cannot_then_be_approved(
     pair: Pair, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0][1].split("approve withdraw ")[1].split('"')[0]
+    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
     await handle_reject(f"withdraw {reference}", pair.farida_ctx)
 
     result = await handle_approve(f"withdraw {reference}", pair.farida_ctx)
@@ -297,7 +298,7 @@ async def test_approving_twice_posts_only_once(
 ) -> None:
     await handle_capital("Rahul 100000 cash", pair.rahul_ctx)
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0][1].split("approve withdraw ")[1].split('"')[0]
+    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
 
     await handle_approve(f"withdraw {reference}", pair.farida_ctx)
     second = await handle_approve(f"withdraw {reference}", pair.farida_ctx)
@@ -310,7 +311,7 @@ async def test_expired_request_is_cancelled_rather_than_approved(
     pair: Pair, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0][1].split("approve withdraw ")[1].split('"')[0]
+    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
 
     async with session_factory() as session, session.begin():
         await session.execute(
@@ -407,7 +408,7 @@ async def test_expiry_window_follows_settings(
             Setting(org_id=ORG, key="withdrawal_approval_timeout_hours", value=hours_setting)
         )
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0][1].split("approve withdraw ")[1].split('"')[0]
+    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
 
     async with session_factory() as session, session.begin():
         await session.execute(
@@ -447,7 +448,7 @@ async def test_posted_at_orders_the_chain_not_created_at(
     """A withdrawal requested before a contribution but approved after it
     must land last in the chain -- the reason posted_at exists."""
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0][1].split("approve withdraw ")[1].split('"')[0]
+    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
     await handle_capital("Rahul 100000 cash", pair.rahul_ctx)
     await handle_approve(f"withdraw {reference}", pair.farida_ctx)
 
@@ -474,7 +475,7 @@ async def test_created_at_ordering_would_have_been_wrong(
     created_at the withdrawal comes first, which would make the running
     balance read 70000 -> ... in the wrong order."""
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0][1].split("approve withdraw ")[1].split('"')[0]
+    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
     await handle_capital("Rahul 100000 cash", pair.rahul_ctx)
     await handle_approve(f"withdraw {reference}", pair.farida_ctx)
 
@@ -504,7 +505,7 @@ async def test_journal_balances_for_every_capital_posting(
     await handle_capital("Rahul 100000 cash", pair.rahul_ctx)
     await handle_withdraw("Rahul 5000 cash", pair.rahul_ctx)
     request = await handle_withdraw("Rahul 30000 bank", pair.rahul_ctx)
-    reference = request.notifications[0][1].split("approve withdraw ")[1].split('"')[0]
+    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
     await handle_approve(f"withdraw {reference}", pair.farida_ctx)
 
     async with session_factory() as session:

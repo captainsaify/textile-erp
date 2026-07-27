@@ -16,6 +16,7 @@ import re
 
 from backend.api.command_types import CommandResult, RequestContext
 from backend.api.formatting import fmt_date, fmt_money, fmt_qty
+from backend.api.interactive import Buttons, Choice
 from backend.core.exceptions import (
     DomainError,
     ExactDuplicateInvoiceError,
@@ -54,6 +55,8 @@ _CREATE_PRODUCT = re.compile(
     re.IGNORECASE,
 )
 _CREATE_ALL = re.compile(r"^create\s+all\s+products?$", re.IGNORECASE)
+#: button ids that mean "tell me how, I'll do it myself"
+_GUIDANCE = {"one by one", "fix"}
 
 CONFIRM_VOCAB = {"confirm", "yes", "ok", "save"}
 
@@ -231,6 +234,44 @@ def unresolved_help(codes: list[str]) -> str:
     )
 
 
+def preview_result(draft: Draft) -> CommandResult:
+    """The preview plus whatever decision it is actually asking for.
+
+    Which buttons appear follows the draft's own state, so the offer can
+    never contradict the text: unresolved codes ask to create them,
+    an unknown supplier asks to create it, and only a draft that is
+    ready to save offers CONFIRM.
+    """
+    reply = render_preview(draft)
+    choices: tuple[Choice, ...]
+    if draft.unresolved_codes:
+        count = len(draft.unresolved_codes)
+        bulk = f"Create all {count}" if count < 100000 else "Create all"
+        body = f"{count} item(s) aren't in your catalogue yet."
+        choices = (
+            Choice(id="create all products", title=bulk),
+            Choice(id="one by one", title="One by one"),
+            Choice(id="discard", title="Discard"),
+        )
+    elif draft.supplier_id is None and draft.supplier_name:
+        body = f"Supplier '{draft.supplier_name}' isn't in your list yet."
+        choices = (
+            Choice(id="create supplier", title="Add supplier"),
+            Choice(id="discard", title="Discard"),
+        )
+    elif not draft.supplier_name or not draft.invoice_no:
+        # still waiting on `details`; nothing to decide yet
+        return CommandResult(reply=reply)
+    else:
+        body = f"Save this purchase? {fmt_money(draft.grand_total)} to {draft.supplier_name}."
+        choices = (
+            Choice(id="confirm", title="Confirm"),
+            Choice(id="fix", title="Fix a line"),
+            Choice(id="discard", title="Discard"),
+        )
+    return CommandResult(reply=reply, interactive=Buttons(body=body, choices=choices))
+
+
 def render_confirmed(purchase: ConfirmedPurchase) -> str:
     lines = [
         f"✅ Purchase confirmed — {purchase.supplier_name}, {purchase.invoice_no}, "
@@ -299,7 +340,7 @@ async def handle_purchase(args: str, ctx: RequestContext) -> CommandResult:
     await sessions.set(
         ctx.user.org_id, ctx.user.id, AWAITING_PURCHASE_CONFIRMATION, draft.to_context()
     )
-    return CommandResult(reply=render_preview(draft))
+    return preview_result(draft)
 
 
 async def handle_purchase_session_reply(
@@ -324,7 +365,7 @@ async def handle_purchase_session_reply(
         await sessions.set(
             ctx.user.org_id, ctx.user.id, AWAITING_PURCHASE_CONFIRMATION, draft.to_context()
         )
-        return CommandResult(reply=render_preview(draft))
+        return preview_result(draft)
 
     if _CREATE_ALL.match(text.strip()):
         # A first-ever sheet can carry dozens of unknown codes; creating
@@ -397,7 +438,7 @@ async def handle_purchase_session_reply(
         await sessions.set(
             ctx.user.org_id, ctx.user.id, AWAITING_PURCHASE_CONFIRMATION, draft.to_context()
         )
-        return CommandResult(reply=render_preview(draft))
+        return preview_result(draft)
 
     correction = _CORRECTION.match(text.strip())
     if correction:
@@ -433,7 +474,21 @@ async def handle_purchase_session_reply(
         await sessions.set(
             ctx.user.org_id, ctx.user.id, AWAITING_PURCHASE_CONFIRMATION, draft.to_context()
         )
-        return CommandResult(reply=render_preview(draft))
+        return preview_result(draft)
+
+    if lowered in _GUIDANCE:
+        # the button said "I'll do it myself" -- say how, don't re-send
+        # the whole preview the user is already looking at
+        if draft.unresolved_codes:
+            return CommandResult(
+                reply="Add them one at a time with:\n"
+                f"*create product {draft.unresolved_codes[0]} <description>*\n"
+                "Or reply *create all products* to add them all at once."
+            )
+        return CommandResult(
+            reply="Correct a line with:\n*line <n> qty <value>* — or *rate*, or *code*\n"
+            "e.g. *line 3 qty 90*"
+        )
 
     if lowered in {"use invoice total", "use calculated total"}:
         draft.total_resolution = "invoice" if "invoice" in lowered else "calculated"

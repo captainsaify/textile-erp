@@ -22,14 +22,25 @@ class RequestContext:
 
 
 @dataclass(frozen=True)
+class Notification:
+    """A message to someone other than the sender. Carries its own
+    buttons because the person who has to *act* on it is the recipient,
+    not the sender -- a withdrawal approval is useless as a button on
+    the requester's screen."""
+
+    to_number: str
+    body: str
+    interactive: Interactive | None = None
+
+
+@dataclass(frozen=True)
 class CommandResult:
     reply: str
-    #: (whatsapp_number, body) messages to send to people *other* than
-    #: the sender -- the dual-approval request in docs/06_Accounting.md
-    #: §8 is the first command that has to reach a second person.
-    #: Delivered after the reply, best-effort: a partner being
-    #: unreachable must not undo a committed transaction.
-    notifications: tuple[tuple[str, str], ...] = ()
+    #: Messages to people *other* than the sender -- the dual-approval
+    #: request in docs/06_Accounting.md §8 is the first command that has
+    #: to reach a second person. Delivered after the reply, best-effort:
+    #: a partner being unreachable must not undo a committed transaction.
+    notifications: tuple[Notification, ...] = ()
     #: Optional buttons/list menu accompanying `reply`
     #: (docs/19_InteractiveMessages.md). `reply` is always sent and is
     #: always sufficient on its own -- a transport that can't render

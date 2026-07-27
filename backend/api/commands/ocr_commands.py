@@ -14,7 +14,7 @@ import decimal
 import re
 
 from backend.api.command_types import CommandResult, RequestContext
-from backend.api.commands.purchase_commands import render_preview
+from backend.api.commands.purchase_commands import preview_result
 from backend.api.formatting import fmt_date, fmt_qty
 from backend.core.exceptions import DomainError, ValidationError
 from backend.core.logging import get_logger
@@ -180,7 +180,7 @@ async def handle_details(args: str, ctx: RequestContext) -> CommandResult:
     await sessions.set(
         ctx.user.org_id, ctx.user.id, AWAITING_PURCHASE_CONFIRMATION, draft.to_context()
     )
-    return CommandResult(reply=render_preview(draft))
+    return preview_result(draft)
 
 
 async def process_purchase_photo(

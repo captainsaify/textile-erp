@@ -182,11 +182,14 @@ class WhatsAppDispatcher:
         docs/06_Accounting.md §8). The transaction is already committed
         by now, so a send failure is logged, never raised -- an
         unreachable partner must not look like a failed withdrawal."""
-        for number, body in result.notifications:
+        for note in result.notifications:
             try:
-                await self._client.send_text(number, body)
+                await self._deliver(
+                    note.to_number,
+                    CommandResult(reply=note.body, interactive=note.interactive),
+                )
             except Exception as exc:  # noqa: BLE001 -- best-effort fan-out
-                logger.error("notification_send_failed", to=number, error=str(exc))
+                logger.error("notification_send_failed", to=note.to_number, error=str(exc))
 
     async def process_media(self, media: InboundMedia) -> None:
         if not await self._first_delivery(media.message_id):
