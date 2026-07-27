@@ -165,14 +165,9 @@ per request by replaying the journal would not scale. See §9.
 
 ## 7. Deployment {#deployment}
 
-Domain: **captainsreasearch.co.in**.
+Domain: **example.com**.
 
-> Worth double-checking that spelling before any DNS or certificate
-> work — `reasearch` rather than `research` is the kind of thing that
-> is easy to mistype and painful to discover after a certificate has
-> been issued.
-
-Recommended: serve the ERP on a subdomain, `erp.captainsreasearch.co.in`,
+Recommended: serve the ERP on a subdomain, `erp.example.com`,
 leaving the apex free for anything else.
 
 Everything needed already exists in `docker/nginx.conf`:
