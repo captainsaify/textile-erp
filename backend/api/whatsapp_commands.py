@@ -38,6 +38,7 @@ from backend.api.commands.report_commands import (
     handle_supplier,
 )
 from backend.api.commands.sale_commands import handle_sale
+from backend.api.commands.settings_commands import handle_settings
 from backend.api.commands.settlement_commands import handle_paid, handle_received
 from backend.api.commands.stock_commands import handle_search, handle_stock
 from backend.core.security import role_at_least
@@ -223,6 +224,13 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.STAFF,
         handler=handle_ledger,
         help_text="Statement of invoices/payments for a party, or movement history for a product.",
+    ),
+    "settings": CommandSpec(
+        name="settings",
+        syntax="settings  |  settings <key> <value>",
+        min_role=UserRole.OWNER,
+        handler=handle_settings,
+        help_text="List or change the business's configurable thresholds.",
     ),
     "help": CommandSpec(
         name="help",

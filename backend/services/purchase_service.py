@@ -40,6 +40,7 @@ from backend.repositories.accounting_repository import business_today
 from backend.repositories.party_repository import SupplierRepository
 from backend.repositories.product_repository import ProductRepository
 from backend.repositories.purchase_repository import PurchaseRepository
+from backend.repositories.settings_repository import SettingsRepository
 from backend.services.audit_service import AuditService
 from backend.services.inventory_service import InventoryService
 from backend.services.journal_service import JournalService
@@ -52,7 +53,6 @@ QTY_SANITY_CEILING = decimal.Decimal("100000")
 SUPPLIER_MATCH_THRESHOLD = 80  # rapidfuzz ratio, 0-100 -- §7
 PRODUCT_MATCH_THRESHOLD = 85
 INVOICE_SIMILARITY_THRESHOLD = 85  # §6 layer 2
-TOTAL_MISMATCH_TOLERANCE = decimal.Decimal("1.00")  # §5 default
 DUPLICATE_TOTAL_TOLERANCE = decimal.Decimal("0.01")  # 1%
 LINE_OVERLAP_THRESHOLD = 0.7
 
@@ -226,6 +226,7 @@ class PurchaseService:
         self._inventory = InventoryService(session)
         self._journal = JournalService(session)
         self._audit = AuditService(session)
+        self._settings = SettingsRepository(session)
 
     async def resolve_supplier(self, org_id: uuid.UUID, name: str) -> Supplier | None:
         candidates = await self._suppliers.search(org_id, name, limit=1)
@@ -353,11 +354,12 @@ class PurchaseService:
         if draft.freight < ZERO or draft.other_charges < ZERO:
             raise ValidationError("Freight and other charges can't be negative.")
 
-    def _check_total_mismatch(self, draft: Draft) -> None:
+    async def _check_total_mismatch(self, org_id: uuid.UUID, draft: Draft) -> None:
         if draft.declared_total is None or draft.total_resolution is not None:
             return
+        tolerance = await self._settings.purchase_total_mismatch_tolerance(org_id)
         difference = abs(draft.declared_total - draft.grand_total)
-        if difference > TOTAL_MISMATCH_TOLERANCE:
+        if difference > tolerance:
             raise TotalMismatchWarning(
                 f"⚠️ The invoice shows a total of {draft.declared_total}, but the line "
                 f"items + freight + other charges add up to {draft.grand_total} "
@@ -387,7 +389,10 @@ class PurchaseService:
         if override:
             return
         candidates = await self._purchases.find_potential_duplicates(
-            org_id, draft.supplier_id, draft.invoice_date
+            org_id,
+            draft.supplier_id,
+            draft.invoice_date,
+            window_days=await self._settings.duplicate_invoice_window_days(org_id),
         )
         draft_products = {line.product_id for line in draft.lines}
         for candidate in candidates:
@@ -429,7 +434,7 @@ class PurchaseService:
         async with self._session.begin():
             today = await business_today(self._session, org_id)
             self._validate(draft, today)
-            self._check_total_mismatch(draft)
+            await self._check_total_mismatch(org_id, draft)
             await self._check_duplicates(org_id, draft, override_duplicate)
 
             if draft.total_resolution == "invoice" and draft.declared_total is not None:

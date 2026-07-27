@@ -27,6 +27,7 @@ from backend.models.enums import AccountCode, LedgerEntryType, SalePaymentType
 from backend.repositories.accounting_repository import LedgerRepository, business_today
 from backend.repositories.party_repository import CustomerRepository
 from backend.repositories.product_repository import ProductRepository
+from backend.repositories.settings_repository import SettingsRepository
 from backend.services.audit_service import AuditService
 from backend.services.inventory_service import InventoryService
 from backend.services.journal_service import JournalService
@@ -35,8 +36,6 @@ TWO = decimal.Decimal("0.01")
 FOUR = decimal.Decimal("0.0001")
 ZERO = decimal.Decimal("0")
 
-BELOW_COST_TOLERANCE = decimal.Decimal("0")  # §4 default: any sale below cost warns
-DEDUP_WINDOW_MINUTES = 10  # §5 settings.sale_dedup_window_minutes
 CUSTOMER_MATCH_THRESHOLD = 80  # §9 fuzzy >= 0.8
 
 _WHITESPACE = re.compile(r"\s+")
@@ -182,6 +181,7 @@ class SalesService:
         self._ledgers = LedgerRepository(session)
         self._journal = JournalService(session)
         self._audit = AuditService(session)
+        self._settings = SettingsRepository(session)
 
     async def resolve_customer(self, org_id: uuid.UUID, name: str) -> list[Customer]:
         """Returns [] (none), [one] (resolved), or several when the match
@@ -258,12 +258,13 @@ class SalesService:
             for line in draft.lines
             if line.product_id is not None and line.qty > line.qty_on_hand
         ]
+        tolerance = await self._settings.below_cost_tolerance(org_id)
         below_cost = [
             line
             for line in draft.lines
             if line.product_id is not None
             and line.avg_cost > ZERO
-            and line.rate < line.avg_cost * (1 - BELOW_COST_TOLERANCE)
+            and line.rate < line.avg_cost * (1 - tolerance)
         ]
 
         credit_limit: tuple[decimal.Decimal, decimal.Decimal] | None = None
@@ -278,7 +279,7 @@ class SalesService:
         near_duplicate: SalesHeader | None = None
         if draft.customer_id is not None:
             since = datetime.datetime.now(datetime.UTC) - datetime.timedelta(
-                minutes=DEDUP_WINDOW_MINUTES
+                minutes=await self._settings.sale_dedup_window_minutes(org_id)
             )
             recent = list(
                 (
@@ -324,7 +325,7 @@ class SalesService:
 
     async def find_by_idempotency_key(self, org_id: uuid.UUID, key: str) -> SalesHeader | None:
         since = datetime.datetime.now(datetime.UTC) - datetime.timedelta(
-            minutes=DEDUP_WINDOW_MINUTES
+            minutes=await self._settings.sale_dedup_window_minutes(org_id)
         )
         return (
             await self._session.execute(
