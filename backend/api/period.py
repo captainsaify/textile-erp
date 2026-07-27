@@ -10,6 +10,7 @@ import dataclasses
 import datetime
 import re
 
+from backend.api.interactive import Choice, ListMenu, Section
 from backend.core.exceptions import ValidationError
 
 _RANGE = re.compile(r"^(\d{2}-\d{2}-\d{4})\s+to\s+(\d{2}-\d{2}-\d{4})$", re.IGNORECASE)
@@ -59,3 +60,29 @@ def parse_period(args: str, today: datetime.date, *, usage: str = USAGE) -> Peri
         return Period(start, end, f"{match.group(1)} to {match.group(2)}")
 
     raise ValidationError(usage)
+
+
+def period_menu(command: str) -> ListMenu:
+    """Offered when `summary`/`profit`/`export` arrive without a period.
+    `Custom` can't be a row that answers itself -- a date range is free
+    text -- so it prompts for one."""
+    return ListMenu(
+        body=f"Which period for {command}?",
+        menu_label="Pick period",
+        sections=(
+            Section(
+                title="Period",
+                rows=(
+                    Choice(id=f"{command} today", title="Today"),
+                    Choice(id=f"{command} week", title="This week", description="Monday to today"),
+                    Choice(id=f"{command} month", title="This month", description="1st to today"),
+                    Choice(id=f"{command} year", title="This year", description="1 Jan to today"),
+                    Choice(
+                        id=f"{command} custom",
+                        title="Custom range",
+                        description="You'll type the dates",
+                    ),
+                ),
+            ),
+        ),
+    )

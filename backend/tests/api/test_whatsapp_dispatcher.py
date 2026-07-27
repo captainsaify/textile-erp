@@ -25,11 +25,14 @@ async def test_known_sender_gets_help_reply(
 ) -> None:
     assert staff_user.whatsapp_number is not None
     await _process(dispatcher, meta_payload(text_message(staff_user.whatsapp_number, "help")))
-    assert len(fake_sender.sent) == 1
     to, body = fake_sender.sent[0]
     assert to == staff_user.whatsapp_number
     assert "help" in body
     assert "Available commands" in body
+    # the menu follows as a second message; FakeSender can't render
+    # buttons, so it arrives as the text fallback (docs/19 §3)
+    assert len(fake_sender.sent) == 2
+    assert "What would you like to do?" in fake_sender.sent[1][1]
 
 
 async def test_unknown_sender_gets_no_reply_at_all(
@@ -46,8 +49,12 @@ async def test_duplicate_delivery_processed_once(
     assert staff_user.whatsapp_number is not None
     message = text_message(staff_user.whatsapp_number, "help")
     await _process(dispatcher, meta_payload(message))
+    after_first = len(fake_sender.sent)
     await _process(dispatcher, meta_payload(message))
-    assert len(fake_sender.sent) == 1
+    # counting sends rather than asserting exactly one: `help` also
+    # sends its menu, and what this test is about is that a redelivered
+    # message adds nothing at all
+    assert len(fake_sender.sent) == after_first
 
 
 async def test_unknown_command_gets_suggestion(

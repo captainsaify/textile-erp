@@ -48,6 +48,7 @@ from backend.api.commands.sale_commands import handle_sale
 from backend.api.commands.settings_commands import handle_settings
 from backend.api.commands.settlement_commands import handle_paid, handle_received
 from backend.api.commands.stock_commands import handle_search, handle_stock
+from backend.api.interactive import Choice, ListMenu, Section
 from backend.core.security import role_at_least
 from backend.models.enums import UserRole
 
@@ -79,7 +80,59 @@ async def handle_help(args: str, ctx: RequestContext) -> CommandResult:
         if role_at_least(ctx.user.role, spec.min_role):
             lines.append(f"• {spec.name} — {spec.help_text}")
     lines.append("Send 'help <command>' for syntax and details.")
-    return CommandResult(reply="\n".join(lines))
+    return CommandResult(reply="\n".join(lines), interactive=main_menu(ctx.user.role))
+
+
+#: The menu groups commands by *intent*, not alphabetically -- someone
+#: opening it knows what they want to do, not what it is called. A list
+#: caps at 10 rows total (docs/19 §2), so this is the shortlist of what
+#: gets reached for; the full set stays in the text above it.
+_MENU: tuple[tuple[str, tuple[tuple[str, str, str], ...]], ...] = (
+    (
+        "Record",
+        (
+            ("sale", "Record a sale", "Stock out, money in or on credit"),
+            ("paid", "Pay a supplier", "Money out against an invoice"),
+            ("received", "Money received", "From a customer"),
+            ("expense", "Record an expense", "Transport, packing, rent…"),
+        ),
+    ),
+    (
+        "Look up",
+        (
+            ("dashboard", "Dashboard", "Cash, stock, profit, who owes what"),
+            ("stock", "Stock summary", "What's on hand and what's low"),
+            ("summary", "Period summary", "Sales, purchases, profit"),
+        ),
+    ),
+    (
+        "Manage",
+        (
+            ("undo", "Undo last entry", "Reverses your most recent one"),
+            ("export", "Export to Excel", "Purchases, sales or stock"),
+            ("help", "All commands", "The full list"),
+        ),
+    ),
+)
+
+
+def main_menu(role: UserRole) -> ListMenu:
+    """Role-filtered: a command the user can't run is never offered."""
+    sections: list[Section] = []
+    for title, entries in _MENU:
+        rows = tuple(
+            Choice(id=command, title=label, description=description)
+            for command, label, description in entries
+            if (spec := COMMAND_REGISTRY.get(command)) is not None
+            and role_at_least(role, spec.min_role)
+        )
+        if rows:
+            sections.append(Section(title=title, rows=rows))
+    return ListMenu(
+        body="What would you like to do?",
+        menu_label="Choose",
+        sections=tuple(sections),
+    )
 
 
 COMMAND_REGISTRY: dict[str, CommandSpec] = {

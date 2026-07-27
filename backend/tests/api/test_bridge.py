@@ -76,8 +76,7 @@ async def test_direct_message_replies_to_sender(
         headers={"X-Bridge-Secret": BRIDGE_SECRET},
     )
     assert response.status_code == 200
-    assert len(fake_sender.sent) == 1
-    to, body = fake_sender.sent[0]
+    to, body = fake_sender.sent[0]  # the reply; a menu may follow it
     assert to == jid
     assert "Available commands" in body
 
@@ -95,8 +94,7 @@ async def test_group_message_resolves_author_and_replies_to_group(
         headers={"X-Bridge-Secret": BRIDGE_SECRET},
     )
     assert response.status_code == 200
-    assert len(fake_sender.sent) == 1
-    to, body = fake_sender.sent[0]
+    to, body = fake_sender.sent[0]  # the reply; a menu may follow it
     assert to == group
     assert "Available commands" in body
 

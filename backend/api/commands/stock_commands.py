@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from backend.api.command_types import CommandResult, RequestContext
 from backend.api.formatting import fmt_date, fmt_money, fmt_qty
+from backend.api.interactive import MAX_LIST_ROWS, Choice, ListMenu, Section
 from backend.repositories.inventory_repository import LowStockRow
 from backend.services.stock_service import StockService
 
@@ -82,7 +83,33 @@ async def handle_stock(args: str, ctx: RequestContext) -> CommandResult:
                     f"{fmt_qty(entry.qty_on_hand)} {unit_code} "
                     f"@ {fmt_money(entry.weighted_avg_cost)}/{unit_code}"
                 )
-            return CommandResult(reply="\n".join(lines))
+            menu = None
+            if len(found) <= MAX_LIST_ROWS:
+                menu = ListMenu(
+                    body=f"Which {sub.upper()}?",
+                    menu_label="Pick brand",
+                    sections=(
+                        Section(
+                            title="Brands",
+                            rows=tuple(
+                                Choice(
+                                    id=f"stock {sub} {e.product.brand.name}"
+                                    if e.product.brand
+                                    else f"stock {sub}",
+                                    title=(e.product.brand.name if e.product.brand else "No brand")[
+                                        :24
+                                    ],
+                                    description=(
+                                        f"{fmt_qty(e.qty_on_hand)} {e.product.unit.code} "
+                                        f"@ {fmt_money(e.weighted_avg_cost)}"
+                                    )[:72],
+                                )
+                                for e in found
+                            ),
+                        ),
+                    ),
+                )
+            return CommandResult(reply="\n".join(lines), interactive=menu)
 
         detail = found[0]
         product = detail.product

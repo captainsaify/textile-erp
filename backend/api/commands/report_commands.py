@@ -9,7 +9,7 @@ import re
 
 from backend.api.command_types import CommandResult, RequestContext
 from backend.api.formatting import fmt_date, fmt_money, fmt_qty
-from backend.api.period import parse_period
+from backend.api.period import parse_period, period_menu
 from backend.core.exceptions import DomainError
 from backend.core.security import role_at_least
 from backend.models.enums import UserRole
@@ -80,6 +80,8 @@ def _render_dashboard(data: DashboardData) -> str:
 
 
 async def handle_summary(args: str, ctx: RequestContext) -> CommandResult:
+    if args.strip().lower() == "custom":
+        return CommandResult(reply="Send the range like:\n*summary 01-07-2026 to 25-07-2026*")
     async with ctx.session_factory() as session:
         today = await business_today(session, ctx.user.org_id)
         try:
@@ -99,10 +101,14 @@ async def handle_summary(args: str, ctx: RequestContext) -> CommandResult:
         f"➕ Other income: {fmt_money(profit.other_income)}",
         f"📈 Net profit: {fmt_money(profit.net_profit)}",
     ]
-    return CommandResult(reply="\n".join(lines))
+    # answered first, menu second: a bare `summary` is a real question
+    # with a sensible default, not an invitation to pick a period
+    return CommandResult(reply="\n".join(lines), interactive=period_menu("summary"))
 
 
 async def handle_profit(args: str, ctx: RequestContext) -> CommandResult:
+    if args.strip().lower() == "custom":
+        return CommandResult(reply="Send the range like:\n*profit 01-07-2026 to 25-07-2026*")
     async with ctx.session_factory() as session:
         today = await business_today(session, ctx.user.org_id)
         try:
@@ -112,7 +118,9 @@ async def handle_profit(args: str, ctx: RequestContext) -> CommandResult:
 
         report = await ProfitService(session).calculate(ctx.user.org_id, period.start, period.end)
 
-    return CommandResult(reply=_render_profit(report, period.label))
+    return CommandResult(
+        reply=_render_profit(report, period.label), interactive=period_menu("profit")
+    )
 
 
 def _render_profit(report: ProfitReport, label: str) -> str:

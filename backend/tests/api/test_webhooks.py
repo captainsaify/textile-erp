@@ -89,7 +89,6 @@ async def test_signed_message_end_to_end_reply(
     assert response.status_code == 200
     assert response.json() == {"status": "received"}
     # ASGITransport runs background tasks before returning
-    assert len(fake_sender.sent) == 1
     assert "Available commands" in fake_sender.sent[0][1]
 
 

@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from backend.api.command_types import CommandResult, RequestContext
 from backend.api.formatting import fmt_date
-from backend.api.period import parse_period
+from backend.api.interactive import Choice, ListMenu, Section
+from backend.api.period import parse_period, period_menu
 from backend.core.exceptions import DomainError, ValidationError
 from backend.repositories.accounting_repository import business_today
 from backend.services.backup_service import BackupService
@@ -25,7 +26,31 @@ RESTORE_USAGE = "Usage: restore <backup-name> confirm <backup-name>"
 async def handle_export(args: str, ctx: RequestContext) -> CommandResult:
     parts = args.split(maxsplit=1)
     if not parts:
-        return CommandResult(reply=EXPORT_USAGE)
+        return CommandResult(
+            reply=EXPORT_USAGE,
+            interactive=ListMenu(
+                body="Which report would you like?",
+                menu_label="Pick report",
+                sections=(
+                    Section(
+                        title="Reports",
+                        rows=(
+                            Choice(
+                                id="export purchases",
+                                title="Purchases",
+                                description="Supplier sheet layout",
+                            ),
+                            Choice(
+                                id="export sales", title="Sales", description="With cost and margin"
+                            ),
+                            Choice(
+                                id="export stock", title="Stock", description="On hand and value"
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
     report_type = parts[0].strip().lower()
     if report_type not in REPORT_TYPES:
         return CommandResult(
@@ -54,7 +79,8 @@ async def handle_export(args: str, ctx: RequestContext) -> CommandResult:
             f"⏳ Building your {report_type} export for {period.label} "
             f"({fmt_date(period.start)} – {fmt_date(period.end)}).\n"
             f"Reference {str(job_id)[:8]} — I'll message you when it's ready."
-        )
+        ),
+        interactive=period_menu(f"export {report_type}"),
     )
 
 
