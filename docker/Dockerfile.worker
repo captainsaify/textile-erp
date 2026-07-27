@@ -1,0 +1,55 @@
+# Celery worker image -- docs/16_Deployment.md §3.
+#
+# Same build as the API plus the OCR system libraries, which the API
+# itself never needs: OCR runs in a worker (docs/11_BackgroundWorkers.md
+# §2), and shipping OpenCV's dependencies into the web container would
+# only enlarge the attack surface of the internet-facing process.
+FROM python:3.12-slim AS builder
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project --no-dev
+
+COPY backend/ ./backend/
+COPY alembic/ ./alembic/
+COPY alembic.ini ./
+RUN uv sync --frozen --no-dev
+
+
+FROM python:3.12-slim AS runtime
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        libpq5 \
+        poppler-utils \
+        postgresql-client \
+        tesseract-ocr \
+        tesseract-ocr-eng \
+        libgl1 \
+        libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --create-home --uid 10001 appuser
+
+WORKDIR /app
+COPY --from=builder --chown=appuser:appuser /app /app
+
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    ATTACHMENTS_DIR=/data/attachments
+
+RUN mkdir -p /data/attachments /data/backups /data/reports \
+    && chown -R appuser:appuser /data
+
+USER appuser
+
+# Overridden per queue by compose; this default runs everything, which
+# is what a single-container local run wants.
+CMD ["celery", "-A", "backend.workers.app", "worker", "--loglevel=info"]

@@ -36,6 +36,8 @@ dev = [
     "pytest-cov>=6.0",
     "ruff>=0.7",
     "mypy>=1.13",
+    "pyyaml>=6.0.3",
+    "types-pyyaml>=6.0.12.20260724",
 ]
 
 [tool.ruff]

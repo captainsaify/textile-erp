@@ -1,0 +1,62 @@
+# API image -- docs/16_Deployment.md §3.
+#
+# Multi-stage: uv resolves and installs into a venv in the builder, and
+# only that venv plus the source is copied forward. The runtime image
+# therefore carries no build toolchain, which is both smaller and one
+# fewer thing to keep patched.
+FROM python:3.12-slim AS builder
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+
+WORKDIR /app
+
+# Dependencies first, as their own layer: application code changes far
+# more often than the lockfile, so this layer stays cached across
+# ordinary deploys.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project --no-dev
+
+COPY backend/ ./backend/
+COPY alembic/ ./alembic/
+COPY alembic.ini ./
+RUN uv sync --frozen --no-dev
+
+
+FROM python:3.12-slim AS runtime
+
+# libpq for psycopg/asyncpg, poppler for PDF rendering in the OCR
+# fallback path, curl for the healthcheck compose declares.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        libpq5 \
+        poppler-utils \
+        postgresql-client \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root: the API handles untrusted input (webhooks, uploaded images),
+# so a container escape shouldn't start as root.
+RUN useradd --create-home --uid 10001 appuser
+
+WORKDIR /app
+COPY --from=builder --chown=appuser:appuser /app /app
+
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    ATTACHMENTS_DIR=/data/attachments
+
+RUN mkdir -p /data/attachments /data/backups /data/reports \
+    && chown -R appuser:appuser /data
+
+USER appuser
+EXPOSE 8000
+
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 --start-period=20s \
+    CMD curl -fsS http://localhost:8000/healthz || exit 1
+
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
