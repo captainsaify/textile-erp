@@ -72,28 +72,37 @@ managed 20/26 on the same image. Vision cost $0.054, took 18.1s.
 dashboard needs that API underneath it, so the two are one piece of
 work, not two.
 
-**Deployment: verified as far as possible without Docker.** No
-container runtime exists on this machine, so the images have never been
-built. Instead every container command was run against a dependency set
-produced by the Dockerfile's own `uv sync --frozen --no-dev`:
+**Deployment: built and verified running.** Colima provides the
+container runtime (`colima start`; Docker Desktop was avoided — it needs
+an admin password and a GUI). `docker compose up -d` brings up all eight
+services. Confirmed working:
 
-- the API's exact CMD boots and `/healthz` returns 200 with a live DB
-  check (the probe compose gates nginx on);
-- `alembic upgrade head` runs — the `migrate` service's command;
-- the celery CLI resolves `-A backend.workers.app`, registers all seven
-  tasks, and Beat lists its six entries;
-- a real `pg_dump` backup completed, checksummed, and passed
-  `pg_restore --list` verification.
+- both images build; api 807MB, worker 1.17GB
+- both run as uid 10001; no `.env` in either image; tesseract only in
+  the worker; `pg_dump` in both (the backup path shells out to it)
+- all seven migrations apply to a completely empty database
+- api passes its compose healthcheck
+- a task dispatched through the real Redis broker was executed by
+  worker-scheduled and wrote its `reconciliation_runs` row
+- HTTPS through nginx reaches the app, HTTP 301s to it, HSTS/nosniff/
+  DENY are set, and the webhook route 403s a wrong verify token
 
-That dry run found four bugs a first `docker compose up` would have hit
-(compose in the wrong directory to read `.env`; Beat never attached to
-its schedule; empty datastore passwords; no `.dockerignore`) — all
-fixed, all now covered by `backend/tests/test_deployment_config.py`.
+Local run needs `docker/certs/{fullchain,privkey}.pem` — self-signed is
+fine (`openssl req -x509 -newkey rsa:2048 -nodes -days 365 -keyout
+docker/certs/privkey.pem -out docker/certs/fullchain.pem -subj
+/CN=localhost`). That directory is gitignored.
 
-**What is still unverified:** the image builds themselves. `apt-get`
-package names, the uv binary copy from ghcr.io, layer caching and the
-non-root file permissions have never been exercised. Run
-`docker compose build` first and expect to fix something.
+**Two traps this shook out, both now pinned by tests:**
+
+1. **`/app` is root-owned on purpose** — the app must not be able to
+   rewrite its own code. Anything needing to write goes under `/data`.
+   Celery Beat defaults its schedule file to the working directory and
+   crash-looped on EACCES until pointed at `/data/celery`. If you add a
+   process that writes to disk, give it a `/data` path.
+2. **Compose must stay at the repo root.** It reads `.env` for
+   interpolation from its own directory; under `docker/` every
+   `${POSTGRES_USER}` resolved empty and Postgres started with no
+   username.
 
 ---
 
