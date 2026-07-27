@@ -8,6 +8,7 @@ import dataclasses
 import decimal
 import re
 
+from backend.api.amounts import parse_amount
 from backend.api.command_types import CommandResult, RequestContext
 from backend.api.formatting import fmt_date, fmt_money
 from backend.core.exceptions import DomainError, ValidationError
@@ -32,10 +33,9 @@ def parse_money_command(args: str, command: str) -> MoneyCommand:
     if len(tokens) < 3:
         raise ValidationError(usage)
     category, amount_raw, via = tokens[0], tokens[1], tokens[2].lower()
-    try:
-        amount = decimal.Decimal(amount_raw)
-    except decimal.InvalidOperation:
-        raise ValidationError(f"'{amount_raw}' is not a number. {usage}") from None
+    # Indian grouping accepted: the system prints ₹40,92,000.00, so
+    # refusing that shape back would be the system contradicting itself.
+    amount = parse_amount(amount_raw)
     if via not in {"cash", "bank"}:
         raise ValidationError(f"Say cash or bank — e.g. {command} {category} {amount_raw} cash")
     description = " ".join(tokens[3:]).strip() or None

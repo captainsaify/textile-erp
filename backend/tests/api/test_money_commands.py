@@ -71,7 +71,7 @@ def test_parse_money_command() -> None:
 
     with pytest.raises(ValidationError, match="Usage"):
         parse_money_command("transport 1500", "expense")
-    with pytest.raises(ValidationError, match="not a number"):
+    with pytest.raises(ValidationError, match="isn't a number"):
         parse_money_command("transport abc cash", "expense")
     with pytest.raises(ValidationError, match="cash or bank"):
         parse_money_command("transport 1500 upi", "expense")
@@ -183,3 +183,55 @@ async def test_expense_rejects_bad_amounts(ctx: RequestContext) -> None:
     assert "greater than zero" in result.reply
     result = await handle_expense("transport 1.999 cash", ctx)
     assert "2 decimal places" in result.reply
+
+
+# --------------------------------------------------------------------
+# amount parsing -- from a real session where eight attempts in a row
+# were rejected with an identical, unhelpful usage line
+# --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "supplier: wagdia 4000000 cash ref 001",
+        "supplier wagdia 40,00,000 cash",
+        "Supplier: wagdia 40,00,000 cash ref 001",
+        "wagdia 4000000 cash",
+        "Wagdia Textiles 40,92,000 bank against INV-001",
+    ],
+)
+def test_every_real_world_paid_phrasing_parses(text: str) -> None:
+    from backend.api.commands.settlement_commands import parse_settlement
+
+    command = parse_settlement(text, "paid")
+    assert command.party.lower().startswith("wagdia")
+    assert command.via in {"cash", "bank"}
+    assert command.amount > 0
+
+
+def test_indian_digit_grouping_is_accepted_because_we_print_it() -> None:
+    """fmt_money renders ₹40,92,000.00; refusing that back as input is
+    the system contradicting itself."""
+    from backend.api.amounts import parse_amount
+
+    assert parse_amount("40,92,000") == decimal.Decimal("4092000.00")
+    assert parse_amount("₹1,23,456.78") == decimal.Decimal("123456.78")
+
+
+def test_amount_errors_name_the_problem_not_just_the_usage() -> None:
+    from backend.api.commands.settlement_commands import parse_settlement
+
+    with pytest.raises(ValidationError, match="cash or bank"):
+        parse_settlement("wagdia 40000", "paid")
+    with pytest.raises(ValidationError, match="couldn't find an amount"):
+        parse_settlement("wagdia cash", "paid")
+
+
+def test_expense_and_capital_accept_grouped_amounts() -> None:
+    from backend.api.commands.capital_commands import parse_capital_command
+
+    expense = parse_money_command("transport 1,500 cash", "expense")
+    assert expense.amount == decimal.Decimal("1500.00")
+    capital = parse_capital_command("Rahul 5,00,000 bank", usage="u")
+    assert capital.amount == decimal.Decimal("500000.00")

@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import dataclasses
 import decimal
-import re
 
+from backend.api.amounts import looks_like_amount, parse_amount
 from backend.api.command_types import CommandResult, RequestContext
 from backend.api.formatting import fmt_money
 from backend.core.exceptions import DomainError, ValidationError
@@ -20,11 +20,10 @@ from backend.services.session_service import (
 )
 from backend.services.settlement_service import SettlementResult, SettlementService
 
-_PATTERN = re.compile(
-    r"^(?:Customer|Supplier):\s*(?P<party>.+?)\s+(?P<amount>[\d.]+)\s+"
-    r"(?P<via>cash|bank)(?:\s+against\s+(?P<against>\S+))?\s*$",
-    re.IGNORECASE,
-)
+#: `against`, but people write it several ways
+_AGAINST_WORDS = {"against", "ref", "ref:", "for", "#", "invoice"}
+#: an optional, redundant label -- the command already says which side
+_LABELS = {"customer:", "supplier:", "customer", "supplier"}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -36,21 +35,54 @@ class SettlementCommand:
 
 
 def parse_settlement(args: str, kind: str) -> SettlementCommand:
+    """Deliberately forgiving, and specific when it can't cope.
+
+    A single regex here rejected every one of eight real attempts with
+    the same usage line, which told the user nothing about *which* part
+    was wrong -- one of them differed only by writing "ref 001" instead
+    of "against 001". This walks the tokens instead, so each failure can
+    name the actual problem.
+    """
     label = "Customer" if kind == "received" else "Supplier"
-    usage = f"Usage: {kind} {label}: <name> <amount> <cash|bank> [against <ref>]"
-    match = _PATTERN.match(args.strip())
-    if match is None:
+    example = f"{kind} {'ABC' if kind == 'received' else 'Wagdia'} 40000 cash"
+    usage = f"Usage: {kind} [{label}:] <name> <amount> <cash|bank> [against <ref>]\ne.g. {example}"
+
+    tokens = args.split()
+    if not tokens:
         raise ValidationError(usage)
-    try:
-        amount = decimal.Decimal(match["amount"])
-    except decimal.InvalidOperation:
-        raise ValidationError(f"'{match['amount']}' is not a number. {usage}") from None
-    return SettlementCommand(
-        party=match["party"].strip(),
-        amount=amount,
-        via=match["via"].lower(),
-        against=match["against"],
+
+    # the label is optional: `paid Wagdia 40000 cash` is unambiguous
+    if tokens[0].lower() in _LABELS:
+        tokens = tokens[1:]
+
+    against: str | None = None
+    for index, token in enumerate(tokens):
+        if token.lower() in _AGAINST_WORDS and index + 1 < len(tokens):
+            against = tokens[index + 1]
+            tokens = tokens[:index]
+            break
+
+    via: str | None = None
+    for index, token in enumerate(tokens):
+        if token.lower() in {"cash", "bank"}:
+            via = token.lower()
+            tokens = tokens[:index] + tokens[index + 1 :]
+            break
+    if via is None:
+        raise ValidationError(f"I need to know whether this was cash or bank.\n{usage}")
+
+    amount_index = next(
+        (i for i in range(len(tokens) - 1, -1, -1) if looks_like_amount(tokens[i])), None
     )
+    if amount_index is None:
+        raise ValidationError(f"I couldn't find an amount in that.\n{usage}")
+    amount = parse_amount(tokens[amount_index])
+
+    party = " ".join(tokens[:amount_index]).strip().rstrip(":")
+    if not party:
+        raise ValidationError(f"Which {label.lower()}?\n{usage}")
+
+    return SettlementCommand(party=party, amount=amount, via=via, against=against)
 
 
 def render_settlement(result: SettlementResult, kind: str) -> str:

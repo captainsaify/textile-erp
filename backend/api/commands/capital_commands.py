@@ -9,6 +9,7 @@ import dataclasses
 import decimal
 import re
 
+from backend.api.amounts import parse_amount
 from backend.api.command_types import CommandResult, RequestContext
 from backend.api.formatting import fmt_money
 from backend.core.exceptions import DomainError, ValidationError
@@ -63,10 +64,7 @@ def parse_capital_command(
         raise ValidationError(f"Say cash or bank. {usage}")
 
     amount_raw = tokens.pop()
-    try:
-        amount = decimal.Decimal(amount_raw)
-    except decimal.InvalidOperation:
-        raise ValidationError(f"'{amount_raw}' is not a number. {usage}") from None
+    amount = parse_amount(amount_raw)
 
     partner_name = " ".join(tokens).strip()
     if not partner_name:

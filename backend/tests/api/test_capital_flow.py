@@ -141,7 +141,7 @@ def test_parse_capital_rejects_missing_payment_method() -> None:
 
 
 def test_parse_capital_rejects_non_numeric_amount() -> None:
-    with pytest.raises(ValidationError, match="not a number"):
+    with pytest.raises(ValidationError, match="isn't a number"):
         parse_capital_command("Rahul lots cash", usage="u")
 
 
