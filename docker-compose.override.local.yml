@@ -2,8 +2,8 @@
 # psql and redis-cli work directly. Never used in production, where both
 # stay inside the compose network (docs/16_Deployment.md §2).
 #
-#   docker compose -f docker/docker-compose.yml \
-#                  -f docker/docker-compose.override.local.yml up -d
+#   docker compose -f docker-compose.yml \
+#                  -f docker-compose.override.local.yml up -d
 
 services:
   postgres:

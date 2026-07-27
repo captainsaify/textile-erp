@@ -15,6 +15,7 @@ from typing import Any
 from celery import Celery
 
 from backend.core.config import get_settings
+from backend.workers.schedule import CELERYBEAT_SCHEDULE
 
 settings = get_settings()
 
@@ -37,6 +38,12 @@ celery_app.conf.update(
     task_track_started=True,
     result_expires=24 * 60 * 60,
 )
+
+# Wire the Beat schedule onto the app itself. `celery ... beat` reads
+# beat_schedule off the configured app, so a schedule module that is
+# merely *defined* and never assigned produces a Beat process that
+# starts cleanly and fires nothing -- forever, and silently.
+celery_app.conf.beat_schedule = CELERYBEAT_SCHEDULE
 
 
 def run_async[T](coro: Coroutine[Any, Any, T]) -> T:

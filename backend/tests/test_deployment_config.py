@@ -15,13 +15,14 @@ from typing import Any
 import pytest
 import yaml
 
-DOCKER = Path(__file__).resolve().parents[2] / "docker"
+ROOT = Path(__file__).resolve().parents[2]
+DOCKER = ROOT / "docker"
 
 
 def _load(name: str) -> dict[str, Any]:
-    # compose interpolates ${VAR} at runtime; for a structural parse the
-    # placeholders just need to survive as plain strings
-    loaded: dict[str, Any] = yaml.safe_load((DOCKER / name).read_text())
+    # compose interpolates placeholders at runtime; for a structural
+    # parse they just need to survive as plain strings
+    loaded: dict[str, Any] = yaml.safe_load((ROOT / name).read_text())
     return loaded
 
 
@@ -116,6 +117,51 @@ def test_nginx_terminates_tls_and_redirects_plain_http() -> None:
     assert "Strict-Transport-Security" in conf
     # ACME must stay reachable over plain HTTP or renewal breaks
     assert ".well-known/acme-challenge" in conf
+
+
+def test_compose_lives_where_its_env_file_is() -> None:
+    """Compose reads `.env` for interpolation from the directory holding
+    the compose file. With it under docker/ every ${...} resolved empty
+    and Postgres would have started with no username — a failure that
+    only shows on first boot."""
+    assert (ROOT / "docker-compose.yml").exists()
+    assert not (DOCKER / "docker-compose.yml").exists()
+    assert (ROOT / ".env.example").exists()
+
+
+def test_every_variable_compose_interpolates_is_in_the_env_template() -> None:
+    text = (ROOT / "docker-compose.yml").read_text() + (
+        ROOT / "docker-compose.override.local.yml"
+    ).read_text()
+    body = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    referenced = set(re.findall(r"\$\{([A-Z_][A-Z0-9_]*)\}", body))
+    template = {
+        line.split("=", 1)[0].strip()
+        for line in (ROOT / ".env.example").read_text().splitlines()
+        if "=" in line and not line.lstrip().startswith("#")
+    }
+    assert referenced, "expected compose to interpolate at least the datastore credentials"
+    assert referenced <= template, f"not in .env.example: {sorted(referenced - template)}"
+
+
+def test_env_template_documents_a_value_for_the_datastore_secrets() -> None:
+    """An empty POSTGRES_PASSWORD makes the postgres image refuse to
+    start, and redis --requirepass '' is invalid."""
+    values = {
+        line.split("=", 1)[0].strip(): line.split("=", 1)[1].strip()
+        for line in (ROOT / ".env.example").read_text().splitlines()
+        if "=" in line and not line.lstrip().startswith("#")
+    }
+    for key in ("POSTGRES_PASSWORD", "REDIS_PASSWORD", "POSTGRES_USER", "POSTGRES_DB"):
+        assert values.get(key), f"{key} has no example value"
+
+
+def test_build_context_excludes_secrets_and_local_state() -> None:
+    """The context is the repo root, so without .dockerignore every
+    build would ship .env and .venv to the daemon."""
+    ignored = (ROOT / ".dockerignore").read_text()
+    for pattern in (".env", ".venv", ".git", "data/"):
+        assert pattern in ignored, f"{pattern} not excluded from the build context"
 
 
 def test_nginx_body_limit_leaves_room_for_scanned_invoices() -> None:

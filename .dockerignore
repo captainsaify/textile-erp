@@ -1,0 +1,34 @@
+# Build context exclusions.
+#
+# The build context is now the repo root (compose sets `context: .`), so
+# without this every build would ship .git, the local .venv and — worst
+# — .env with live Meta tokens and the Anthropic key into the daemon.
+# The Dockerfiles only COPY specific paths, so nothing secret lands in a
+# layer today, but a future broad `COPY . .` would leak them silently.
+# Excluding here means that mistake can't be made.
+
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+.mypy_cache
+.pytest_cache
+.ruff_cache
+
+# runtime state, not build inputs: attachments are the OCR ground truth
+# and backups can be gigabytes
+data/
+docs/
+frontend/node_modules
+whatsapp-bridge/node_modules
+whatsapp-bridge/.wwebjs_auth
+whatsapp-bridge/.wwebjs_cache
+
+*.md
+!README.md

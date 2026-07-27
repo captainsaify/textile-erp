@@ -15,6 +15,7 @@ import datetime
 import decimal
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
@@ -23,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.api.command_types import RequestContext
 from backend.api.commands.ops_commands import handle_backup, handle_export, handle_restore
+from backend.core.config import get_settings
 from backend.models import (
     Inventory,
     Product,
@@ -408,7 +410,23 @@ async def test_a_failed_report_records_the_error_on_the_job(
 # --------------------------------------------------------------------
 
 
-async def test_backup_listing_when_none_exist(ctx: RequestContext) -> None:
+@pytest.fixture
+def isolated_backup_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """BackupService derives its directory from settings.attachments_dir.
+    Without redirecting it these tests read the developer's real backups
+    and pass or fail depending on what happens to be on disk."""
+    from backend.core.config import Settings
+    from backend.services import backup_service
+
+    real = get_settings()
+    patched = Settings(**{**real.model_dump(), "attachments_dir": str(tmp_path / "attachments")})
+    monkeypatch.setattr(backup_service, "get_settings", lambda: patched)
+    return tmp_path / "backups"
+
+
+async def test_backup_listing_when_none_exist(
+    ctx: RequestContext, isolated_backup_dir: Path
+) -> None:
     result = await handle_backup("", ctx)
     assert "No backups yet" in result.reply
 
@@ -444,3 +462,26 @@ def test_beat_schedule_covers_every_scheduled_task() -> None:
     for entry in CELERYBEAT_SCHEDULE.values():
         name = entry["task"]
         assert hasattr(task_module, name), f"{name} is scheduled but not defined"
+
+
+def test_the_schedule_is_actually_attached_to_the_celery_app() -> None:
+    """`celery beat` reads beat_schedule off the configured app. A
+    schedule that is defined but never assigned gives a Beat process
+    that starts cleanly and fires nothing — silently, forever."""
+    from backend.workers.app import celery_app
+    from backend.workers.schedule import CELERYBEAT_SCHEDULE
+
+    assert celery_app.conf.beat_schedule == CELERYBEAT_SCHEDULE
+    assert celery_app.conf.beat_schedule, "beat has no entries"
+
+
+def test_every_scheduled_task_is_registered_with_the_app() -> None:
+    """Beat dispatches by task *name*; a name Beat knows but the app
+    doesn't produces an unroutable message at 2am, not an import error
+    at deploy time."""
+    from backend.workers import tasks  # noqa: F401 -- registers the tasks
+    from backend.workers.app import celery_app
+    from backend.workers.schedule import CELERYBEAT_SCHEDULE
+
+    for entry in CELERYBEAT_SCHEDULE.values():
+        assert entry["task"] in celery_app.tasks, f"{entry['task']} not registered"

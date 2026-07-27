@@ -10,6 +10,7 @@ __pycache__/
 htmlcov/
 data/attachments/
 data/backups/
+data/reports/
 frontend/node_modules/
 frontend/dist/
 .DS_Store
