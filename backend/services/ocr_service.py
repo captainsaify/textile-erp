@@ -107,12 +107,30 @@ class OcrService:
     async def find_duplicate_photo(
         self, org_id: uuid.UUID, sha256_hash: str
     ) -> ExistingAttachment | None:
-        """Checked before OCR even runs -- docs/04_Purchases.md §6."""
+        """Checked before OCR even runs -- docs/04_Purchases.md §6.
+
+        Only a photo that actually became a *confirmed purchase* counts.
+        The point of this check is to stop the same invoice being entered
+        twice; a photo that was read into a draft and then abandoned
+        entered nothing, so blocking a retry on it would leave the user
+        with no way forward except typing the whole invoice by hand.
+        """
+        from backend.models import PurchaseHeader
+
         row = (
             await self._session.execute(
-                select(Attachment.id, Attachment.created_at).where(
-                    Attachment.org_id == org_id, Attachment.sha256_hash == sha256_hash
+                select(Attachment.id, Attachment.created_at)
+                .join(
+                    PurchaseHeader,
+                    PurchaseHeader.ocr_source_attachment_id == Attachment.id,
                 )
+                .where(
+                    Attachment.org_id == org_id,
+                    Attachment.sha256_hash == sha256_hash,
+                    PurchaseHeader.deleted_at.is_(None),
+                    PurchaseHeader.status == "confirmed",
+                )
+                .order_by(PurchaseHeader.created_at.desc())
             )
         ).first()
         if row is None:

@@ -4,6 +4,7 @@ photo-hash duplicate detection, and the learning dictionary
 
 from __future__ import annotations
 
+import datetime
 import decimal
 import uuid
 from collections.abc import AsyncIterator
@@ -166,15 +167,6 @@ async def test_photo_to_confirmed_purchase(
         assert movements == 3
 
 
-async def test_identical_photo_is_caught_before_ocr(
-    ctx: RequestContext, attachments_dir: None
-) -> None:
-    data = sheet_bytes()
-    await process_purchase_photo(data, "image/jpeg", "wamid.1", ctx)
-    result = await process_purchase_photo(data, "image/jpeg", "wamid.2", ctx)
-    assert "📎 You already sent this exact photo" in result.reply
-
-
 async def test_unreadable_image_offers_manual_entry(
     ctx: RequestContext, attachments_dir: None
 ) -> None:
@@ -224,3 +216,61 @@ async def test_template_resolution_returns_seeded_textile_mapping(
         mappings = await OcrService(session).resolve_template(ORG)
     fields = {mapping.field for mapping in mappings}
     assert {"qty", "description", "code", "weight_kg", "total_weight_kg", "ignore"} <= fields
+
+
+async def test_abandoned_photo_can_be_resent(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A photo read into a draft that was never confirmed entered nothing,
+    so re-sending it must work. Blocking it left the user with no way
+    forward but typing the whole invoice by hand — which is exactly what
+    happened in the field."""
+    if not TesseractEngine().available():
+        pytest.skip("tesseract not installed")
+    data = sheet_bytes()
+
+    first = await process_purchase_photo(data, "image/jpeg", "m-1", ctx)
+    assert "already sent" not in first.reply
+
+    # no purchase was confirmed, so the same bytes are still fair game
+    second = await process_purchase_photo(data, "image/jpeg", "m-2", ctx)
+    assert "already sent" not in second.reply, "an abandoned draft must not block a retry"
+
+
+async def test_photo_is_blocked_once_it_became_a_purchase(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The check still does its real job: stopping the same invoice being
+    entered twice."""
+    import sqlalchemy as sa
+
+    from backend.models import Attachment, PurchaseHeader, Supplier
+    from backend.models.enums import PurchaseStatus
+    from backend.tests.conftest import SEEDED_MAIN_WAREHOUSE_ID
+
+    if not TesseractEngine().available():
+        pytest.skip("tesseract not installed")
+    data = sheet_bytes()
+    await process_purchase_photo(data, "image/jpeg", "m-1", ctx)
+
+    async with session_factory() as session, session.begin():
+        attachment_id = (await session.execute(sa.select(Attachment.id).limit(1))).scalar_one()
+        supplier = Supplier(org_id=ORG, name="Dup Test Co", created_by=ctx.user.id)
+        session.add(supplier)
+        await session.flush()
+        session.add(
+            PurchaseHeader(
+                org_id=ORG,
+                supplier_id=supplier.id,
+                warehouse_id=uuid.UUID(SEEDED_MAIN_WAREHOUSE_ID),
+                invoice_no="DUP-1",
+                invoice_date=datetime.date.today(),
+                grand_total=decimal.Decimal("100"),
+                status=PurchaseStatus.CONFIRMED,
+                ocr_source_attachment_id=attachment_id,
+                created_by=ctx.user.id,
+            )
+        )
+
+    again = await process_purchase_photo(data, "image/jpeg", "m-3", ctx)
+    assert "already sent this exact photo" in again.reply

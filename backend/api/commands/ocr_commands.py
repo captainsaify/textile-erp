@@ -275,6 +275,7 @@ async def process_purchase_photo(
                 supplier_name=supplier_hint,
                 invoice_no=invoice_hint,
             )
+            build.draft.source_attachment_id = attachment_id
             await service.mark_attachment(
                 attachment_id,
                 "processed",

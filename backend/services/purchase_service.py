@@ -110,6 +110,10 @@ class Draft:
     declared_total: decimal.Decimal | None
     pending_override: bool = False
     total_resolution: str | None = None  # None | 'calculated' | 'invoice'
+    #: the photo this draft was read from, so the confirmed purchase can
+    #: point back at it -- that link is what lets duplicate-photo
+    #: detection tell "already entered" from "tried and abandoned"
+    source_attachment_id: uuid.UUID | None = None
 
     @property
     def subtotal(self) -> decimal.Decimal:
@@ -152,6 +156,9 @@ class Draft:
             "declared_total": str(self.declared_total) if self.declared_total else None,
             "pending_override": self.pending_override,
             "total_resolution": self.total_resolution,
+            "source_attachment_id": (
+                str(self.source_attachment_id) if self.source_attachment_id else None
+            ),
         }
 
     @classmethod
@@ -190,6 +197,11 @@ class Draft:
             ),
             pending_override=context.get("pending_override", False),
             total_resolution=context.get("total_resolution"),
+            source_attachment_id=(
+                uuid.UUID(context["source_attachment_id"])
+                if context.get("source_attachment_id")
+                else None
+            ),
         )
 
 
@@ -452,6 +464,7 @@ class PurchaseService:
                 warehouse_id=warehouse.id,
                 invoice_no=draft.invoice_no,
                 invoice_date=draft.invoice_date,
+                ocr_source_attachment_id=draft.source_attachment_id,
                 freight=draft.freight,
                 other_charges=draft.other_charges,
                 subtotal=draft.subtotal,
