@@ -138,6 +138,13 @@ _SPECS: tuple[SettingSpec, ...] = (
         description="Headroom below average cost before a sale warns.",
     ),
     SettingSpec(
+        key="undo_window_hours",
+        kind="int",
+        default=24,
+        minimum=1,
+        description="How long after an entry it can still be undone.",
+    ),
+    SettingSpec(
         key="sale_dedup_window_minutes",
         kind="int",
         default=10,

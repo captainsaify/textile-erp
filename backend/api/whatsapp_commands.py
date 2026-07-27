@@ -21,6 +21,11 @@ from backend.api.commands.capital_commands import (
     handle_reject,
     handle_withdraw,
 )
+from backend.api.commands.correction_commands import (
+    handle_delete,
+    handle_edit,
+    handle_undo,
+)
 from backend.api.commands.money_commands import (
     handle_bank,
     handle_cash,
@@ -233,6 +238,27 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.STAFF,
         handler=handle_ledger,
         help_text="Statement of invoices/payments for a party, or movement history for a product.",
+    ),
+    "edit": CommandSpec(
+        name="edit",
+        syntax="edit <product|supplier|customer|brand> <ref> <field> <value>",
+        min_role=UserRole.OWNER,
+        handler=handle_edit,
+        help_text="Change a detail on a product, supplier, customer or brand.",
+    ),
+    "undo": CommandSpec(
+        name="undo",
+        syntax="undo  |  undo <purchase|sale> <ref>",
+        min_role=UserRole.STAFF,
+        handler=handle_undo,
+        help_text="Reverse your last entry (or a named one) by compensating entry.",
+    ),
+    "delete": CommandSpec(
+        name="delete",
+        syntax="delete <product|supplier|customer|brand> <ref>",
+        min_role=UserRole.OWNER,
+        handler=handle_delete,
+        help_text="Retire master data. Financial records route to 'undo' instead.",
     ),
     "settings": CommandSpec(
         name="settings",

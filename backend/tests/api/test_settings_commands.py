@@ -57,6 +57,7 @@ def test_every_registered_key_is_actually_read_somewhere() -> None:
         "purchase_total_mismatch_tolerance": "purchase_total_mismatch_tolerance",
         "duplicate_invoice_window_days": "duplicate_invoice_window_days",
         "below_cost_sale_tolerance_percent": "below_cost_tolerance",
+        "undo_window_hours": "undo_window_hours",
         "sale_dedup_window_minutes": "sale_dedup_window_minutes",
     }
     assert set(REGISTRY) == set(accessors)
