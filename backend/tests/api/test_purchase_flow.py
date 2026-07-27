@@ -5,6 +5,7 @@ detection layers (docs/04_Purchases.md §6)."""
 
 from __future__ import annotations
 
+import datetime
 import decimal
 import uuid
 from collections.abc import AsyncIterator
@@ -18,11 +19,12 @@ from backend.api.commands.purchase_commands import (
     handle_purchase,
     handle_purchase_session_reply,
     parse_purchase_command,
+    render_preview,
 )
 from backend.core.exceptions import ValidationError
 from backend.models import User
 from backend.services.inventory_service import InventoryService
-from backend.services.purchase_service import allocate
+from backend.services.purchase_service import Draft, DraftLine, allocate
 from backend.services.session_service import SessionService
 from backend.tests.conftest import (
     SEEDED_MAIN_WAREHOUSE_ID,
@@ -312,3 +314,78 @@ async def test_total_mismatch_resolution(
         assert header.grand_total == D("24150.00")
         assert header.other_charges == D("250.00")  # 100 + 150 reconciliation
         assert header.notes == "reconciled against declared invoice total"
+
+
+def test_unknown_products_tell_the_user_how_to_create_them() -> None:
+    """`create all products` existed from the start but nothing ever
+    mentioned it, so a first purchase — where every code is new — read
+    as a dead end. Every message that reports unknown codes must name
+    the command that resolves them."""
+    from backend.api.commands.purchase_commands import unresolved_help
+
+    text = unresolved_help(["35A", "22D", "CPK"])
+    assert "create all products" in text
+    assert "create product 35A" in text
+    assert "CONFIRM" in text
+
+
+def test_preview_does_not_repeat_a_hint_per_unknown_line() -> None:
+    """26 unknown codes produced 26 near-identical "reply create
+    product X" warnings — a wall of text that buried the actual
+    instruction."""
+    draft = Draft(
+        supplier_id=uuid.uuid4(),
+        supplier_name="Wagdia",
+        invoice_no="INV-001",
+        invoice_date=datetime.date(2026, 7, 26),
+        brand_id=None,
+        brand_name=None,
+        lines=[
+            DraftLine(
+                code=f"C{n}",
+                qty=D("10"),
+                rate=D("150"),
+                product_id=None,
+                resolved_code=None,
+                unit_code=None,
+                description=f"Item {n}",
+            )
+            for n in range(26)
+        ],
+        freight=D("0"),
+        other_charges=D("0"),
+        declared_total=None,
+    )
+    text = render_preview(draft)
+    assert text.count("create product") <= 1, "per-line hints should collapse when there are many"
+    assert "create all products" in text
+
+
+def test_preview_still_gives_per_line_hints_for_a_couple_of_unknowns() -> None:
+    """With only one or two, the specific hint is genuinely more useful
+    than the bulk command."""
+    draft = Draft(
+        supplier_id=uuid.uuid4(),
+        supplier_name="Wagdia",
+        invoice_no="INV-002",
+        invoice_date=datetime.date(2026, 7, 26),
+        brand_id=None,
+        brand_name=None,
+        lines=[
+            DraftLine(
+                code="TRP",
+                qty=D("10"),
+                rate=D("150"),
+                product_id=None,
+                resolved_code=None,
+                unit_code=None,
+                description="Jogging Pant",
+            )
+        ],
+        freight=D("0"),
+        other_charges=D("0"),
+        declared_total=None,
+    )
+    text = render_preview(draft)
+    assert "create product TRP" in text
+    assert "Jogging Pant" in text

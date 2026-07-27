@@ -85,6 +85,11 @@ def render_ocr_result(
             + ", ".join(f"'{header}'" for header in unmapped_headers)
             + " I don't recognize — ignoring for now."
         )
+    unknown = [line.code for line in draft.lines if not line.product_id and line.code]
+    if unknown:
+        from backend.api.commands.purchase_commands import unresolved_help
+
+        lines.append(unresolved_help(unknown))
     if hard_to_read:
         lines.append(
             "⚠️ This photo is hard to read — you may want to retake it, or keep correcting manually."

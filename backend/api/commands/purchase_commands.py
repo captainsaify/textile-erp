@@ -126,12 +126,20 @@ def parse_purchase_command(args: str) -> Draft:
     )
 
 
+#: Above this many unknown codes, per-line "create product X" hints stop
+#: being help and become a wall of text -- a first purchase has *every*
+#: code unknown. Past it, the single `create all products` line says the
+#: same thing once.
+_PER_LINE_HINT_LIMIT = 3
+
+
 def render_preview(draft: Draft) -> str:
     lines = [
         f"✅ Purchase draft ready — {draft.supplier_name}, {draft.invoice_no}, "
         f"{fmt_date(draft.invoice_date)}"
     ]
     warnings: list[str] = []
+    verbose_unknown_hints = len(draft.unresolved_codes) <= _PER_LINE_HINT_LIMIT
     for index, line in enumerate(draft.lines, start=1):
         if line.product_id is None:
             lines.append(
@@ -139,16 +147,17 @@ def render_preview(draft: Draft) -> str:
                 + (f" {line.description}" if line.description else "")
                 + f"  {fmt_qty(line.qty)} × {fmt_money(line.rate)} — unknown product"
             )
-            if line.description:
-                warnings.append(
-                    f"Reply 'create product {line.code}' to add it as "
-                    f"'{line.description}', or 'line {index} code <CODE>' to correct."
-                )
-            else:
-                warnings.append(
-                    f"Reply 'create product {line.code} <description>' to add it, "
-                    f"or 'line {index} code <CODE>' to correct."
-                )
+            if verbose_unknown_hints:
+                if line.description:
+                    warnings.append(
+                        f"Reply 'create product {line.code}' to add it as "
+                        f"'{line.description}', or 'line {index} code <CODE>' to correct."
+                    )
+                else:
+                    warnings.append(
+                        f"Reply 'create product {line.code} <description>' to add it, "
+                        f"or 'line {index} code <CODE>' to correct."
+                    )
             continue
         unit = line.unit_code or "KG"
         matched = (
@@ -192,11 +201,34 @@ def render_preview(draft: Draft) -> str:
         from backend.api.commands.ocr_commands import DETAILS_PROMPT
 
         lines.append(DETAILS_PROMPT)
-    elif draft.unresolved_codes or draft.supplier_id is None:
-        lines.append("Resolve the items above, then reply CONFIRM to save.")
+    elif draft.unresolved_codes:
+        # Naming the command matters: `create all products` existed from
+        # the start but nothing ever mentioned it, so a first purchase --
+        # where *every* code is new -- looked like a dead end.
+        lines.append(unresolved_help(draft.unresolved_codes))
+    elif draft.supplier_id is None:
+        lines.append("Resolve the supplier above, then reply CONFIRM to save.")
     else:
         lines.append("Reply CONFIRM to save, or send corrections (e.g. 'line 1 qty 90').")
     return "\n".join(lines)
+
+
+def unresolved_help(codes: list[str]) -> str:
+    """What to actually do about codes that aren't in the catalogue yet.
+
+    On a first purchase every code is new, so this is the normal path,
+    not an error state -- the copy says so rather than reading like a
+    failure.
+    """
+    count = len(codes)
+    noun = "item isn't" if count == 1 else "items aren't"
+    return (
+        f"{count} {noun} in your catalogue yet.\n"
+        f"• Reply *create all products* to add them all, using the descriptions "
+        f"from the sheet\n"
+        f"• Or add them one at a time: *create product {codes[0]} <description>*\n"
+        f"Then reply CONFIRM to save."
+    )
 
 
 def render_confirmed(purchase: ConfirmedPurchase) -> str:

@@ -353,7 +353,12 @@ class PurchaseService:
         if not draft.lines:
             raise ValidationError("Send at least one item line.")
         if draft.unresolved_codes:
-            raise ValidationError("Unresolved products: " + ", ".join(draft.unresolved_codes))
+            codes = draft.unresolved_codes
+            raise ValidationError(
+                f"{len(codes)} item(s) still aren't in your catalogue: "
+                + ", ".join(codes)
+                + "\nReply 'create all products' to add them, then CONFIRM."
+            )
         if draft.supplier_id is None:
             raise ValidationError(f"Supplier '{draft.supplier_name}' is not resolved yet.")
         if not draft.invoice_no or len(draft.invoice_no) > 100:
