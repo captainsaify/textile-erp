@@ -86,3 +86,32 @@ def create_user(
 
 if __name__ == "__main__":
     cli()
+
+
+@cli.command("set-password")
+def set_password_command(
+    email: Annotated[str, typer.Option(help="The user's email address")],
+    password: Annotated[str, typer.Option(prompt=True, hide_input=True, confirmation_prompt=True)],
+) -> None:
+    """Give an account a dashboard login.
+
+    Independent of WhatsApp access (docs/10_API.md §3): a partner ends up
+    with both, an accountant may have only this, and staff who only use
+    WhatsApp keep password_hash NULL and simply cannot sign in.
+    """
+    import asyncio
+
+    from backend.core.db import get_session_factory
+    from backend.services.auth_service import AuthError, set_password
+
+    async def run() -> None:
+        async with get_session_factory()() as session:
+            async with session.begin():
+                user = await set_password(session, email, password)
+            typer.echo(f"Password set for {user.full_name} <{email}> (role {user.role.value}).")
+
+    try:
+        asyncio.run(run())
+    except AuthError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from None

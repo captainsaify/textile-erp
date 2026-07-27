@@ -41,3 +41,20 @@ def parse_amount(raw: str, *, field: str = "Amount") -> decimal.Decimal:
     if amount != amount.quantize(TWO_PLACES):
         raise ValidationError(f"{field} can have at most 2 decimal places.")
     return amount.quantize(TWO_PLACES)
+
+
+def money_str(value: decimal.Decimal) -> str:
+    """Serialise money for JSON at 2dp.
+
+    A string, not a float -- JSON numbers are IEEE doubles and this is
+    the one boundary where a value that has been Decimal all the way
+    through could quietly lose precision. Quantised because raw
+    arithmetic leaves artefacts like '4092000.0000000', which is the
+    same number but reads like a different kind of value.
+    """
+    return str(value.quantize(TWO_PLACES))
+
+
+def qty_str(value: decimal.Decimal) -> str:
+    """Quantities carry 3dp (docs/02_Database.md NUMERIC(12,3))."""
+    return str(value.quantize(decimal.Decimal("0.001")))
