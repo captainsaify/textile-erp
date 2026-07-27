@@ -66,11 +66,25 @@ rows correct, confirmed independently — the costing quantities sum to
 27,280 KG, which is the grand total printed on the sheet. Local OCR
 managed 20/26 on the same image. Vision cost $0.054, took 18.1s.
 
-**What is NOT built:** `frontend/` is still empty, and the REST API in
-`docs/10_API.md` does not exist — the only HTTP surface today is
-`/healthz` plus the WhatsApp webhook and bridge endpoints. The web
-dashboard needs that API underneath it, so the two are one piece of
-work, not two.
+**REST API is built** (2026-07-28): JWT auth with argon2 + revocable
+refresh tokens, the error envelope, and read endpoints for dashboard,
+products, inventory, movements, purchases, sales, ledgers, P&L and
+report export/polling. 17 tests in `backend/tests/api/test_rest_api.py`,
+mostly authorisation boundaries. `python -m backend.cli set-password`
+grants an account dashboard access.
+
+**What is NOT built:** `frontend/` is still empty. Three plans now
+exist for the remaining work:
+- [`docs/19_InteractiveMessages.md`](docs/19_InteractiveMessages.md) —
+  buttons and list menus. **This is the current task (Phase 1).**
+- [`docs/20_ConversationalIntake.md`](docs/20_ConversationalIntake.md) —
+  photo → intent → one question at a time. Depends on 19 Phase 1.
+- [`docs/21_WebDashboard.md`](docs/21_WebDashboard.md) — dashboard
+  forms, no-build stack, deployment on `example.com`.
+
+**Domain confirmed:** `example.com`. Pointing the Meta
+webhook at it would end the cloudflared quick-tunnel fragility (§5)
+permanently — worth doing regardless of the dashboard.
 
 **Deployment: built and verified running.** Colima provides the
 container runtime (`colima start`; Docker Desktop was avoided — it needs
