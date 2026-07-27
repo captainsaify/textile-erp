@@ -109,6 +109,9 @@ class SettingsRepository:
         below-cost comparison in docs/05_Sales.md §4 actually uses."""
         return await self.get_decimal(org_id, "below_cost_sale_tolerance_percent") / 100
 
+    async def backup_retention_days(self, org_id: uuid.UUID) -> int:
+        return await self.get_int(org_id, "backup_retention_days")
+
     async def undo_window_hours(self, org_id: uuid.UUID) -> int:
         return await self.get_int(org_id, "undo_window_hours")
 

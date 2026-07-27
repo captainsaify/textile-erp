@@ -26,7 +26,14 @@ from backend.models.ocr import OcrLearningDictionary, OcrTemplate
 from backend.models.parties import Customer, Supplier
 from backend.models.purchases import PurchaseHeader, PurchaseLine
 from backend.models.sales import SalesHeader, SalesLine
-from backend.models.system import Attachment, AuditLog, Setting, WhatsappSession
+from backend.models.system import (
+    Attachment,
+    AuditLog,
+    ReconciliationRun,
+    ReportJob,
+    Setting,
+    WhatsappSession,
+)
 
 __all__ = [
     "AuditLog",
@@ -48,6 +55,8 @@ __all__ = [
     "Partner",
     "PartnerCapital",
     "Product",
+    "ReconciliationRun",
+    "ReportJob",
     "ProductCategory",
     "ProductType",
     "PurchaseHeader",

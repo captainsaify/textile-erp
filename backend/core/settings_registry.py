@@ -138,6 +138,13 @@ _SPECS: tuple[SettingSpec, ...] = (
         description="Headroom below average cost before a sale warns.",
     ),
     SettingSpec(
+        key="backup_retention_days",
+        kind="int",
+        default=90,
+        minimum=1,
+        description="How long nightly backups are kept before pruning.",
+    ),
+    SettingSpec(
         key="undo_window_hours",
         kind="int",
         default=24,

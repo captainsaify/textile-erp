@@ -84,6 +84,8 @@ _PURGE_ORDER = (
     "expenses",
     "income",
     "ocr_learning_dictionary",
+    "reconciliation_runs",
+    "report_jobs",
     "attachments",
     # no seeded rows today: thresholds fall back to their documented
     # defaults when absent, so a test that writes one must not leave it

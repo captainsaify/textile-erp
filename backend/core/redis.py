@@ -16,7 +16,11 @@ _client: aioredis.Redis | None = None
 def get_redis() -> aioredis.Redis:
     global _client
     if _client is None:
-        _client = aioredis.from_url(get_settings().redis_url, decode_responses=True)
+        # redis 6.4 ships from_url without inline types; the client it
+        # returns is typed, so this is a gap in the library not here
+        _client = aioredis.from_url(  # type: ignore[no-untyped-call]
+            get_settings().redis_url, decode_responses=True
+        )
     return _client
 
 

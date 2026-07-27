@@ -40,7 +40,9 @@ class FakeSender:
 
 @pytest.fixture
 async def redis_client() -> AsyncIterator[aioredis.Redis]:
-    client = aioredis.from_url("redis://localhost:6379/9", decode_responses=True)
+    client = aioredis.from_url(  # type: ignore[no-untyped-call]
+        "redis://localhost:6379/9", decode_responses=True
+    )
     try:
         await client.ping()
     except Exception:  # noqa: BLE001 -- unreachable Redis means skip, not error

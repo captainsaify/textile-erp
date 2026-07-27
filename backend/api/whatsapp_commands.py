@@ -33,6 +33,7 @@ from backend.api.commands.money_commands import (
     handle_income,
 )
 from backend.api.commands.ocr_commands import handle_details
+from backend.api.commands.ops_commands import handle_backup, handle_export, handle_restore
 from backend.api.commands.purchase_commands import handle_purchase
 from backend.api.commands.report_commands import (
     handle_customer,
@@ -266,6 +267,27 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.OWNER,
         handler=handle_settings,
         help_text="List or change the business's configurable thresholds.",
+    ),
+    "export": CommandSpec(
+        name="export",
+        syntax="export <purchases|sales|stock> [period]",
+        min_role=UserRole.STAFF,
+        handler=handle_export,
+        help_text="Build an Excel export. Arrives as a message when it's ready.",
+    ),
+    "backup": CommandSpec(
+        name="backup",
+        syntax="backup  |  backup now",
+        min_role=UserRole.OWNER,
+        handler=handle_backup,
+        help_text="List backups, or take one immediately.",
+    ),
+    "restore": CommandSpec(
+        name="restore",
+        syntax="restore <backup-name> confirm <backup-name>",
+        min_role=UserRole.OWNER,
+        handler=handle_restore,
+        help_text="Replace all data with a backup's contents. Requires double confirmation.",
     ),
     "help": CommandSpec(
         name="help",
