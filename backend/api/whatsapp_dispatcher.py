@@ -220,12 +220,14 @@ class WhatsAppDispatcher:
         if spec is None:
             # not a command: an active session interprets it as a reply in
             # the current flow -- docs/08_WhatsApp.md §5
+            from backend.api.commands.return_commands import handle_return_session_reply
             from backend.api.commands.sale_commands import handle_sale_session_reply
             from backend.api.commands.settlement_commands import (
                 handle_settlement_session_reply,
             )
             from backend.services.session_service import (
                 AWAITING_PURCHASE_CONFIRMATION,
+                AWAITING_RETURN_REFUND_CHOICE,
                 AWAITING_SALE_CONFIRMATION,
                 AWAITING_SETTLEMENT_CONFIRMATION,
                 SessionService,
@@ -240,6 +242,8 @@ class WhatsAppDispatcher:
                 return await handle_sale_session_reply(text, context, session_state)
             if session_state.state == AWAITING_SETTLEMENT_CONFIRMATION:
                 return await handle_settlement_session_reply(text, context, session_state)
+            if session_state.state == AWAITING_RETURN_REFUND_CHOICE:
+                return await handle_return_session_reply(text, context, session_state)
             suggestion = closest_command(keyword, user.role)
             hint = f" Did you mean '{suggestion}'?" if suggestion else ""
             return CommandResult(

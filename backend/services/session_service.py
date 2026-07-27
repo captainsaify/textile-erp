@@ -28,6 +28,7 @@ IDLE = "idle"
 AWAITING_PURCHASE_CONFIRMATION = "awaiting_purchase_confirmation"
 AWAITING_SALE_CONFIRMATION = "awaiting_sale_confirmation"
 AWAITING_SETTLEMENT_CONFIRMATION = "awaiting_settlement_confirmation"
+AWAITING_RETURN_REFUND_CHOICE = "awaiting_return_refund_choice"
 
 
 @dataclasses.dataclass(frozen=True)

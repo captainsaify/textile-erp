@@ -37,6 +37,7 @@ from backend.api.commands.report_commands import (
     handle_summary,
     handle_supplier,
 )
+from backend.api.commands.return_commands import handle_return
 from backend.api.commands.sale_commands import handle_sale
 from backend.api.commands.settings_commands import handle_settings
 from backend.api.commands.settlement_commands import handle_paid, handle_received
@@ -104,6 +105,14 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.STAFF,
         handler=handle_paid,
         help_text="Record money paid to a supplier (oldest invoice first).",
+    ),
+    "return": CommandSpec(
+        name="return",
+        syntax="return sale <customer|last> <CODE> <qty> [reason: <text>]\n"
+        "return purchase <invoice-no|last> <CODE> <qty> [reason: <text>]",
+        min_role=UserRole.STAFF,
+        handler=handle_return,
+        help_text="Return goods to a supplier, or take goods back from a customer.",
     ),
     "details": CommandSpec(
         name="details",

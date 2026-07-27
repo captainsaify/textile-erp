@@ -120,6 +120,9 @@ class PurchaseLine(UUIDPkMixin, OrgScopedMixin, Base):
         UniqueConstraint("purchase_header_id", "line_no"),
         CheckConstraint("qty > 0", name="qty_positive"),
         CheckConstraint("rate >= 0", name="rate_non_negative"),
+        CheckConstraint(
+            "returned_qty >= 0 AND returned_qty <= qty", name="returned_qty_within_qty"
+        ),
         Index("idx_purchase_lines_header", "purchase_header_id"),
         Index("idx_purchase_lines_product", "product_id"),
     )
@@ -145,6 +148,12 @@ class PurchaseLine(UUIDPkMixin, OrgScopedMixin, Base):
         MONEY, nullable=False, server_default=text("0")
     )
     landed_cost_per_unit: Mapped[decimal.Decimal | None] = mapped_column(RATE)
+    # Mirrors sales_lines.returned_qty (docs/02_Database.md §3.13): what
+    # has already gone back to the supplier, so a second return can't
+    # take more than was bought.
+    returned_qty: Mapped[decimal.Decimal] = mapped_column(
+        QTY, nullable=False, server_default=text("0")
+    )
     ocr_confidence: Mapped[decimal.Decimal | None] = mapped_column(CONFIDENCE)
     created_at: Mapped[datetime.datetime] = mapped_column(server_default=text("now()"))
 

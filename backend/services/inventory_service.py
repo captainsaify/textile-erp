@@ -156,3 +156,111 @@ class InventoryService:
         inventory.qty_on_hand = new_qty
         await self._session.flush()
         return movement
+
+    async def record_sale_return_movement(
+        self,
+        org_id: uuid.UUID,
+        *,
+        product_id: uuid.UUID,
+        warehouse_id: uuid.UUID,
+        qty: decimal.Decimal,
+        avg_cost_at_sale_time: decimal.Decimal,
+        source_id: uuid.UUID,
+        created_by: uuid.UUID,
+        reason: str | None = None,
+    ) -> InventoryMovement:
+        """Stock comes back at the cost it left at, and the running
+        average is *not* recomputed -- docs/03_Inventory.md §2. Using
+        today's average here would let an old sale's reversal
+        retroactively distort current costing, which is exactly what the
+        historical snapshot on sales_lines exists to prevent.
+        """
+        inventory = await self._locked_row(org_id, product_id, warehouse_id)
+        new_qty = (inventory.qty_on_hand + qty).quantize(THREE_PLACES)
+        avg_cost = inventory.weighted_avg_cost  # unchanged, per the §2 table
+
+        movement = InventoryMovement(
+            org_id=org_id,
+            product_id=product_id,
+            warehouse_id=warehouse_id,
+            movement_type=MovementType.SALE_RETURN,
+            qty_delta=qty,
+            unit_cost=avg_cost_at_sale_time,
+            resulting_qty_on_hand=new_qty,
+            resulting_avg_cost=avg_cost,
+            source_type="sales_line",
+            source_id=source_id,
+            reason=reason,
+            created_by=created_by,
+        )
+        self._session.add(movement)
+        inventory.qty_on_hand = new_qty
+        await self._session.flush()
+        return movement
+
+    async def record_purchase_return_movement(
+        self,
+        org_id: uuid.UUID,
+        *,
+        product_id: uuid.UUID,
+        warehouse_id: uuid.UUID,
+        qty: decimal.Decimal,
+        landed_cost_per_unit: decimal.Decimal,
+        source_id: uuid.UUID,
+        created_by: uuid.UUID,
+        reason: str | None = None,
+    ) -> tuple[InventoryMovement, bool]:
+        """Unwind a purchase from the weighted average -- the inverse of
+        the §2 formula, using the *original* landed cost:
+
+            new_avg = (old_qty * old_avg - qty * landed_cost) / (old_qty - qty)
+
+        Returns (movement, was_approximated).
+
+        The exact reversal is only possible while that purchase's
+        contribution is still in the pool. Once most of the batch has
+        been sold and mixed with later purchases, the subtraction drives
+        remaining value or quantity to zero or below and the answer
+        stops being meaningful -- docs/03_Inventory.md §4 says so
+        explicitly. In that case the average is left alone and only the
+        quantity falls, which removes stock at the current average
+        (value reduced proportionally), and the caller is told so it can
+        flag the return for manual review. Silently emitting a negative
+        or wildly wrong average would corrupt the cost basis of every
+        later sale, and nothing downstream would raise.
+        """
+        inventory = await self._locked_row(org_id, product_id, warehouse_id)
+        old_qty = inventory.qty_on_hand
+        old_avg = inventory.weighted_avg_cost
+
+        new_qty = (old_qty - qty).quantize(THREE_PLACES)
+        remaining_value = old_qty * old_avg - qty * landed_cost_per_unit
+
+        if new_qty > ZERO and remaining_value >= ZERO:
+            new_avg = (remaining_value / new_qty).quantize(FOUR_PLACES)
+            approximated = False
+        else:
+            # can't unwind exactly; hold the average and let value fall
+            # proportionally with quantity
+            new_avg = old_avg
+            approximated = True
+
+        movement = InventoryMovement(
+            org_id=org_id,
+            product_id=product_id,
+            warehouse_id=warehouse_id,
+            movement_type=MovementType.PURCHASE_RETURN,
+            qty_delta=-qty,
+            unit_cost=landed_cost_per_unit,
+            resulting_qty_on_hand=new_qty,
+            resulting_avg_cost=new_avg,
+            source_type="purchase_line",
+            source_id=source_id,
+            reason=reason,
+            created_by=created_by,
+        )
+        self._session.add(movement)
+        inventory.qty_on_hand = new_qty
+        inventory.weighted_avg_cost = new_avg
+        await self._session.flush()
+        return movement, approximated
