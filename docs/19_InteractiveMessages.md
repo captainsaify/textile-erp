@@ -190,13 +190,25 @@ approval. Most of the benefit lands here.
 **Phase 2 — list menus.** Main menu, period pickers, brand
 disambiguation, supplier selection.
 
-**Phase 3 — WhatsApp Flows for `details`.** Only if the typed form is
-still the main irritation after phases 1–2. Assess, don't assume.
+**Phase 3 — WhatsApp Flows for `details`: not being built.**
 
-> Superseded in part by [20_ConversationalIntake.md](20_ConversationalIntake.md),
-> which replaces the `details` template with one question at a time
-> driven by what OCR actually found. That is cheaper than Flows and
-> removes most of the same typing, so evaluate it first.
+The assessment phases 1–2 were meant to inform has now been made, and
+the answer is no. Flows would collect the `details` fields as one form,
+but it needs a published Flow definition, its own endpoint, and Meta's
+review — for a gain that
+[20_ConversationalIntake.md](20_ConversationalIntake.md) delivers more
+cheaply by asking for each missing field in turn, using data the system
+already has (§3 of that doc: the vision engine already reports which
+fields a sheet didn't carry).
+
+Building both would mean two ways to collect the same four values, and
+the Flow would be the one that can't degrade to text for the bridge
+transport. **Doc 20 Phase 1 is the successor to this phase**, and it is
+unblocked now that Phase 1 here is done.
+
+Revisit Flows only if, after doc 20 ships, typing the *unguessable*
+values — invoice number and rate — is still the main irritation. A form
+does not remove those; it only relocates them.
 
 ## 10. Testing {#testing}
 

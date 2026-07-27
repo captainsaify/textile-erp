@@ -76,9 +76,11 @@ grants an account dashboard access.
 **What is NOT built:** `frontend/` is still empty. Three plans now
 exist for the remaining work:
 - [`docs/19_InteractiveMessages.md`](docs/19_InteractiveMessages.md) —
-  buttons and list menus. **This is the current task (Phase 1).**
+  **Phases 1 and 2 done.** Phase 3 (Flows) deliberately not built; doc
+  20 supersedes it, see that doc's §11.
 - [`docs/20_ConversationalIntake.md`](docs/20_ConversationalIntake.md) —
-  photo → intent → one question at a time. Depends on 19 Phase 1.
+  photo → intent → one question at a time. **Now unblocked; this is the
+  next task.**
 - [`docs/21_WebDashboard.md`](docs/21_WebDashboard.md) — dashboard
   forms, no-build stack, deployment on `example.com`.
 
