@@ -193,6 +193,11 @@ disambiguation, supplier selection.
 **Phase 3 — WhatsApp Flows for `details`.** Only if the typed form is
 still the main irritation after phases 1–2. Assess, don't assume.
 
+> Superseded in part by [20_ConversationalIntake.md](20_ConversationalIntake.md),
+> which replaces the `details` template with one question at a time
+> driven by what OCR actually found. That is cheaper than Flows and
+> removes most of the same typing, so evaluate it first.
+
 ## 10. Testing {#testing}
 
 - The `FakeSender` in `backend/tests/api/conftest.py` records text only;
