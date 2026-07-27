@@ -174,6 +174,34 @@ def test_nginx_body_limit_leaves_room_for_scanned_invoices() -> None:
     assert int(match.group(1)) >= limit, "nginx would reject uploads the app accepts"
 
 
+def test_beat_writes_its_schedule_outside_the_read_only_app_dir() -> None:
+    """/app is root-owned on purpose — the app must not be able to
+    rewrite its own code — but Celery Beat persists a dbm schedule file
+    to its working directory by default, which made it crash-loop with
+    EACCES. It has to be pointed at a writable volume."""
+    services = _load("docker-compose.yml")["services"]
+    command = services["beat"]["command"]
+    schedule = next((arg for arg in command if arg.startswith("--schedule=")), None)
+    assert schedule is not None, "beat must set --schedule explicitly"
+    path = schedule.split("=", 1)[1]
+    assert not path.startswith("/app"), "beat's schedule file must not live under /app"
+
+    mounts = [m.split(":")[1] for m in services["beat"].get("volumes", [])]
+    assert any(path.startswith(m) for m in mounts), f"{path} is not on a mounted volume"
+
+
+def test_data_dir_is_writable_by_the_app_user_in_both_images() -> None:
+    for name in ("Dockerfile.api", "Dockerfile.worker"):
+        text = (DOCKER / name).read_text()
+        assert "/data/celery" in text, f"{name} does not create beat's state dir"
+        assert "chown -R appuser:appuser /data" in text
+
+
+def test_tls_material_is_not_committed() -> None:
+    ignored = (ROOT / ".gitignore").read_text()
+    assert "docker/certs/" in ignored, "nginx private keys would be committed"
+
+
 def test_containers_do_not_run_as_root() -> None:
     for name in ("Dockerfile.api", "Dockerfile.worker"):
         text = (DOCKER / name).read_text()

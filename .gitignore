@@ -17,3 +17,7 @@ frontend/dist/
 whatsapp-bridge/node_modules/
 whatsapp-bridge/session/
 whatsapp-bridge/.wwebjs_cache/
+
+# TLS material for nginx -- real certs in production, self-signed
+# locally. Never in git either way.
+docker/certs/

@@ -120,7 +120,20 @@ services:
       dockerfile: docker/Dockerfile.worker
     restart: unless-stopped
     <<: *app-env
-    command: ["celery", "-A", "backend.workers.app", "beat", "--loglevel=info"]
+    # Beat persists its "last fired" state to a dbm file. It defaults to
+    # the working directory, which is root-owned by design, so it is
+    # pointed at a volume: on a writable path *and* durable, so a
+    # restart doesn't re-fire jobs it already ran.
+    command:
+      - celery
+      - -A
+      - backend.workers.app
+      - beat
+      - --loglevel=info
+      - --schedule=/data/celery/celerybeat-schedule
+      - --pidfile=
+    volumes:
+      - celery_state:/data/celery
     depends_on:
       redis:
         condition: service_healthy
@@ -153,6 +166,7 @@ services:
       retries: 5
 
 volumes:
+  celery_state:
   pg_data:
   redis_data:
   attachments:

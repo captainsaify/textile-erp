@@ -45,7 +45,11 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     ATTACHMENTS_DIR=/data/attachments
 
-RUN mkdir -p /data/attachments /data/backups /data/reports \
+# /app deliberately stays root-owned: the application must not be able
+# to rewrite its own code. Everything that legitimately needs writing --
+# uploads, backups, generated reports, Celery Beat's schedule file --
+# lives under /data instead.
+RUN mkdir -p /data/attachments /data/backups /data/reports /data/celery \
     && chown -R appuser:appuser /data
 
 USER appuser
