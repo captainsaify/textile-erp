@@ -42,19 +42,21 @@ implementation is most dangerous.
 
 **Working and verified end-to-end**, on real hardware with a real phone:
 
-- 30-table schema, migrations, seeds. Migration head: `c8e2f0b41d73`
-  (adds `partner_capital.status` / `.posted_at` — see §2b).
+- 30-table schema, migrations, seeds. Migration head: `d5a71c93e806`
+  (`partner_capital.status`/`.posted_at` per §2b, then
+  `purchase_lines.returned_qty` per §3.1).
 - WhatsApp transport via **Meta Cloud API** (the working one).
-- 22 commands: `purchase` `sale` `received` `paid` `stock` (+ `stock
-  CODE`) `search` `expense` `income` `cash` `bank` `settings` `help`,
+- 23 commands: `purchase` `sale` `return` `received` `paid` `stock`
+  (+ `stock CODE`) `search` `expense` `income` `cash` `bank` `settings`
+  `help`,
   plus `details` (the OCR follow-up step, not in the spec's command
   list), the reporting six from §2a (`dashboard` `summary` `profit`
   `supplier` `customer` `ledger`), and §2b's `capital` `withdraw`
   `approve` `reject`.
 - OCR: local pipeline (OpenCV → table detect → Paddle/Tesseract) **and**
   Claude vision, vision-first with automatic fallback.
-- 190 tests pass, fixed and random order. `mypy --strict` clean across
-  107 files. `ruff` clean.
+- 215 tests pass, fixed and random order. `mypy --strict` clean across
+  110 files. `ruff` clean.
 
 **Live OCR result on the user's real 26-item purchase sheet:** all 26
 rows correct, confirmed independently — the costing quantities sum to
@@ -73,10 +75,10 @@ Opus-required.** If you are Sonnet and asked to "continue", the honest
 answer is that the next task needs a model switch — say so rather than
 picking the least-dangerous-looking item from §3.
 
-Suggested order once on Opus: `return` (3.1), then the
-`edit`/`undo`/`delete` trio (3.2) since `return` establishes the
-movement-reversal pattern they reuse, then Celery + reconciliation
-(3.3) which is what actually proves inventory balances.
+`return` (3.1) is done. Next is the `edit`/`undo`/`delete` trio (3.2)
+— it reuses the movement-reversal pattern `return` established — then
+Celery + reconciliation (3.3), which is what actually proves inventory
+balances.
 
 ### 2a. The reporting six — ✅ done (2026-07-27, Sonnet)
 
@@ -184,13 +186,32 @@ there's a test pinning that 100x boundary.
 
 ## 3. Opus-required — STOP and ask for a switch
 
-### 3.1 `return`
-**Why:** returning purchased stock must reverse **weighted-average
-cost**. WAC is order-dependent and self-referential; a wrong reversal
-silently corrupts the cost basis of every future sale, profit figure and
-stock valuation, and nothing raises. Also interacts with the
-`SELECT … FOR UPDATE` costing path in `inventory_service`.
-Spec: `docs/03_Inventory.md`, `docs/05_Sales.md`.
+### 3.1 `return` — ✅ done (2026-07-27, Opus)
+
+`backend/services/return_service.py`, 25 tests in
+`backend/tests/api/test_return_flow.py`. Read before touching costing:
+
+- **A sale return must not recompute the average.** Stock returns at
+  `sales_lines.avg_cost_at_sale_time`; that snapshot column exists
+  precisely so reversing an old sale can't distort today's costing.
+- **A purchase return unwinds the average and sometimes can't.** The
+  exact form is the inverse of the §2 formula against the line's
+  original landed cost. Once most of the batch has been sold and mixed
+  with later purchases, remaining value or quantity goes to zero or
+  below and no exact answer exists. In that case
+  `record_purchase_return_movement` holds the average, lets quantity
+  fall, and returns `approximated=True`, which the reply surfaces as a
+  manual-check warning. **Do not "fix" that branch into always
+  computing a number** — a negative or absurd average corrupts the cost
+  basis of every later sale and nothing downstream raises. Tests pin
+  both the exact case and the never-negative guarantee.
+- **The refund question is not optional.** An already-paid cash sale
+  parks in `AWAITING_RETURN_REFUND_CHOICE` and posts nothing until the
+  partner answers; a test asserts neither stock nor cash moves while
+  the question is outstanding.
+- Preview and execute deliberately use **separate sessions** — execute
+  opens its own transaction and re-validates, so a refund parked for
+  minutes can't act on stale quantities.
 
 ### 3.2 `edit` / `undo` / `delete`
 **Why:** each must reverse inventory movements *and* post compensating
