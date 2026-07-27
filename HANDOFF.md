@@ -42,18 +42,19 @@ implementation is most dangerous.
 
 **Working and verified end-to-end**, on real hardware with a real phone:
 
-- 30-table schema, migrations, seeds. Migration head: `b3d1c7a9e42f`
-  (no schema change since — §2a added no columns, only queries).
+- 30-table schema, migrations, seeds. Migration head: `c8e2f0b41d73`
+  (adds `partner_capital.status` / `.posted_at` — see §2b).
 - WhatsApp transport via **Meta Cloud API** (the working one).
-- 17 commands: `purchase` `sale` `received` `paid` `stock` (+ `stock
+- 21 commands: `purchase` `sale` `received` `paid` `stock` (+ `stock
   CODE`) `search` `expense` `income` `cash` `bank` `help`, plus
   `details` (the OCR follow-up step, not in the spec's command list),
-  plus the reporting six added in §2a below: `dashboard` `summary`
-  `profit` `supplier` `customer` `ledger`.
+  the reporting six from §2a (`dashboard` `summary` `profit` `supplier`
+  `customer` `ledger`), and §2b's `capital` `withdraw` `approve`
+  `reject`.
 - OCR: local pipeline (OpenCV → table detect → Paddle/Tesseract) **and**
   Claude vision, vision-first with automatic fallback.
-- 142 tests pass, fixed and random order. `mypy --strict` clean across
-  100 files. `ruff` clean.
+- 172 tests pass, fixed and random order. `mypy --strict` clean across
+  104 files. `ruff` clean.
 
 **Live OCR result on the user's real 26-item purchase sheet:** all 26
 rows correct, confirmed independently — the costing quantities sum to
@@ -108,17 +109,43 @@ What's there, for whoever touches this next:
   `CLAUDE.md` tries hard to avoid everywhere else. Do this as its own
   focused pass, not bolted onto an unrelated change.
 
-### 2b. `capital` / `withdraw` ← **start here**
+### 2b. `capital` / `withdraw` — ✅ done (2026-07-27, Opus)
 
-Partner capital in/out. Mutating, but there is direct precedent:
-`backend/api/commands/money_commands.py` (`expense`/`income`) already
-does ledger entry + double-entry journal posting + audit. Follow it
-closely. Spec: `docs/06_Accounting.md`.
+`capital` `withdraw` `approve withdraw <id>` `reject withdraw <id>`,
+plus `backend/services/capital_service.py` and 30 tests in
+`backend/tests/api/test_capital_flow.py`.
 
-⚠️ If the journal doesn't balance in your tests, **stop and escalate** —
-don't "fix" it by adjusting the expected value.
+This turned out to need a schema change and a design call the spec left
+open, so read this before touching partner capital:
 
-### 2c. `settings`
+**A pending withdrawal must move nothing.** docs/06_Accounting.md §8
+describes modelling it as a `partner_capital` row with
+`approved_by_partner_ids` empty — but rows in that table form a
+running-balance chain, so a pending one sitting in the chain would drop
+equity while assets stayed put and break the balance-sheet identity in
+§6 until someone answered. Hence `status` + `posted_at` (migration
+`c8e2f0b41d73`):
+
+- `balance()` reads only `status='posted'` rows;
+- **the chain is ordered by `posted_at`, not `created_at`** — an
+  approval can land long after the request, and the balance has to
+  follow the order money actually moved. There is a test asserting
+  `created_at` ordering *would* have been wrong; don't "simplify" the
+  ordering back;
+- approval recomputes against the balance at approval time, so a
+  contribution that arrives while the request waits isn't overwritten;
+- rejected requests are kept, not deleted.
+
+`CommandResult.notifications` was added for this (the approval request
+is the first message that must reach someone other than the sender).
+It's best-effort by design: the transaction is already committed when
+the fan-out runs, so a send failure is logged, never raised.
+
+`SettingsRepository` also landed here — typed, defaulting reads of the
+`settings` table. The `settings` *command* still doesn't exist (§2c),
+but three thresholds already read from it.
+
+### 2c. `settings` ← **start here**
 
 Key/value reads and writes on the `settings` table. The simplest
 remaining command. Spec: `docs/08_WhatsApp.md`.
