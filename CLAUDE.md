@@ -193,6 +193,7 @@ trigger, threshold, and message copy in the linked doc.
 | [docs/16_Deployment.md](docs/16_Deployment.md) | Docker Compose, Nginx, backup/restore |
 | [docs/17_CodingStandards.md](docs/17_CodingStandards.md) | Patterns, linting, PR checklist |
 | [docs/18_FutureRoadmap.md](docs/18_FutureRoadmap.md) | Multi-tenancy, new product types, roadmap |
+| [docs/19_InteractiveMessages.md](docs/19_InteractiveMessages.md) | WhatsApp buttons and list menus, and their limits |
 
 ## Coding Standards (summary — full detail in [`docs/17_CodingStandards.md`](docs/17_CodingStandards.md))
 
