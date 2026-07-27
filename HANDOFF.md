@@ -46,17 +46,17 @@ implementation is most dangerous.
   (`partner_capital.status`/`.posted_at` per §2b, then
   `purchase_lines.returned_qty` per §3.1).
 - WhatsApp transport via **Meta Cloud API** (the working one).
-- 23 commands: `purchase` `sale` `return` `received` `paid` `stock`
-  (+ `stock CODE`) `search` `expense` `income` `cash` `bank` `settings`
-  `help`,
+- 26 commands: `purchase` `sale` `return` `received` `paid` `stock`
+  (+ `stock CODE`) `search` `expense` `income` `cash` `bank` `edit`
+  `undo` `delete` `settings` `help`,
   plus `details` (the OCR follow-up step, not in the spec's command
   list), the reporting six from §2a (`dashboard` `summary` `profit`
   `supplier` `customer` `ledger`), and §2b's `capital` `withdraw`
   `approve` `reject`.
 - OCR: local pipeline (OpenCV → table detect → Paddle/Tesseract) **and**
   Claude vision, vision-first with automatic fallback.
-- 215 tests pass, fixed and random order. `mypy --strict` clean across
-  110 files. `ruff` clean.
+- 243 tests pass, fixed and random order. `mypy --strict` clean across
+  114 files. `ruff` clean.
 
 **Live OCR result on the user's real 26-item purchase sheet:** all 26
 rows correct, confirmed independently — the costing quantities sum to
@@ -75,10 +75,12 @@ Opus-required.** If you are Sonnet and asked to "continue", the honest
 answer is that the next task needs a model switch — say so rather than
 picking the least-dangerous-looking item from §3.
 
-`return` (3.1) is done. Next is the `edit`/`undo`/`delete` trio (3.2)
-— it reuses the movement-reversal pattern `return` established — then
-Celery + reconciliation (3.3), which is what actually proves inventory
-balances.
+3.1 and 3.2 are done. Next is Celery + the nightly reconciliation job
+(3.3) — the acceptance criterion in `CLAUDE.md` that inventory always
+balances is currently asserted per-wave in tests but never checked
+against live data. After that: the Excel export (3.4, needs
+`backend/reports/` and Celery first), then `backup`/`restore` (3.6),
+then the frontend and deployment, neither of which has been started.
 
 ### 2a. The reporting six — ✅ done (2026-07-27, Sonnet)
 
