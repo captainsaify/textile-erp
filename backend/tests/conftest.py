@@ -85,6 +85,10 @@ _PURGE_ORDER = (
     "income",
     "ocr_learning_dictionary",
     "attachments",
+    # no seeded rows today: thresholds fall back to their documented
+    # defaults when absent, so a test that writes one must not leave it
+    # behind changing another test's behaviour
+    "settings",
     "products",
     "brands",  # after products: products.brand_id references it
     "suppliers",

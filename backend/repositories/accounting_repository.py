@@ -11,7 +11,8 @@ import decimal
 import uuid
 from typing import cast
 
-from sqlalchemy import func, select, text
+from sqlalchemy import Text, func, select, text
+from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import (
@@ -101,11 +102,25 @@ class PartnerCapitalRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def _lock(self, org_id: uuid.UUID, partner_id: uuid.UUID) -> None:
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+            {"key": f"capital:{org_id}:{partner_id}"},
+        )
+
     async def balance(self, org_id: uuid.UUID, partner_id: uuid.UUID) -> decimal.Decimal:
+        """Latest *posted* row. A pending withdrawal has not moved equity
+        (docs/06_Accounting.md §8) and is excluded until it posts; the
+        chain is ordered by posted_at because an approval can land long
+        after the request that created the row."""
         stmt = (
             select(PartnerCapital.resulting_balance)
-            .where(PartnerCapital.org_id == org_id, PartnerCapital.partner_id == partner_id)
-            .order_by(PartnerCapital.created_at.desc(), PartnerCapital.id.desc())
+            .where(
+                PartnerCapital.org_id == org_id,
+                PartnerCapital.partner_id == partner_id,
+                PartnerCapital.status == "posted",
+            )
+            .order_by(PartnerCapital.posted_at.desc(), PartnerCapital.id.desc())
             .limit(1)
         )
         value = (await self._session.execute(stmt)).scalar_one_or_none()
@@ -123,10 +138,8 @@ class PartnerCapitalRepository:
         notes: str | None,
         created_by: uuid.UUID,
     ) -> PartnerCapital:
-        await self._session.execute(
-            text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
-            {"key": f"capital:{org_id}:{partner_id}"},
-        )
+        """Append an immediately-effective (posted) entry."""
+        await self._lock(org_id, partner_id)
         previous = await self.balance(org_id, partner_id)
         row = PartnerCapital(
             org_id=org_id,
@@ -137,9 +150,83 @@ class PartnerCapitalRepository:
             settled_via=settled_via,
             entry_date=entry_date,
             notes=notes,
+            status="posted",
+            posted_at=datetime.datetime.now(datetime.UTC),
             created_by=created_by,
         )
         self._session.add(row)
+        await self._session.flush()
+        return row
+
+    async def create_pending(
+        self,
+        org_id: uuid.UUID,
+        partner_id: uuid.UUID,
+        *,
+        amount: decimal.Decimal,
+        settled_via: str,
+        entry_date: datetime.date,
+        notes: str | None,
+        created_by: uuid.UUID,
+    ) -> PartnerCapital:
+        """A withdrawal awaiting a second partner (§8). `amount` is stored
+        as the signed effect it *will* have; `resulting_balance` holds the
+        balance as it stands now, unchanged, and is never read while the
+        row is pending."""
+        await self._lock(org_id, partner_id)
+        row = PartnerCapital(
+            org_id=org_id,
+            partner_id=partner_id,
+            entry_type=CapitalEntryType.WITHDRAWAL,
+            amount=amount,
+            resulting_balance=await self.balance(org_id, partner_id),
+            settled_via=settled_via,
+            entry_date=entry_date,
+            notes=notes,
+            status="pending",
+            posted_at=None,
+            created_by=created_by,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return row
+
+    async def get_pending(self, org_id: uuid.UUID, request_id: uuid.UUID) -> PartnerCapital | None:
+        stmt = select(PartnerCapital).where(
+            PartnerCapital.org_id == org_id,
+            PartnerCapital.id == request_id,
+            PartnerCapital.status == "pending",
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def find_pending_by_prefix(self, org_id: uuid.UUID, prefix: str) -> list[PartnerCapital]:
+        """WhatsApp users type the short id shown in the request message,
+        not a full UUID."""
+        stmt = select(PartnerCapital).where(
+            PartnerCapital.org_id == org_id,
+            PartnerCapital.status == "pending",
+            sql_cast(PartnerCapital.id, Text).like(f"{prefix.lower()}%"),
+        )
+        return list((await self._session.execute(stmt)).scalars())
+
+    async def post_pending(
+        self, row: PartnerCapital, *, approver_partner_id: uuid.UUID
+    ) -> PartnerCapital:
+        """Approve: recompute against the balance as it stands *now* --
+        contributions may have posted while this sat waiting -- then join
+        the chain at the current instant."""
+        await self._lock(row.org_id, row.partner_id)
+        row.resulting_balance = await self.balance(row.org_id, row.partner_id) + row.amount
+        row.approved_by_partner_ids = [*row.approved_by_partner_ids, approver_partner_id]
+        row.status = "posted"
+        row.posted_at = datetime.datetime.now(datetime.UTC)
+        await self._session.flush()
+        return row
+
+    async def reject_pending(self, row: PartnerCapital) -> PartnerCapital:
+        """Kept rather than deleted: an audited refusal is itself history
+        (docs/02_Database.md soft-delete rationale)."""
+        row.status = "rejected"
         await self._session.flush()
         return row
 

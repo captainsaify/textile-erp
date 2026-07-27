@@ -116,14 +116,36 @@ class BankLedger(_LedgerColumns, Base):
 
 class PartnerCapital(UUIDPkMixin, OrgScopedMixin, Base):
     __tablename__ = "partner_capital"
-    __table_args__ = (CheckConstraint("settled_via IN ('cash','bank')", name="settled_via_valid"),)
+    __table_args__ = (
+        CheckConstraint("settled_via IN ('cash','bank')", name="settled_via_valid"),
+        CheckConstraint("status IN ('pending','posted','rejected')", name="status_valid"),
+        # A posted row is part of the balance chain and must carry the
+        # timestamp that orders it; a pending one must not.
+        CheckConstraint(
+            "(status = 'posted') = (posted_at IS NOT NULL)", name="posted_at_matches_status"
+        ),
+        Index("idx_partner_capital_pending", "org_id", "status"),
+    )
 
     partner_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("partners.id"), nullable=False
     )
     entry_type: Mapped[CapitalEntryType] = mapped_column(capital_entry_type_enum, nullable=False)
     amount: Mapped[decimal.Decimal] = mapped_column(MONEY, nullable=False)
+    # Only meaningful on a posted row. A pending withdrawal has not moved
+    # equity yet, so it carries the balance as it stood at request time
+    # and is excluded from every balance read until it posts -- otherwise
+    # equity would drop while assets sat still and the balance-sheet
+    # identity in docs/06_Accounting.md §6 would break for as long as the
+    # request went unanswered.
     resulting_balance: Mapped[decimal.Decimal] = mapped_column(MONEY, nullable=False)
+    # docs/06_Accounting.md §8: large withdrawals wait for a second
+    # partner. Everything else is born 'posted'.
+    status: Mapped[str] = mapped_column(String, nullable=False, server_default="posted")
+    # Orders the balance chain. Deliberately distinct from created_at: an
+    # approval can land long after the request, and the chain must follow
+    # the order money actually moved, not the order it was asked for.
+    posted_at: Mapped[datetime.datetime | None]
     settled_via: Mapped[str | None] = mapped_column(String)
     entry_date: Mapped[datetime.date] = mapped_column(
         nullable=False, server_default=text("CURRENT_DATE")

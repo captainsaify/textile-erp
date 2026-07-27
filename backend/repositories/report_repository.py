@@ -22,13 +22,12 @@ from backend.models import (
     PurchaseHeader,
     SalesHeader,
     SalesLine,
-    Setting,
     Supplier,
 )
 from backend.models.enums import MovementType
+from backend.repositories.settings_repository import SettingsRepository
 
 ZERO = decimal.Decimal("0")
-DEFAULT_SLOW_MOVING_DAYS = 60
 _RECEIVABLE_STATUSES = ("confirmed", "partially_returned", "returned")
 
 
@@ -230,12 +229,5 @@ class ReportRepository:
         return results
 
     async def slow_moving_days(self, org_id: uuid.UUID) -> int:
-        """`settings.slow_moving_days`, default 60 -- docs/12_Dashboard.md
-        §2. The `settings` command isn't built yet, so this reads the
-        table directly; once it ships, values it writes are picked up
-        here with no change needed."""
-        stmt = select(Setting.value).where(
-            Setting.org_id == org_id, Setting.key == "slow_moving_days"
-        )
-        value = (await self._session.execute(stmt)).scalar_one_or_none()
-        return int(value) if isinstance(value, int | float) else DEFAULT_SLOW_MOVING_DAYS
+        """`settings.slow_moving_days`, default 60 -- docs/12_Dashboard.md §2."""
+        return await SettingsRepository(self._session).slow_moving_days(org_id)

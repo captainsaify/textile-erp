@@ -23,6 +23,12 @@ class RequestContext:
 @dataclass(frozen=True)
 class CommandResult:
     reply: str
+    #: (whatsapp_number, body) messages to send to people *other* than
+    #: the sender -- the dual-approval request in docs/06_Accounting.md
+    #: §8 is the first command that has to reach a second person.
+    #: Delivered after the reply, best-effort: a partner being
+    #: unreachable must not undo a committed transaction.
+    notifications: tuple[tuple[str, str], ...] = ()
 
 
 CommandHandler = Callable[[str, RequestContext], Awaitable[CommandResult]]

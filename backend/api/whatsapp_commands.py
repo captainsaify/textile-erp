@@ -15,6 +15,12 @@ from backend.api.command_types import (
     CommandSpec,
     RequestContext,
 )
+from backend.api.commands.capital_commands import (
+    handle_approve,
+    handle_capital,
+    handle_reject,
+    handle_withdraw,
+)
 from backend.api.commands.money_commands import (
     handle_bank,
     handle_cash,
@@ -147,6 +153,34 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.STAFF,
         handler=handle_bank,
         help_text="Bank balance and recent entries.",
+    ),
+    "capital": CommandSpec(
+        name="capital",
+        syntax="capital <partner> <amount> <cash|bank> [contribution|withdrawal]",
+        min_role=UserRole.OWNER,
+        handler=handle_capital,
+        help_text="Record a partner's capital contribution (or small withdrawal).",
+    ),
+    "withdraw": CommandSpec(
+        name="withdraw",
+        syntax="withdraw <partner> <amount> <cash|bank>",
+        min_role=UserRole.OWNER,
+        handler=handle_withdraw,
+        help_text="Withdraw partner capital. Large amounts need a second partner's approval.",
+    ),
+    "approve": CommandSpec(
+        name="approve",
+        syntax="approve withdraw <id>",
+        min_role=UserRole.OWNER,
+        handler=handle_approve,
+        help_text="Approve another partner's pending capital withdrawal.",
+    ),
+    "reject": CommandSpec(
+        name="reject",
+        syntax="reject withdraw <id>",
+        min_role=UserRole.OWNER,
+        handler=handle_reject,
+        help_text="Reject another partner's pending capital withdrawal.",
     ),
     "dashboard": CommandSpec(
         name="dashboard",

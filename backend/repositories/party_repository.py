@@ -435,6 +435,16 @@ class PartnerRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def get_by_user_id(self, org_id: uuid.UUID, user_id: uuid.UUID) -> Partner | None:
+        """Which partner is this WhatsApp user? Approving a withdrawal
+        needs the answer -- a partner may not approve their own (§8)."""
+        stmt = select(Partner).where(
+            Partner.org_id == org_id,
+            Partner.deleted_at.is_(None),
+            Partner.user_id == user_id,
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def list_active(self, org_id: uuid.UUID) -> list[Partner]:
         stmt = (
             select(Partner)
