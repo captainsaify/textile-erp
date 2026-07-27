@@ -72,11 +72,28 @@ managed 20/26 on the same image. Vision cost $0.054, took 18.1s.
 dashboard needs that API underneath it, so the two are one piece of
 work, not two.
 
-**Not verified:** the Docker images have never been built. Docker isn't
-installed in the environment they were written in, so the manifests are
-structurally tested (see `backend/tests/test_deployment_config.py`) but
-`docker compose build` has not been run even once. Expect to fix real
-things on the first attempt.
+**Deployment: verified as far as possible without Docker.** No
+container runtime exists on this machine, so the images have never been
+built. Instead every container command was run against a dependency set
+produced by the Dockerfile's own `uv sync --frozen --no-dev`:
+
+- the API's exact CMD boots and `/healthz` returns 200 with a live DB
+  check (the probe compose gates nginx on);
+- `alembic upgrade head` runs — the `migrate` service's command;
+- the celery CLI resolves `-A backend.workers.app`, registers all seven
+  tasks, and Beat lists its six entries;
+- a real `pg_dump` backup completed, checksummed, and passed
+  `pg_restore --list` verification.
+
+That dry run found four bugs a first `docker compose up` would have hit
+(compose in the wrong directory to read `.env`; Beat never attached to
+its schedule; empty datastore passwords; no `.dockerignore`) — all
+fixed, all now covered by `backend/tests/test_deployment_config.py`.
+
+**What is still unverified:** the image builds themselves. `apt-get`
+package names, the uv binary copy from ghcr.io, layer caching and the
+non-root file permissions have never been exercised. Run
+`docker compose build` first and expect to fix something.
 
 ---
 
