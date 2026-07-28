@@ -15,7 +15,6 @@ from typing import Any
 from celery import Celery
 
 from backend.core.config import get_settings
-from backend.core.logging import get_logger
 from backend.workers.schedule import CELERYBEAT_SCHEDULE
 
 settings = get_settings()
@@ -74,13 +73,18 @@ def run_async[T](coro: Coroutine[Any, Any, T]) -> T:
 
 
 async def _release_loop_bound_singletons() -> None:
-    """Best-effort: a failure to tidy up must not mask the task's own
-    exception, but leaving them bound would break the *next* task."""
-    from backend.core.db import dispose_engine
-    from backend.core.redis import close_redis
+    """Every registered singleton, not a list maintained here.
 
-    for release in (dispose_engine, close_redis):
-        try:
-            await release()
-        except Exception as exc:  # noqa: BLE001
-            get_logger(__name__).warning("worker_singleton_release_failed", error=str(exc))
+    A hand-written list is what let this recur: the engine and Redis
+    were released, the WhatsApp client was not, so reports generated
+    and then failed to be delivered. See backend/core/lifecycle.py.
+    """
+    # imported for their @on_release registrations, which only happen
+    # when the module is loaded
+    import backend.core.db  # noqa: F401
+    import backend.core.redis  # noqa: F401
+    import backend.services.whatsapp_bridge_client  # noqa: F401
+    import backend.services.whatsapp_client  # noqa: F401
+    from backend.core.lifecycle import release_all
+
+    await release_all()

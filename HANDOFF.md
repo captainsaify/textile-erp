@@ -373,16 +373,24 @@ kept because the user wants WhatsApp *group* support eventually, which
 Meta doesn't offer. Don't delete it, don't try to revive it without
 checking upstream first.
 
+**Process-wide async singletons must register with `@on_release`**
+(`backend/core/lifecycle.py`). See below for why; the short version is
+that a Celery task runs in a fresh event loop and anything still bound
+to the previous one breaks. A test scans for the singleton shape and
+fails if a new one isn't registered — don't delete it, it exists because
+this recurred.
+
 **Celery tasks must not inherit a loop-bound singleton.** Every task
 runs in a fresh event loop (`run_async`), but the async engine and the
 Redis client are module-level singletons that bind to whichever loop
 first touched them. The *second* task in a worker process then died on
 `pool_pre_ping` with "got Future attached to a different loop" -- and
 because it died before the job row moved off `queued`, the export
-simply never arrived and nobody was told. `run_async` now releases both
-singletons before *and* after each task, and `dispose_engine`/
-`close_redis` clear their globals even when closing fails. If you add
-another process-wide async singleton, release it there too.
+simply never arrived and nobody was told. `run_async` now releases *every registered*
+singleton before and after each task, and each close function clears its
+global even when closing fails. Releasing a hand-written list is what
+let it recur: the engine and Redis were covered, the WhatsApp client was
+not, so reports generated and then silently failed to be delivered.
 
 **nginx must re-resolve `api`, and now does.** An `upstream api { server
 api:8000; }` block makes nginx resolve the name once at startup and

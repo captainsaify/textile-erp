@@ -18,6 +18,7 @@ import httpx
 
 from backend.api.interactive import Interactive, to_cloud_api
 from backend.core.config import get_settings
+from backend.core.lifecycle import on_release
 from backend.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -212,8 +213,11 @@ def get_whatsapp_client() -> WhatsAppClient:
     return _client
 
 
+@on_release
 async def close_whatsapp_client() -> None:
+    """Cleared even if closing fails: a client bound to a dead loop must
+    not be handed to the next caller."""
     global _client
-    if _client is not None:
-        await _client.aclose()
-    _client = None
+    client, _client = _client, None
+    if client is not None:
+        await client.aclose()

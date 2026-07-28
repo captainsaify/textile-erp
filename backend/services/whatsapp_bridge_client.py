@@ -13,6 +13,7 @@ import asyncio
 import httpx
 
 from backend.core.config import get_settings
+from backend.core.lifecycle import on_release
 from backend.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -66,8 +67,10 @@ def get_bridge_sender() -> WhatsAppBridgeSender:
     return _sender
 
 
+@on_release
 async def close_bridge_sender() -> None:
+    """Cleared even if closing fails -- see close_whatsapp_client."""
     global _sender
-    if _sender is not None:
-        await _sender.aclose()
-    _sender = None
+    sender, _sender = _sender, None
+    if sender is not None:
+        await sender.aclose()

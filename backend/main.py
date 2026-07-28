@@ -15,11 +15,9 @@ from fastapi import FastAPI
 from backend.api import bridge, webhooks
 from backend.api.errors import register_error_handlers
 from backend.api.routers import auth, catalog, reporting
-from backend.core.db import check_db_connection, dispose_engine
+from backend.core.db import check_db_connection
+from backend.core.lifecycle import release_all
 from backend.core.logging import configure_logging, get_logger
-from backend.core.redis import close_redis
-from backend.services.whatsapp_bridge_client import close_bridge_sender
-from backend.services.whatsapp_client import close_whatsapp_client
 
 logger = get_logger(__name__)
 
@@ -29,10 +27,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     configure_logging()
     logger.info("app_startup")
     yield
-    await close_whatsapp_client()
-    await close_bridge_sender()
-    await close_redis()
-    await dispose_engine()
+    # the same registry the workers use, so shutdown can't drift from
+    # task cleanup (backend/core/lifecycle.py)
+    await release_all()
     logger.info("app_shutdown")
 
 

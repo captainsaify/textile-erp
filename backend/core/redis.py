@@ -9,6 +9,7 @@ from __future__ import annotations
 import redis.asyncio as aioredis
 
 from backend.core.config import get_settings
+from backend.core.lifecycle import on_release
 
 _client: aioredis.Redis | None = None
 
@@ -24,6 +25,7 @@ def get_redis() -> aioredis.Redis:
     return _client
 
 
+@on_release
 async def close_redis() -> None:
     """Cleared even if closing fails, for the same reason as
     dispose_engine: a dead client must not be handed to the next

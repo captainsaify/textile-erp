@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from backend.core.config import get_settings
+from backend.core.lifecycle import on_release
 
 
 def create_engine(database_url: str | None = None) -> AsyncEngine:
@@ -53,6 +54,7 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
     return _session_factory
 
 
+@on_release
 async def dispose_engine() -> None:
     """App-shutdown hook; also lets tests and Celery tasks reset the
     module state.
