@@ -15,6 +15,7 @@ from typing import Any
 from celery import Celery
 
 from backend.core.config import get_settings
+from backend.core.logging import get_logger
 from backend.workers.schedule import CELERYBEAT_SCHEDULE
 
 settings = get_settings()
@@ -49,15 +50,37 @@ celery_app.conf.beat_schedule = CELERYBEAT_SCHEDULE
 def run_async[T](coro: Coroutine[Any, Any, T]) -> T:
     """Run one coroutine to completion inside a synchronous Celery task.
 
-    A fresh loop per task, closed afterwards: the SQLAlchemy async
-    engine and the Redis client both bind to the loop that first touches
-    them, so reusing a loop across tasks in a long-lived worker is how
-    you end up with "attached to a different loop" errors under load.
+    A fresh loop per task, **and the loop-bound singletons released
+    before it closes**. The second half is not optional: the SQLAlchemy
+    async engine and the Redis client are module-level singletons that
+    bind to whichever loop first touches them, and they outlive the
+    task. Give the next task a new loop while the engine's pool still
+    holds connections belonging to the old one, and it dies on
+    `pool_pre_ping` with "got Future attached to a different loop" --
+    which is what silently stopped every report after the first one in
+    each worker process.
     """
     loop = asyncio.new_event_loop()
     try:
         asyncio.set_event_loop(loop)
+        # Before as well as after: this loop must not inherit a singleton
+        # bound to some earlier one, whoever created it.
+        loop.run_until_complete(_release_loop_bound_singletons())
         return loop.run_until_complete(coro)
     finally:
+        loop.run_until_complete(_release_loop_bound_singletons())
         asyncio.set_event_loop(None)
         loop.close()
+
+
+async def _release_loop_bound_singletons() -> None:
+    """Best-effort: a failure to tidy up must not mask the task's own
+    exception, but leaving them bound would break the *next* task."""
+    from backend.core.db import dispose_engine
+    from backend.core.redis import close_redis
+
+    for release in (dispose_engine, close_redis):
+        try:
+            await release()
+        except Exception as exc:  # noqa: BLE001
+            get_logger(__name__).warning("worker_singleton_release_failed", error=str(exc))

@@ -54,12 +54,17 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 
 
 async def dispose_engine() -> None:
-    """App-shutdown hook; also lets tests reset the module state."""
+    """App-shutdown hook; also lets tests and Celery tasks reset the
+    module state.
+
+    The globals are cleared even when disposal itself fails -- an engine
+    whose loop has already closed raises on dispose, and keeping the
+    reference would hand the *next* caller the same dead engine.
+    """
     global _engine, _session_factory
-    if _engine is not None:
-        await _engine.dispose()
-    _engine = None
-    _session_factory = None
+    engine, _engine, _session_factory = _engine, None, None
+    if engine is not None:
+        await engine.dispose()
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:

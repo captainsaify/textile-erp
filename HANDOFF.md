@@ -373,6 +373,17 @@ kept because the user wants WhatsApp *group* support eventually, which
 Meta doesn't offer. Don't delete it, don't try to revive it without
 checking upstream first.
 
+**Celery tasks must not inherit a loop-bound singleton.** Every task
+runs in a fresh event loop (`run_async`), but the async engine and the
+Redis client are module-level singletons that bind to whichever loop
+first touched them. The *second* task in a worker process then died on
+`pool_pre_ping` with "got Future attached to a different loop" -- and
+because it died before the job row moved off `queued`, the export
+simply never arrived and nobody was told. `run_async` now releases both
+singletons before *and* after each task, and `dispose_engine`/
+`close_redis` clear their globals even when closing fails. If you add
+another process-wide async singleton, release it there too.
+
 **nginx must re-resolve `api`, and now does.** An `upstream api { server
 api:8000; }` block makes nginx resolve the name once at startup and
 cache that IP for its whole life. Every `docker compose build && up -d`

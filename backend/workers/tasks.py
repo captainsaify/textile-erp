@@ -238,6 +238,33 @@ def nightly_backup() -> dict[str, Any]:
     return run_async(_run())
 
 
+async def _mark_job_failed(factory: Any, job_id: str, exc: Exception) -> None:
+    """Record the failure on the row both the follow-up message and the
+    API poll read, then tell whoever asked. A silent job is worse than a
+    failed one: the user has no way to tell waiting from broken."""
+    from backend.models import ReportJob, User
+
+    try:
+        async with factory() as session, session.begin():
+            job = await session.get(ReportJob, uuid.UUID(job_id))
+            if job is None or job.status == "ready":
+                return
+            job.status = "failed"
+            job.error = str(exc)[:500]
+            user = await session.get(User, job.created_by)
+            number = user.whatsapp_number if user else None
+        if number:
+            from backend.services.whatsapp_client import get_whatsapp_client
+
+            await get_whatsapp_client().send_text(
+                number,
+                f"❌ That export (reference {job_id[:8]}) failed and won't arrive. "
+                "Try again, and if it keeps failing tell me what you asked for.",
+            )
+    except Exception as inner:  # noqa: BLE001 -- never mask the original
+        logger.error("report_failure_record_failed", job_id=job_id, error=str(inner))
+
+
 async def _deliver_report(record: Any) -> None:
     """Send the workbook itself, not a note about where it lives.
 
@@ -281,8 +308,17 @@ def report_generation(job_id: str) -> dict[str, Any]:
 
     async def _run() -> dict[str, Any]:
         factory = get_session_factory()
-        async with factory() as session:
-            record = await ReportService(session).generate(uuid.UUID(job_id))
+        try:
+            async with factory() as session:
+                record = await ReportService(session).generate(uuid.UUID(job_id))
+        except Exception as exc:  # noqa: BLE001
+            # ReportService handles failures *inside* generation. This is
+            # for everything before that -- a dead connection, a bad
+            # import -- which used to leave the row `queued` forever with
+            # the user waiting on a message that was never coming.
+            logger.error("report_task_crashed", job_id=job_id, error=str(exc))
+            await _mark_job_failed(factory, job_id, exc)
+            raise
         if record.notify_number:
             await _deliver_report(record)
         return {"job_id": job_id, "status": record.status}

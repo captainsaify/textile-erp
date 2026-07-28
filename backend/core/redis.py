@@ -25,7 +25,10 @@ def get_redis() -> aioredis.Redis:
 
 
 async def close_redis() -> None:
+    """Cleared even if closing fails, for the same reason as
+    dispose_engine: a dead client must not be handed to the next
+    caller."""
     global _client
-    if _client is not None:
-        await _client.aclose()
-    _client = None
+    client, _client = _client, None
+    if client is not None:
+        await client.aclose()
