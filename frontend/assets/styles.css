@@ -442,15 +442,49 @@ tr.clickable:hover td {
 
 .scan-beside {
   display: grid;
-  gap: 1rem;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 1.2rem;
+  /* Two explicit tracks rather than auto-fit: the lines table and the
+     scan are meant to be read against each other, so they only stack
+     when there genuinely isn't room. */
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
   align-items: start;
 }
 
+/* A grid item's default `min-width: auto` refuses to shrink below its
+   content. The lines table sets `white-space: nowrap`, so it stayed at
+   full width and the scan was laid on top of it. */
+.scan-beside > * {
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .scan-beside {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .scan-beside img {
-  max-width: 100%;
+  display: block;
+  width: 100%;
+  height: auto;
   border: 1px solid var(--border);
   border-radius: 8px;
+  /* the sheet stays in view while the lines are scrolled past it --
+     the whole point of the page is comparing the two */
+  position: sticky;
+  top: 4.5rem;
+  cursor: zoom-in;
+}
+
+.scan-beside img.zoomed {
+  position: static;
+  cursor: zoom-out;
+  width: auto;
+  max-width: none;
+}
+
+.scan-pane {
+  overflow-x: auto;
 }
 
 .banner {

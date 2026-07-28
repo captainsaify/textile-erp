@@ -302,14 +302,20 @@
     const beside = document.createElement("div");
     beside.className = "scan-beside";
     const left = document.createElement("div");
+    left.className = "table-scroll";
     left.append(lines);
     beside.append(left);
 
     const right = document.createElement("div");
+    right.className = "scan-pane";
     if (detail.scan_url) {
       const img = document.createElement("img");
       img.alt = `Scanned sheet for ${text(detail.invoice_no)}`;
       img.loading = "lazy";
+      img.title = "Click to view full size";
+      // a photographed sheet is often unreadable at column width, so
+      // clicking drops the fit-to-column constraint
+      img.addEventListener("click", () => img.classList.toggle("zoomed"));
       // the image endpoint needs the bearer token, so it is fetched
       // rather than set as a plain src
       fetch(API + detail.scan_url, { headers: { Authorization: `Bearer ${token}` } })
