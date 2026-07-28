@@ -113,6 +113,113 @@ def set_password_command(
         raise typer.Exit(code=1) from None
 
 
+@cli.command("assign-brand")
+def assign_brand(
+    brand: Annotated[str, typer.Option("--brand", help="Brand name, e.g. TOP")],
+    codes: Annotated[
+        str | None,
+        typer.Option("--codes", help="Comma-separated codes; omit to take every brandless one"),
+    ] = None,
+) -> None:
+    """Put existing products under a brand.
+
+    Sheets read from now on pick the brand up from their own LABEL
+    column, but products created before that landed have `brand_id`
+    NULL and nothing goes back to fix them. This is that fix, and it is
+    audited like any other mutation (`CLAUDE.md` rule 3) rather than
+    being a quiet UPDATE.
+
+    Codes are only unique *within* a brand, so moving a product between
+    brands can collide with one already there; that is reported per
+    product instead of failing the whole run.
+    """
+
+    from backend.models import Brand, Product
+    from backend.services.audit_service import AuditService
+
+    async def _run() -> tuple[str, int, list[str]]:
+        wanted = {code.strip().upper() for code in codes.split(",")} if codes else None
+        factory = get_session_factory()
+        try:
+            async with factory() as session, session.begin():
+                org = (await session.execute(select(Organization).limit(1))).scalar_one()
+                actor = (
+                    (
+                        await session.execute(
+                            select(User).where(User.org_id == org.id, User.deleted_at.is_(None))
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if actor is None:
+                    raise ValueError("no user to attribute this to -- create one first")
+
+                existing = (
+                    await session.execute(
+                        select(Brand).where(Brand.org_id == org.id, Brand.name == brand)
+                    )
+                ).scalar_one_or_none()
+                if existing is None:
+                    existing = Brand(org_id=org.id, name=brand)
+                    session.add(existing)
+                    await session.flush()
+
+                stmt = select(Product).where(Product.org_id == org.id, Product.deleted_at.is_(None))
+                if wanted is None:
+                    stmt = stmt.where(Product.brand_id.is_(None))
+                products = list((await session.execute(stmt)).scalars())
+                if wanted is not None:
+                    products = [p for p in products if p.code.upper() in wanted]
+
+                changed = 0
+                skipped: list[str] = []
+                audit = AuditService(session)
+                for product in products:
+                    clash = (
+                        await session.execute(
+                            select(Product).where(
+                                Product.org_id == org.id,
+                                Product.brand_id == existing.id,
+                                Product.deleted_at.is_(None),
+                                Product.id != product.id,
+                            )
+                        )
+                    ).scalars()
+                    if any(other.code.upper() == product.code.upper() for other in clash):
+                        skipped.append(product.code)
+                        continue
+                    before = str(product.brand_id) if product.brand_id else None
+                    product.brand_id = existing.id
+                    await audit.record(
+                        org.id,
+                        actor.id,
+                        action="product.brand_assigned",
+                        entity_type="products",
+                        entity_id=product.id,
+                        channel="cli",
+                        before_state={"code": product.code, "brand_id": before},
+                        after_state={"code": product.code, "brand": brand},
+                    )
+                    changed += 1
+                return brand, changed, skipped
+        finally:
+            await dispose_engine()
+
+    try:
+        name, changed, skipped = asyncio.run(_run())
+    except Exception as exc:  # noqa: BLE001 -- surfaced to the operator
+        typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.secho(f"{changed} product(s) now under '{name}'", fg=typer.colors.GREEN)
+    if skipped:
+        typer.secho(
+            f"skipped (that code already exists under '{name}'): {', '.join(skipped)}",
+            fg=typer.colors.YELLOW,
+        )
+
+
 # Must stay last: typer registers commands as the module executes, so an
 # entrypoint placed above a @cli.command() runs before that command
 # exists. `set-password` was unreachable this way.

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Textile ERP</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=5" />
+    <link rel="stylesheet" href="/assets/styles.css?v=6" />
     <link
       rel="icon"
       href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>"
@@ -39,6 +39,7 @@
           <button data-page="overview" class="active">Overview</button>
           <button data-page="stock">Stock</button>
           <button data-page="purchases">Purchases</button>
+          <button data-page="sales">Sales</button>
           <button data-page="money">Money</button>
           <button data-page="admin">Admin</button>
         </nav>
@@ -91,6 +92,14 @@
           <div id="purchase-detail" class="card" hidden></div>
         </section>
 
+        <section id="page-sales" class="page" hidden>
+          <div class="card">
+            <h2>Sales</h2>
+            <div id="sales-table" class="table-scroll"></div>
+          </div>
+          <div id="sale-detail" class="card" hidden></div>
+        </section>
+
         <section id="page-money" class="page" hidden>
           <div class="grid-2">
             <div class="card">
@@ -134,8 +143,8 @@
       <p id="banner" class="banner" role="status" hidden></p>
     </div>
 
-    <script src="/assets/money.js?v=5"></script>
-    <script src="/assets/charts.js?v=5"></script>
-    <script src="/assets/app.js?v=5"></script>
+    <script src="/assets/money.js?v=6"></script>
+    <script src="/assets/charts.js?v=6"></script>
+    <script src="/assets/app.js?v=6"></script>
   </body>
 </html>

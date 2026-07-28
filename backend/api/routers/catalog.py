@@ -463,10 +463,16 @@ async def get_sale(sale_id: str, user: CurrentUser, session: Session) -> dict[st
             .order_by(SalesLine.line_no)
         )
     ).all()
+    customer_name = (
+        await session.execute(select(Customer.name).where(Customer.id == header.customer_id))
+    ).scalar_one_or_none() or ""
     return {
         "id": str(header.id),
         "date": header.sale_date.isoformat(),
+        "customer": customer_name,
         "grand_total": money_str(header.grand_total),
+        "amount_paid": money_str(header.amount_paid),
+        "payment_status": header.payment_status,
         "status": header.status,
         "lines": [
             {
@@ -475,6 +481,12 @@ async def get_sale(sale_id: str, user: CurrentUser, session: Session) -> dict[st
                 "qty": qty_str(line.qty),
                 "rate": money_str(line.rate),
                 "line_total": money_str(line.line_total),
+                "cost": money_str(line.avg_cost_at_sale_time * line.qty),
+                # Margin is computed here, in Decimal, and sent as a
+                # string. Doing this subtraction in the browser would
+                # turn money into a 53-bit float, which is the one thing
+                # this system never does (docs/21 §5).
+                "margin": money_str(line.line_total - line.avg_cost_at_sale_time * line.qty),
                 "avg_cost_at_sale_time": money_str(line.avg_cost_at_sale_time),
                 "returned_qty": qty_str(line.returned_qty),
             }

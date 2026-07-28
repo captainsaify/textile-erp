@@ -347,6 +347,86 @@
     panel.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
+  // ----------------------------------------------------------- sales
+
+  async function loadSales() {
+    const payload = await api("/sales?limit=50");
+    $("sale-detail").hidden = true;
+    $("sales-table").replaceChildren(
+      table(
+        [
+          { label: "Date", render: (row) => text(row.date || row.sale_date) },
+          { label: "Customer", key: "customer" },
+          { label: "Total", numeric: true, render: (row) => money(row.grand_total) },
+          { label: "Paid", numeric: true, render: (row) => money(row.amount_paid) },
+          {
+            label: "Payment",
+            render: (row) =>
+              `<span class="pill ${row.payment_status === "paid" ? "good" : "warn"}">${text(
+                row.payment_status,
+              )}</span>`,
+          },
+          { label: "Status", key: "status" },
+        ],
+        rowsOf(payload),
+        { onRowClick: (row) => loadSaleDetail(row.id) },
+      ),
+    );
+  }
+
+  /* Margin per line is the reason to open a sale: what it sold for
+   * against what it cost us (docs/21 §3). */
+  async function loadSaleDetail(id) {
+    const detail = await api(`/sales/${id}`);
+    const panel = $("sale-detail");
+    panel.replaceChildren();
+
+    const head = document.createElement("div");
+    head.className = "detail-head";
+    head.innerHTML = `
+      <div>
+        <h2>${text(detail.customer)}</h2>
+        <p class="muted">${text(detail.date || detail.sale_date)} · ${money(
+          detail.grand_total,
+        )}</p>
+      </div>
+      <button class="link" id="close-sale">Close</button>`;
+    panel.append(head);
+
+    const wrap = document.createElement("div");
+    wrap.className = "table-scroll";
+    wrap.append(
+      table(
+        [
+          { label: "#", key: "line_no" },
+          { label: "Code", key: "code" },
+          { label: "Qty", numeric: true, key: "qty" },
+          { label: "Rate", numeric: true, render: (row) => money(row.rate) },
+          { label: "Cost", numeric: true, render: (row) => money(row.cost || "0") },
+          { label: "Total", numeric: true, render: (row) => money(row.line_total) },
+          {
+            label: "Margin",
+            numeric: true,
+            render: (row) => {
+              if (row.margin === undefined || row.margin === null) return "";
+              // a line sold under cost is the thing worth seeing here
+              return Money.isNegative(row.margin)
+                ? `<span class="pill bad">${Money.format(row.margin)}</span>`
+                : money(row.margin);
+            },
+          },
+        ],
+        detail.lines || [],
+      ),
+    );
+    panel.append(wrap);
+    panel.hidden = false;
+    $("close-sale").addEventListener("click", () => {
+      panel.hidden = true;
+    });
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
   // ----------------------------------------------------------- money
 
   async function loadMoney() {
@@ -566,6 +646,7 @@
     overview: loadOverview,
     stock: loadStock,
     purchases: loadPurchases,
+    sales: loadSales,
     money: loadMoney,
     admin: loadAdmin,
   };
