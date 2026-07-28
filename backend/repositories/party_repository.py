@@ -8,12 +8,25 @@ import datetime
 import decimal
 import uuid
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy import desc as sa_desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import Customer, Partner, Supplier
 
 _SIMILARITY_THRESHOLD = 0.3
+
+
+@dataclasses.dataclass(frozen=True)
+class PartyBalance:
+    """One party's outstanding total and how old it is."""
+
+    party_id: uuid.UUID
+    name: str
+    outstanding: decimal.Decimal
+    oldest_date: datetime.date | None
+
+
 ZERO = decimal.Decimal("0")
 
 
@@ -127,6 +140,53 @@ class SupplierRepository:
             )
         ).scalar_one_or_none() or ZERO
         return decimal.Decimal(unpaid) + opening
+
+    async def outstanding_parties(self, org_id: uuid.UUID) -> list[PartyBalance]:
+        """Every supplier we still owe, largest first, with the date of
+        their oldest unpaid bill -- the aging question docs/21 §2 asks.
+
+        One query rather than N: calling outstanding() per supplier is
+        what makes a "who do we owe" page slow enough to stop being
+        opened.
+        """
+        from backend.models import PurchaseHeader
+
+        stmt = (
+            select(
+                Supplier.id,
+                Supplier.name,
+                (
+                    func.coalesce(
+                        func.sum(PurchaseHeader.grand_total - PurchaseHeader.amount_paid), ZERO
+                    )
+                    + func.coalesce(Supplier.opening_balance, ZERO)
+                ).label("outstanding"),
+                func.min(PurchaseHeader.invoice_date).label("oldest"),
+            )
+            .join(
+                PurchaseHeader,
+                and_(
+                    PurchaseHeader.supplier_id == Supplier.id,
+                    PurchaseHeader.deleted_at.is_(None),
+                    PurchaseHeader.status == "confirmed",
+                    PurchaseHeader.grand_total > PurchaseHeader.amount_paid,
+                ),
+                isouter=True,
+            )
+            .where(Supplier.org_id == org_id, Supplier.deleted_at.is_(None))
+            .group_by(Supplier.id, Supplier.name, Supplier.opening_balance)
+            .order_by(sa_desc("outstanding"))
+        )
+        return [
+            PartyBalance(
+                party_id=row[0],
+                name=row[1],
+                outstanding=decimal.Decimal(row[2]),
+                oldest_date=row[3],
+            )
+            for row in (await self._session.execute(stmt)).all()
+            if decimal.Decimal(row[2]) != ZERO
+        ]
 
     async def stats(
         self, org_id: uuid.UUID, supplier_id: uuid.UUID, today: datetime.date
@@ -303,6 +363,45 @@ class CustomerRepository:
             )
         ).scalar_one_or_none() or decimal.Decimal("0")
         return decimal.Decimal(unpaid) + opening
+
+    async def outstanding_parties(self, org_id: uuid.UUID) -> list[PartyBalance]:
+        """Every customer who still owes us, largest first, with their
+        oldest unpaid sale -- the receivables aging list."""
+        from backend.models import SalesHeader
+
+        stmt = (
+            select(
+                Customer.id,
+                Customer.name,
+                (
+                    func.coalesce(func.sum(SalesHeader.grand_total - SalesHeader.amount_paid), ZERO)
+                    + func.coalesce(Customer.opening_balance, ZERO)
+                ).label("outstanding"),
+                func.min(SalesHeader.sale_date).label("oldest"),
+            )
+            .join(
+                SalesHeader,
+                and_(
+                    SalesHeader.customer_id == Customer.id,
+                    SalesHeader.deleted_at.is_(None),
+                    SalesHeader.grand_total > SalesHeader.amount_paid,
+                ),
+                isouter=True,
+            )
+            .where(Customer.org_id == org_id, Customer.deleted_at.is_(None))
+            .group_by(Customer.id, Customer.name, Customer.opening_balance)
+            .order_by(sa_desc("outstanding"))
+        )
+        return [
+            PartyBalance(
+                party_id=row[0],
+                name=row[1],
+                outstanding=decimal.Decimal(row[2]),
+                oldest_date=row[3],
+            )
+            for row in (await self._session.execute(stmt)).all()
+            if decimal.Decimal(row[2]) != ZERO
+        ]
 
     async def stats(
         self, org_id: uuid.UUID, customer_id: uuid.UUID, today: datetime.date

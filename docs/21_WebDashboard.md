@@ -230,17 +230,26 @@ already exists.
 
 ## 10. Phasing {#phasing}
 
-**Phase 1 — Login + Overview.** Auth flow, KPI row, and the two trend
-charts. Requires the daily rollup (§9). This alone answers "are we
-making money?"
+**Phases 1–4 — ✅ built** (2026-07-29), in `frontend/`: login, overview
+(KPI row + the two trend charts), stock, purchases with the
+scan-beside-lines detail, money (receivables/payables aging, ledgers)
+and admin (reconciliation acknowledgement, audit log).
 
-**Phase 2 — Stock and Purchases**, including the scan-beside-lines
-detail view. The highest-trust-building page in the product.
+Two deviations from the plan above, both deliberate:
 
-**Phase 3 — Money and Reports.** Aging charts, ledgers, P&L, export
-downloads. Needs the supplier/customer endpoints.
+- **No `daily_org_metrics` rollup.** The trend endpoint
+  (`GET /metrics/monthly`) calls `ProfitService` once per month. §9 is
+  right that replaying the journal per request won't scale, but at this
+  business's volume six months is milliseconds, and a rollup table is a
+  second place for "what was our profit" to live — exactly what
+  [12_Dashboard.md §1](12_Dashboard.md) forbids. When it gets slow, add
+  the rollup *fed by* this service rather than computing it separately.
+- **P&L and Excel download are not on the Reports page.** `export` over
+  WhatsApp now delivers the workbook into the chat, which is where the
+  partners already are. The endpoints exist (`POST /reports/export`,
+  `GET /reports/export/{job_id}`) whenever a browser download is wanted.
 
-**Phase 4 — Admin.** Audit log, reconciliation status.
+Reports remains the one page from §3 not built, for that reason.
 
 Deployment (§7) can happen at any point from Phase 1 and should happen
 early, because the stable webhook URL is worth having regardless.

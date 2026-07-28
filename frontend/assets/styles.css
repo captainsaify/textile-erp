@@ -1,0 +1,456 @@
+/* docs/21_WebDashboard.md §5. Plain CSS, no build step.
+ *
+ * Light and dark are both chosen, not one flipped into the other: the
+ * chart hues are separate validated steps per mode (see charts.js).
+ */
+
+:root {
+  --surface: #fcfcfb;
+  --surface-raised: #ffffff;
+  --border: #e2e0dc;
+  --ink: #1d1c1a;
+  --ink-muted: #6b6862;
+  --series-1: #2f6f9f;
+  --series-2: #c4703a;
+  --good: #2e7d4f;
+  --warn: #a1651a;
+  --bad: #b3261e;
+  --radius: 10px;
+  --shadow: 0 1px 2px rgb(0 0 0 / 6%), 0 4px 12px rgb(0 0 0 / 4%);
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #1a1a19;
+    --surface-raised: #232322;
+    --border: #35342f;
+    --ink: #f0efe9;
+    --ink-muted: #a3a099;
+    --series-1: #4a90d9;
+    --series-2: #d4793f;
+    --good: #58b27a;
+    --warn: #d3a24a;
+    --bad: #e2725f;
+    --shadow: none;
+    color-scheme: dark;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--surface);
+  color: var(--ink);
+  font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+h1,
+h2 {
+  margin: 0;
+  font-weight: 600;
+}
+
+h1 {
+  font-size: 1.4rem;
+}
+
+h2 {
+  font-size: 1rem;
+  letter-spacing: 0.01em;
+}
+
+.muted {
+  color: var(--ink-muted);
+  font-size: 0.86rem;
+  margin: 0.15rem 0 0;
+}
+
+.error {
+  color: var(--bad);
+  font-size: 0.88rem;
+}
+
+/* ---------------------------------------------------------- login */
+
+.login {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+}
+
+.login-card {
+  width: min(380px, 100%);
+  display: grid;
+  gap: 0.55rem;
+}
+
+.login-card label {
+  font-size: 0.82rem;
+  color: var(--ink-muted);
+  margin-top: 0.4rem;
+}
+
+input,
+button,
+select {
+  font: inherit;
+}
+
+input {
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+button {
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0.6rem 0.9rem;
+  background: var(--series-1);
+  color: #fff;
+  font-weight: 550;
+}
+
+button.link {
+  background: none;
+  color: var(--ink-muted);
+  padding: 0.3rem 0.4rem;
+  font-weight: 400;
+}
+
+button.link:hover {
+  color: var(--ink);
+}
+
+/* ---------------------------------------------------------- shell */
+
+.topbar {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.7rem 1.1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-raised);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  flex-wrap: wrap;
+}
+
+.brand {
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+#nav {
+  display: flex;
+  gap: 0.2rem;
+  flex-wrap: wrap;
+}
+
+#nav button {
+  background: none;
+  color: var(--ink-muted);
+  padding: 0.35rem 0.65rem;
+  font-weight: 500;
+}
+
+#nav button.active {
+  background: color-mix(in oklab, var(--series-1) 14%, transparent);
+  color: var(--ink);
+}
+
+.topbar-end {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+main#pages {
+  padding: 1.1rem;
+  display: grid;
+  gap: 1.1rem;
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.page {
+  display: grid;
+  gap: 1.1rem;
+}
+
+.card {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem 1.1rem;
+  box-shadow: var(--shadow);
+  margin: 0;
+}
+
+.card-head {
+  display: flex;
+  gap: 0.8rem;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  margin-bottom: 0.6rem;
+}
+
+.grid-2 {
+  display: grid;
+  gap: 1.1rem;
+  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+}
+
+/* ------------------------------------------------------------ kpi */
+
+.kpi-row {
+  display: grid;
+  gap: 0.8rem;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.kpi {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.85rem 1rem;
+}
+
+.kpi .label {
+  color: var(--ink-muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.kpi .value {
+  font-size: 1.45rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  margin-top: 0.2rem;
+}
+
+.kpi .value.negative {
+  color: var(--bad);
+}
+
+.kpi .sub {
+  color: var(--ink-muted);
+  font-size: 0.8rem;
+}
+
+/* --------------------------------------------------------- charts */
+
+figure.card figcaption {
+  margin-bottom: 0.5rem;
+}
+
+.chart {
+  position: relative;
+}
+
+.svg-chart {
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.grid {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.axis-zero {
+  stroke: var(--ink-muted);
+  stroke-width: 1;
+}
+
+.tick {
+  fill: var(--ink-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.mark-label {
+  fill: var(--ink);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.bar {
+  transition: opacity 0.12s ease;
+}
+
+.bar:hover {
+  opacity: 0.82;
+}
+
+.bar-profit,
+.series-1 {
+  fill: var(--series-1);
+}
+
+.bar-loss {
+  fill: var(--bad);
+}
+
+.series-2 {
+  fill: var(--series-2);
+}
+
+.legend {
+  display: flex;
+  gap: 1rem;
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0 0;
+  font-size: 0.82rem;
+  color: var(--ink-muted);
+}
+
+.legend li {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.swatch {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+.swatch.series-1 {
+  background: var(--series-1);
+}
+
+.swatch.series-2 {
+  background: var(--series-2);
+}
+
+.tip {
+  position: absolute;
+  transform: translate(-50%, -130%);
+  background: var(--ink);
+  color: var(--surface);
+  padding: 0.4rem 0.55rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 3;
+}
+
+/* --------------------------------------------------------- tables */
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.88rem;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+th {
+  color: var(--ink-muted);
+  font-weight: 550;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+tr.clickable {
+  cursor: pointer;
+}
+
+tr.clickable:hover td {
+  background: color-mix(in oklab, var(--series-1) 8%, transparent);
+}
+
+.pill {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+
+.pill.bad {
+  background: color-mix(in oklab, var(--bad) 18%, transparent);
+  color: var(--bad);
+}
+
+.pill.warn {
+  background: color-mix(in oklab, var(--warn) 20%, transparent);
+  color: var(--warn);
+}
+
+.pill.good {
+  background: color-mix(in oklab, var(--good) 18%, transparent);
+  color: var(--good);
+}
+
+/* --------------------------------------------- purchase detail */
+
+.detail-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.8rem;
+}
+
+.scan-beside {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  align-items: start;
+}
+
+.scan-beside img {
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.banner {
+  position: fixed;
+  bottom: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--ink);
+  color: var(--surface);
+  padding: 0.55rem 0.9rem;
+  border-radius: 8px;
+  font-size: 0.86rem;
+  z-index: 20;
+}

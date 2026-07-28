@@ -475,7 +475,7 @@ are the most likely place for textile assumptions to have leaked in.
 
 ---
 
-## 8. What's left — the REST API and web dashboard
+## 8. ✅ Nothing left — REST API and web dashboard are built
 
 Everything in §2 and §3 is built. What remains is one piece of work in
 two layers, and it is **Opus-optional** — nothing here can produce a
@@ -511,10 +511,25 @@ Remember the ordering constraint from `CLAUDE.md` philosophy #5: the
 dashboard is read-heavy *by design* and must never become the only way
 to do something. Every mutating action stays available on WhatsApp.
 
-### 8.3 Also outstanding
+### 8.3 Also outstanding — ✅ all done
 
-- **The Docker images have never been built.** See §1.
-- **Redis caching for the dashboard** (docs/12_Dashboard.md §4) is still
-  not wired in — see the note in §2a. Do it as its own focused pass.
-- `docs/07_OCR.md` still describes only Paddle/Tesseract; the Claude
-  vision engine is documented in code but not in the spec.
+- Docker images build and the stack runs; see §1.
+- **Dashboard caching is wired** (`backend/services/dashboard_cache.py`).
+  Invalidation hangs off `AuditService.record` rather than a list of
+  mutating services, because every business write must write an audit
+  row (`CLAUDE.md` rule 3) and a per-service list is something you can
+  forget to extend. Keys carry a version counter so a slow read cannot
+  overwrite a fresher value.
+- `docs/07_OCR.md` §5b now documents the Claude vision engine and marks
+  the local pipeline as the fallback.
+- A second product type is proven to need only rows, not code:
+  `backend/tests/api/test_second_product_type.py` drives a
+  piece-counted hardware type through purchase, weighted-average
+  inventory and the Excel export.
+
+**Two bugs this pass shook out, both shipped-but-never-exercised:**
+`POST /api/v1/reports/export` 500'd on every call (it opened
+`session.begin()` after authentication had already autobegun a
+transaction), and the reports worker delivered nothing because the
+WhatsApp client was a loop-bound singleton nobody released. Both now
+have tests.

@@ -334,3 +334,249 @@ async def test_openapi_schema_is_generated(client: AsyncClient) -> None:
     paths = response.json()["paths"]
     for path in ("/api/v1/auth/login", "/api/v1/dashboard", "/api/v1/purchases"):
         assert path in paths
+
+
+# --------------------------------------------------------------------
+# reconciliation: acknowledging a mismatch
+# --------------------------------------------------------------------
+
+
+async def _mismatch_run(session_factory: async_sessionmaker[AsyncSession]) -> uuid.UUID:
+    from backend.models import ReconciliationRun
+
+    async with session_factory() as session:
+        run = ReconciliationRun(
+            org_id=ORG,
+            kind="inventory",
+            status="mismatch",
+            checked_count=3,
+            mismatch_count=1,
+            details=[{"subject": "TRP", "expected": "100", "actual": "90"}],
+        )
+        session.add(run)
+        await session.commit()
+        await session.refresh(run)
+        return run.id
+
+
+async def test_unacknowledged_mismatches_are_listed_for_the_dashboard(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    run_id = await _mismatch_run(session_factory)
+    token = await _token(client, owner)
+
+    response = await client.get(
+        "/api/v1/inventory/reconciliations?unacknowledged=true", headers=_auth(token)
+    )
+
+    assert response.status_code == 200, response.text
+    ids = [row["id"] for row in response.json()["data"]]
+    assert str(run_id) in ids
+
+
+async def test_acknowledging_records_who_looked_and_when(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Acknowledging is not fixing. The mismatch stays on the row; what
+    is recorded is that a person saw it (docs/03_Inventory.md §6)."""
+    run_id = await _mismatch_run(session_factory)
+    token = await _token(client, owner)
+
+    response = await client.post(
+        f"/api/v1/inventory/reconcile/{run_id}/acknowledge", headers=_auth(token)
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["acknowledged_at"] is not None
+    assert body["acknowledged_by"] == str(owner.id)
+    # the discrepancy itself is untouched -- a job that repaired the
+    # number would destroy the evidence something upstream is broken
+    assert body["mismatch_count"] == 1
+    assert body["status"] == "mismatch"
+
+    listed = await client.get(
+        "/api/v1/inventory/reconciliations?unacknowledged=true", headers=_auth(token)
+    )
+    assert str(run_id) not in [row["id"] for row in listed.json()["data"]]
+
+
+async def test_acknowledging_twice_keeps_the_first_timestamp(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """When it was *first* seen is the useful fact; moving it on every
+    click would erase how long it went unnoticed."""
+    run_id = await _mismatch_run(session_factory)
+    token = await _token(client, owner)
+
+    first = await client.post(
+        f"/api/v1/inventory/reconcile/{run_id}/acknowledge", headers=_auth(token)
+    )
+    second = await client.post(
+        f"/api/v1/inventory/reconcile/{run_id}/acknowledge", headers=_auth(token)
+    )
+
+    assert second.json()["already_acknowledged"] is True
+    assert second.json()["data"]["acknowledged_at"] == first.json()["data"]["acknowledged_at"]
+
+
+async def test_staff_cannot_acknowledge_a_mismatch(
+    client: AsyncClient, staff: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Someone is taking responsibility for having looked, so it has to
+    be attributable to an owner."""
+    run_id = await _mismatch_run(session_factory)
+    token = await _token(client, staff)
+
+    response = await client.post(
+        f"/api/v1/inventory/reconcile/{run_id}/acknowledge", headers=_auth(token)
+    )
+
+    assert response.status_code == 403, response.text
+
+
+async def test_acknowledging_another_orgs_run_is_a_404(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from backend.models import ReconciliationRun
+
+    async with session_factory() as session:
+        other_org = Organization(name=f"Other {uuid.uuid4().hex[:6]}")
+        session.add(other_org)
+        await session.flush()
+        run = ReconciliationRun(
+            org_id=other_org.id, kind="inventory", status="mismatch", mismatch_count=1
+        )
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+
+    token = await _token(client, owner)
+    response = await client.post(
+        f"/api/v1/inventory/reconcile/{run_id}/acknowledge", headers=_auth(token)
+    )
+
+    assert response.status_code == 404, response.text
+
+
+async def test_requesting_an_export_over_http_actually_enqueues_it(
+    client: AsyncClient, owner: User
+) -> None:
+    """Untested until now, and broken: the handler read the org's date
+    through the request session and then opened `session.begin()`, which
+    raises once anything has autobegun -- and authenticating the request
+    always has."""
+    token = await _token(client, owner)
+
+    response = await client.post(
+        "/api/v1/reports/export", json={"type": "purchases"}, headers=_auth(token)
+    )
+
+    assert response.status_code == 202, response.text
+    job_id = response.json()["job_id"]
+
+    polled = await client.get(f"/api/v1/reports/export/{job_id}", headers=_auth(token))
+    assert polled.status_code == 200, polled.text
+    assert polled.json()["status"] in {"queued", "generating", "ready"}
+    assert polled.json()["type"] == "purchases"
+
+
+async def test_an_unknown_report_type_is_rejected(client: AsyncClient, owner: User) -> None:
+    token = await _token(client, owner)
+    response = await client.post(
+        "/api/v1/reports/export", json={"type": "everything"}, headers=_auth(token)
+    )
+    assert response.status_code == 400, response.text
+
+
+# --------------------------------------------------------------------
+# what the web dashboard reads
+# --------------------------------------------------------------------
+
+
+async def test_monthly_metrics_never_plots_a_partial_month_as_a_full_one(
+    client: AsyncClient, owner: User
+) -> None:
+    """The current month is month-to-date. Plotting it beside complete
+    months as if it were complete is how a trend chart invents a
+    downturn every 1st of the month."""
+    import datetime
+
+    token = await _token(client, owner)
+    response = await client.get("/api/v1/metrics/monthly?months=3", headers=_auth(token))
+
+    assert response.status_code == 200, response.text
+    points = response.json()["data"]
+    assert len(points) == 3
+    # oldest first, so a chart can plot them left to right without sorting
+    assert points[0]["month"] < points[-1]["month"]
+    assert points[-1]["month"] == datetime.date.today().strftime("%Y-%m")
+    # money crosses the wire as strings; a float here would undo the
+    # NUMERIC discipline everywhere else (docs/21 §5)
+    assert isinstance(points[0]["net_profit"], str)
+
+
+async def test_monthly_metrics_are_owner_only(client: AsyncClient, staff: User) -> None:
+    token = await _token(client, staff)
+    response = await client.get("/api/v1/metrics/monthly", headers=_auth(token))
+    assert response.status_code == 403, response.text
+
+
+async def test_the_audit_log_is_owner_only(client: AsyncClient, staff: User) -> None:
+    token = await _token(client, staff)
+    assert (await client.get("/api/v1/audit", headers=_auth(token))).status_code == 403
+
+
+async def test_receivables_and_payables_list_who_owes_what(
+    client: AsyncClient, owner: User
+) -> None:
+    token = await _token(client, owner)
+
+    for path in ("/api/v1/receivables", "/api/v1/payables"):
+        response = await client.get(path, headers=_auth(token))
+        assert response.status_code == 200, response.text
+        assert isinstance(response.json()["data"], list)
+
+
+async def test_a_purchase_without_a_scan_says_so_rather_than_404ing_the_page(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The detail page asks for a scan url before deciding what to draw;
+    a purchase typed in by hand simply has none."""
+    import datetime
+    import decimal
+    import uuid as uuid_module
+
+    from backend.models import PurchaseHeader, Supplier
+    from backend.tests.conftest import SEEDED_MAIN_WAREHOUSE_ID
+
+    async with session_factory() as session:
+        supplier = Supplier(
+            org_id=ORG, name=f"Typed {uuid_module.uuid4().hex[:6]}", created_by=owner.id
+        )
+        session.add(supplier)
+        await session.flush()
+        header = PurchaseHeader(
+            org_id=ORG,
+            supplier_id=supplier.id,
+            warehouse_id=uuid_module.UUID(SEEDED_MAIN_WAREHOUSE_ID),
+            invoice_no=f"TYPED-{uuid_module.uuid4().hex[:5]}",
+            invoice_date=datetime.date.today(),
+            grand_total=decimal.Decimal("100"),
+            status="confirmed",
+            created_by=owner.id,
+        )
+        session.add(header)
+        await session.commit()
+        purchase_id = header.id
+
+    token = await _token(client, owner)
+    detail = await client.get(f"/api/v1/purchases/{purchase_id}", headers=_auth(token))
+
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["has_scan"] is False
+    assert detail.json()["scan_url"] is None
+    assert detail.json()["supplier"].startswith("Typed")
+
+    scan = await client.get(f"/api/v1/purchases/{purchase_id}/scan", headers=_auth(token))
+    assert scan.status_code == 404

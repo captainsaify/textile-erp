@@ -149,20 +149,76 @@ async def request_export(
 
     if body.type not in REPORT_TYPES:
         raise HTTPException(status_code=400, detail=f"type must be one of {sorted(REPORT_TYPES)}")
+    # Not `async with session.begin()`: authenticating the request read
+    # the user through this same session, so it has already autobegun and
+    # begin() raises (HANDOFF.md §5). This endpoint 500'd on every call
+    # until a test finally exercised it.
     today = await business_today(session, user.org_id)
-    async with session.begin():
-        job = await ReportService(session).enqueue(
-            user,
-            report_type=body.type,
-            start=body.date_from or today.replace(day=1),
-            end=body.date_to or today,
-        )
-        job_id = job.id
+    job = await ReportService(session).enqueue(
+        user,
+        report_type=body.type,
+        start=body.date_from or today.replace(day=1),
+        end=body.date_to or today,
+    )
+    job_id = job.id
+    await session.commit()
 
     from backend.api.commands.ops_commands import _dispatch_report
 
     _dispatch_report(str(job_id))
     return {"job_id": str(job_id), "status": "queued"}
+
+
+@router.get("/metrics/monthly")
+async def monthly_metrics(
+    user: OwnerUser,
+    session: Session,
+    months: Annotated[int, Query(ge=1, le=24)] = 6,
+) -> dict[str, Any]:
+    """Revenue, purchases and net profit per calendar month, for the
+    dashboard's trend charts.
+
+    Computed by calling ProfitService once per month rather than from a
+    rollup table. docs/21 §9 warns that replaying the journal per request
+    won't scale, and it won't -- but at this business's volume a handful
+    of months is milliseconds, and the alternative (a `daily_org_metrics`
+    table) is a second place for "what was our profit" to live. When the
+    query gets slow, add the rollup and keep these figures as its
+    source of truth rather than recomputing them differently.
+
+    Owner-only: profit is partner-level information (docs/14 #rbac).
+    """
+    today = await business_today(session, user.org_id)
+    profit_service = ProfitService(session)
+
+    points: list[dict[str, Any]] = []
+    cursor = today.replace(day=1)
+    for _ in range(months):
+        end = _month_end(cursor, today)
+        report = await profit_service.calculate(user.org_id, cursor, end)
+        points.append(
+            {
+                "month": cursor.strftime("%Y-%m"),
+                "label": cursor.strftime("%b %Y"),
+                "revenue": money_str(report.revenue),
+                "cogs": money_str(report.cogs),
+                "expenses": money_str(report.operating_expenses),
+                "net_profit": money_str(report.net_profit),
+            }
+        )
+        cursor = (cursor - datetime.timedelta(days=1)).replace(day=1)
+
+    return {"data": list(reversed(points))}
+
+
+def _month_end(month_start: datetime.date, today: datetime.date) -> datetime.date:
+    """The current month stops at today; earlier months run to their
+    last day. A month-to-date figure plotted as if it were a full month
+    is how a trend chart invents a downturn."""
+    if (month_start.year, month_start.month) == (today.year, today.month):
+        return today
+    next_month = (month_start + datetime.timedelta(days=32)).replace(day=1)
+    return next_month - datetime.timedelta(days=1)
 
 
 @router.get("/reports/export/{job_id}")

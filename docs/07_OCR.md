@@ -135,7 +135,56 @@ purchase from that supplier, so a wrong auto-learned mapping would
 have lasting consequences, unlike the OCR learning dictionary in §8
 which corrects individual cell values, not the structural template).
 
+## 5b. Claude vision as the primary reader {#vision}
+
+> **This section supersedes §6 in production.** §6 describes the local
+> pipeline, which is now the *fallback*. The vision engine landed after
+> this document was first written; what follows reconciles them.
+
+`backend/ocr/vision_engine.py` reads the sheet with `claude-opus-5`
+instead of detecting a grid and OCR-ing cells. It is tried first when
+`OCR_USE_VISION=true` and an `ANTHROPIC_API_KEY` is present; any failure
+— no key, a refusal, a transport error, zero rows — falls through to
+§1–§6 unchanged.
+
+**Why it is primary.** The local pipeline's accuracy is bounded by grid
+detection on a photographed sheet, and that failure mode is the
+dangerous kind: a merged column boundary shifts every field silently,
+producing a plausible table with the wrong numbers in it. A vision model
+reads the table *as a table*, so unnamed columns, uneven lighting and a
+slight angle stop being failure modes. On the partners' real 26-row
+sheet: vision 26/26, local 20/26.
+
+**What it does not change.** It emits the same `ExtractedRow` shape the
+local pipeline produces, so everything downstream — noise-row rejection,
+the qty × kg cross-check (§5), product matching (§9), the learning
+dictionary (§8) — runs identically. The two engines are
+interchangeable, which is what keeps this a swap rather than a second
+pipeline.
+
+**Numbers come back as strings** and are parsed with `Decimal`. A float
+anywhere here would violate the money/quantity rule before the value
+ever reached the draft.
+
+**Cost and latency.** Roughly $0.05 and ~18s per sheet. That cost is why
+[20_ConversationalIntake.md §2](20_ConversationalIntake.md#flow) asks
+what a photo *is* before reading it: a mis-sent picture must not spend a
+vision call. Setting `ANTHROPIC_API_KEY` empty cleanly reverts to local
+OCR with no other change.
+
+**Confidence.** Vision does not return per-cell confidence the way
+PaddleOCR does, so §7's composite score is not computed for it. The
+cross-checks that catch real errors — qty × kg disagreeing with the
+stated total, a code that matches no product — are arithmetic and
+catalogue lookups, and they run either way. Handwriting confirmation
+(20_ConversationalIntake.md §6) is the planned counterpart for the
+low-confidence numeric case.
+
 ## 6. OCR engine: dual-engine strategy {#dual-engine-strategy}
+
+> The local pipeline. Primary only when vision is disabled or
+> unavailable — see [§5b](#vision).
+
 
 - **Primary: PaddleOCR** (`PP-OCRv4` recognition model, angle
   classifier enabled) run per cell (not per whole image — running per

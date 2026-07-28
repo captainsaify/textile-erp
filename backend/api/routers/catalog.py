@@ -12,7 +12,7 @@ import datetime
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from sqlalchemy import select
 
 from backend.api.amounts import money_str, qty_str
@@ -197,6 +197,9 @@ async def get_purchase(purchase_id: str, user: CurrentUser, session: Session) ->
     header = await session.get(PurchaseHeader, pid)
     if header is None or header.org_id != user.org_id or header.deleted_at is not None:
         raise HTTPException(status_code=404, detail="no such purchase")
+    supplier_name = (
+        await session.execute(select(Supplier.name).where(Supplier.id == header.supplier_id))
+    ).scalar_one_or_none() or ""
     lines = (
         await session.execute(
             select(PurchaseLine, Product.code)
@@ -212,7 +215,10 @@ async def get_purchase(purchase_id: str, user: CurrentUser, session: Session) ->
         "grand_total": money_str(header.grand_total),
         "amount_paid": money_str(header.amount_paid),
         "status": header.status.value if hasattr(header.status, "value") else str(header.status),
+        "supplier": supplier_name,
+        "invoice_date": header.invoice_date.isoformat(),
         "has_scan": header.ocr_source_attachment_id is not None,
+        "scan_url": (f"/purchases/{header.id}/scan" if header.ocr_source_attachment_id else None),
         "lines": [
             {
                 "line_no": line.line_no,
@@ -225,6 +231,120 @@ async def get_purchase(purchase_id: str, user: CurrentUser, session: Session) ->
             }
             for line, code in lines
         ],
+    }
+
+
+@router.get("/purchases/{purchase_id}/scan")
+async def purchase_scan(purchase_id: str, user: CurrentUser, session: Session) -> Response:
+    """The original photographed sheet.
+
+    This is the dashboard's one genuinely new capability over WhatsApp
+    (docs/21 §3): the scan rendered beside the lines that were read out
+    of it. That comparison is what builds trust in the OCR, and it is
+    impossible in a chat window.
+
+    Served through the API rather than as a static path because
+    attachments are business data -- an unauthenticated URL would make
+    every scanned invoice public to anyone who guessed a filename.
+    """
+    from pathlib import Path
+
+    from backend.models import Attachment
+
+    try:
+        header = await session.get(PurchaseHeader, uuid.UUID(purchase_id))
+    except ValueError:
+        raise HTTPException(status_code=404, detail="no such purchase") from None
+    if header is None or header.org_id != user.org_id:
+        raise HTTPException(status_code=404, detail="no such purchase")
+    if header.ocr_source_attachment_id is None:
+        raise HTTPException(status_code=404, detail="this purchase has no scan")
+
+    attachment = await session.get(Attachment, header.ocr_source_attachment_id)
+    if attachment is None or attachment.org_id != user.org_id:
+        raise HTTPException(status_code=404, detail="this purchase has no scan")
+    try:
+        data = Path(attachment.file_path).read_bytes()
+    except OSError:
+        raise HTTPException(status_code=404, detail="the scan file is missing") from None
+
+    return Response(
+        content=data,
+        media_type=attachment.mime_type or "application/octet-stream",
+        headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
+@router.get("/receivables")
+async def receivables(user: CurrentUser, session: Session) -> dict[str, Any]:
+    """Who owes us, oldest first -- the aging question from docs/21 §2."""
+    from backend.repositories.party_repository import CustomerRepository
+
+    rows = await CustomerRepository(session).outstanding_parties(user.org_id)
+    return {
+        "data": [
+            {
+                "id": str(row.party_id),
+                "name": row.name,
+                "outstanding": money_str(row.outstanding),
+                "oldest_date": row.oldest_date.isoformat() if row.oldest_date else None,
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.get("/payables")
+async def payables(user: CurrentUser, session: Session) -> dict[str, Any]:
+    from backend.repositories.party_repository import SupplierRepository
+
+    rows = await SupplierRepository(session).outstanding_parties(user.org_id)
+    return {
+        "data": [
+            {
+                "id": str(row.party_id),
+                "name": row.name,
+                "outstanding": money_str(row.outstanding),
+                "oldest_date": row.oldest_date.isoformat() if row.oldest_date else None,
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.get("/audit")
+async def audit_log(user: OwnerUser, session: Session, paging: Paging) -> dict[str, Any]:
+    """What changed and who changed it (docs/21 §3, Admin).
+
+    Owner-only: the audit trail names people and amounts, which is
+    partner-level information (docs/14 #rbac).
+    """
+    from backend.models import AuditLog
+    from backend.models import User as UserModel
+
+    stmt = (
+        select(AuditLog, UserModel.full_name)
+        .join(UserModel, UserModel.id == AuditLog.actor_user_id, isouter=True)
+        .where(AuditLog.org_id == user.org_id)
+        .order_by(AuditLog.created_at.desc())
+        .limit(paging.limit)
+    )
+    after = paging.decode_after()
+    if after is not None:
+        stmt = stmt.where(AuditLog.created_at < after)
+    rows = (await session.execute(stmt)).all()
+    return {
+        "data": [
+            {
+                "id": str(entry.id),
+                "created_at": entry.created_at.isoformat(),
+                "action": entry.action,
+                "entity_type": entry.entity_type,
+                "actor": actor,
+                "channel": entry.channel,
+            }
+            for entry, actor in rows
+        ]
     }
 
 

@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Textile ERP</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>"
+    />
+  </head>
+  <body>
+    <!-- Login. Kept in the same document so there is no navigation
+         flash between signing in and seeing data. -->
+    <main id="login" class="login">
+      <form id="login-form" class="card login-card">
+        <h1>Textile ERP</h1>
+        <p class="muted">Read-only dashboard. Everything that changes data stays on WhatsApp.</p>
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" autocomplete="username" required />
+        <label for="password">Password</label>
+        <input
+          id="password"
+          name="password"
+          type="password"
+          autocomplete="current-password"
+          required
+        />
+        <button type="submit">Sign in</button>
+        <p id="login-error" class="error" role="alert" hidden></p>
+      </form>
+    </main>
+
+    <div id="app" hidden>
+      <header class="topbar">
+        <div class="brand">Textile&nbsp;ERP</div>
+        <nav id="nav">
+          <button data-page="overview" class="active">Overview</button>
+          <button data-page="stock">Stock</button>
+          <button data-page="purchases">Purchases</button>
+          <button data-page="money">Money</button>
+          <button data-page="admin">Admin</button>
+        </nav>
+        <div class="topbar-end">
+          <span id="whoami" class="muted"></span>
+          <button id="signout" class="link">Sign out</button>
+        </div>
+      </header>
+
+      <main id="pages">
+        <section id="page-overview" class="page">
+          <div id="kpis" class="kpi-row"></div>
+          <div class="grid-2">
+            <figure class="card">
+              <figcaption>
+                <h2>Net profit</h2>
+                <p class="muted">Per month, latest 6</p>
+              </figcaption>
+              <div id="chart-profit" class="chart"></div>
+            </figure>
+            <figure class="card">
+              <figcaption>
+                <h2>Revenue and cost</h2>
+                <p class="muted">Per month, latest 6</p>
+              </figcaption>
+              <div id="chart-revenue" class="chart"></div>
+            </figure>
+          </div>
+          <section class="card">
+            <h2>Needs attention</h2>
+            <div id="alerts"></div>
+          </section>
+        </section>
+
+        <section id="page-stock" class="page" hidden>
+          <div class="card">
+            <div class="card-head">
+              <h2>Stock on hand</h2>
+              <input id="stock-search" type="search" placeholder="Search code or description" />
+            </div>
+            <div id="stock-table" class="table-scroll"></div>
+          </div>
+        </section>
+
+        <section id="page-purchases" class="page" hidden>
+          <div class="card">
+            <h2>Purchases</h2>
+            <div id="purchases-table" class="table-scroll"></div>
+          </div>
+          <div id="purchase-detail" class="card" hidden></div>
+        </section>
+
+        <section id="page-money" class="page" hidden>
+          <div class="grid-2">
+            <div class="card">
+              <h2>Receivables</h2>
+              <div id="receivables" class="table-scroll"></div>
+            </div>
+            <div class="card">
+              <h2>Payables</h2>
+              <div id="payables" class="table-scroll"></div>
+            </div>
+          </div>
+          <div class="card">
+            <h2>Cash &amp; bank</h2>
+            <div id="ledgers" class="table-scroll"></div>
+          </div>
+        </section>
+
+        <section id="page-admin" class="page" hidden>
+          <div class="card">
+            <h2>Nightly reconciliation</h2>
+            <p class="muted">
+              A mismatch is reported, never repaired — repairing it would destroy the evidence that
+              something upstream is wrong.
+            </p>
+            <div id="reconciliations"></div>
+          </div>
+          <div class="card">
+            <h2>Recent activity</h2>
+            <div id="audit" class="table-scroll"></div>
+          </div>
+        </section>
+      </main>
+
+      <p id="banner" class="banner" role="status" hidden></p>
+    </div>
+
+    <script src="/assets/money.js"></script>
+    <script src="/assets/charts.js"></script>
+    <script src="/assets/app.js"></script>
+  </body>
+</html>

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import AuditLog
 from backend.repositories.audit_repository import AuditRepository
+from backend.services import dashboard_cache
 
 
 class AuditService:
@@ -29,7 +30,7 @@ class AuditService:
         channel: str = "whatsapp",
         whatsapp_message_id: str | None = None,
     ) -> AuditLog:
-        return await self._repo.insert(
+        entry = await self._repo.insert(
             AuditLog(
                 org_id=org_id,
                 actor_user_id=actor_user_id,
@@ -42,3 +43,10 @@ class AuditService:
                 whatsapp_message_id=whatsapp_message_id,
             )
         )
+        # Every business mutation writes an audit row (CLAUDE.md rule 3),
+        # which makes this the one place that can invalidate the
+        # dashboard cache without a per-service list to keep in sync --
+        # including for services not written yet. Never raises: a cache
+        # that can't be invalidated must not fail the write.
+        await dashboard_cache.invalidate(org_id)
+        return entry

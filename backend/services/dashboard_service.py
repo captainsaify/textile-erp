@@ -2,16 +2,13 @@
 backs both WhatsApp surfaces (`dashboard`, `summary`), never two
 separate implementations of "what is today's profit" (§1).
 
-Redis caching (§4) is not wired in here: every read goes straight to
-Postgres. That is the documented graceful-degradation path ("cache
-unavailable -> falls back to computing directly, never fails
-outright"), just taken unconditionally rather than only on a cache
-miss. See HANDOFF.md -- wiring invalidation into every mutating service
-correctly (purchase/sale confirm, payment, expense/income, capital,
-inventory adjustment) is real, separate, cross-cutting work, and a
-missed invalidation call is exactly the kind of silent staleness this
-project tries hard to avoid elsewhere; better to ship correct-but-
-uncached than fast-but-sometimes-wrong.
+Cached per §4 through backend/services/dashboard_cache.py: a 60s TTL
+behind a version counter that every audited write bumps. Invalidation
+hangs off `audit_logs` rather than off each mutating service, because
+that is an invariant (CLAUDE.md rule 3) and a per-service call list is
+something you can forget to add to. A cache failure of any kind
+degrades to computing directly -- the documented path -- and never
+fails the read.
 """
 
 from __future__ import annotations
@@ -32,6 +29,7 @@ from backend.repositories.inventory_repository import InventoryRepository, Stock
 from backend.repositories.party_repository import PartnerRepository
 from backend.repositories.product_repository import ProductRepository
 from backend.repositories.report_repository import ReportRepository, SlowMover, TopSeller
+from backend.services import dashboard_cache
 from backend.services.profit_service import ProfitReport, ProfitService
 
 ZERO = decimal.Decimal("0")
@@ -76,6 +74,19 @@ class DashboardService:
         self._partners = PartnerRepository(session)
 
     async def summary(self, org_id: uuid.UUID, *, include_partner_capital: bool) -> DashboardData:
+        # Partner capital is role-gated, so the two shapes are cached
+        # separately rather than one being filtered down from the other
+        # -- filtering at read time is how a staff response ends up
+        # carrying figures it should never have loaded (§6).
+        variant = "partners" if include_partner_capital else "plain"
+        cached, version = await dashboard_cache.load(org_id, DashboardData, variant=variant)
+        if cached is not None:
+            return cached
+        data = await self._compute(org_id, include_partner_capital=include_partner_capital)
+        await dashboard_cache.store(org_id, data, variant=variant, version=version)
+        return data
+
+    async def _compute(self, org_id: uuid.UUID, *, include_partner_capital: bool) -> DashboardData:
         today = await business_today(self._session, org_id)
         month_start = today.replace(day=1)
 
