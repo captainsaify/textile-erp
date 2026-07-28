@@ -27,6 +27,7 @@ from backend.api.interactive import as_text
 from backend.api.whatsapp_commands import (
     COMMAND_REGISTRY,
     CommandResult,
+    CommandSpec,
     RequestContext,
     closest_command,
 )
@@ -247,8 +248,10 @@ class WhatsAppDispatcher:
             ack=lambda body: self._client.send_text(message.reply_to, body),
         )
 
+        from backend.api.commands import wizards
         from backend.api.commands.intake_commands import handle_intent_reply, handle_slot_reply
         from backend.services.session_service import (
+            AWAITING_COMMAND_SLOT,
             AWAITING_INTENT,
             AWAITING_PURCHASE_CONFIRMATION,
             AWAITING_RETURN_REFUND_CHOICE,
@@ -271,6 +274,8 @@ class WhatsAppDispatcher:
             spec is None or keyword in _WIZARD_CONTINUATIONS
         ):
             return await handle_slot_reply(text, context, session_state)
+        if session_state.state == AWAITING_COMMAND_SLOT and spec is None:
+            return await wizards.handle_reply(text, context, session_state)
 
         if spec is None:
             # not a command: an active session interprets it as a reply in
@@ -297,9 +302,14 @@ class WhatsAppDispatcher:
         if not role_at_least(user.role, spec.min_role):
             return CommandResult(reply=f"You don't have permission to use '{spec.name}'.")
 
-        if session_state.state in {AWAITING_INTENT, AWAITING_SLOT}:
+        if session_state.state in {AWAITING_INTENT, AWAITING_SLOT, AWAITING_COMMAND_SLOT}:
             # abandon, and say so -- silently dropping a half-answered
-            # purchase would look like the answers were saved
+            # entry would look like the answers were saved
+            abandoning = (
+                "purchase"
+                if session_state.state != AWAITING_COMMAND_SLOT
+                else str(session_state.context.get("command", "entry"))
+            )
             await sessions.set(user.org_id, user.id, IDLE, {})
             logger.info(
                 "whatsapp_command",
@@ -308,11 +318,11 @@ class WhatsAppDispatcher:
                 org_id=str(user.org_id),
                 message_id=message.message_id,
             )
-            abandoned = await spec.handler(args.strip(), context)
+            abandoned = await self._run(spec, args, context)
             return dataclasses.replace(
                 abandoned,
-                reply=f"{abandoned.reply}\n\n_(I've dropped the half-finished purchase — "
-                "send the photo again to restart it.)_",
+                reply=f"{abandoned.reply}\n\n_(I've dropped the half-finished "
+                f"{abandoning} — start it again when you're ready.)_",
             )
 
         logger.info(
@@ -322,6 +332,21 @@ class WhatsAppDispatcher:
             org_id=str(user.org_id),
             message_id=message.message_id,
         )
+        return await self._run(spec, args, context)
+
+    @staticmethod
+    async def _run(spec: CommandSpec, args: str, context: RequestContext) -> CommandResult:
+        """A partial command is a question, not an error
+        (docs/20_ConversationalIntake.md §7). A *complete* one still runs
+        in one shot, untouched -- for someone fluent that is one round
+        trip instead of four."""
+        from backend.api.commands import wizards
+
+        wizard = wizards.WIZARDS.get(spec.name)
+        if wizard is not None:
+            started = await wizards.start(wizard, args.strip(), context)
+            if started is not None:
+                return started
         return await spec.handler(args.strip(), context)
 
     async def _first_delivery(self, message_id: str) -> bool:

@@ -33,6 +33,9 @@ AWAITING_RETURN_REFUND_CHOICE = "awaiting_return_refund_choice"
 #: question per field the sheet didn't carry
 AWAITING_INTENT = "awaiting_intent"
 AWAITING_SLOT = "awaiting_slot"
+#: docs/20 §7 -- a command invoked with missing arguments asks for them
+#: instead of printing usage
+AWAITING_COMMAND_SLOT = "awaiting_command_slot"
 
 
 @dataclasses.dataclass(frozen=True)

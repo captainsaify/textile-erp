@@ -230,8 +230,18 @@ photo never spends a vision call), and the `AWAITING_INTENT` /
 survives as a one-shot that fills every remaining slot in one message,
 and is tested for equivalence with answering them one at a time.
 
-**Phase 2 — command wizards.** `paid`, `received`, `sale`, `expense`,
-`export` ask for missing arguments instead of printing usage.
+**Phase 2 — command wizards. ✅ Built.** `paid`, `received`, `sale`,
+`expense`, `income` and `export` ask for missing arguments instead of
+printing usage, and parties are offered as a list of who you actually
+trade with.
+
+Where it lives: `backend/api/commands/wizards.py`, dispatched from
+`WhatsAppDispatcher._run`. The design point worth keeping: a finished
+wizard **assembles the canonical one-shot argument string and calls the
+command's own handler**, so the two forms cannot drift — the wizard
+*becomes* the typed command. `prefill` is deliberately conservative;
+anything it cannot place with certainty is asked for, because a wrong
+guess here is a wrong payment.
 
 **Phase 3 — main menu + handwriting confirmation pass.**
 
