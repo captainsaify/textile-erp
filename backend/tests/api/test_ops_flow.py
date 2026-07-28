@@ -926,3 +926,112 @@ def test_a_party_never_traded_with_reads_never_rather_than_blank() -> None:
     assert sheet is not None
     assert sheet.cell(row=3, column=5).value == "never"
     assert sheet.cell(row=3, column=6).value == ""
+
+
+def test_the_ledger_gives_each_party_its_own_worksheet() -> None:
+    """The summary says who to chase; a tab per party says what that
+    number is made of. Running a separate export per party to find out
+    was the thing this replaces."""
+    from backend.reports.excel.ledger_template import LedgerRow, build_ledger
+    from backend.reports.excel.statement_template import StatementEntry
+
+    def at(day: int) -> datetime.datetime:
+        return datetime.datetime(2026, 7, day, 10, 0, tzinfo=datetime.UTC)
+
+    rows = [
+        LedgerRow(
+            name="Wagdia Textiles",
+            outstanding=D("91999"),
+            oldest_date=datetime.date(2026, 7, 28),
+            days_outstanding=1,
+            last_activity=datetime.date(2026, 7, 28),
+        ),
+        LedgerRow(
+            name="Shree Fabrics",
+            outstanding=D("5000"),
+            oldest_date=datetime.date(2026, 7, 20),
+            days_outstanding=9,
+            last_activity=datetime.date(2026, 7, 20),
+        ),
+    ]
+    histories = {
+        "Wagdia Textiles": [
+            StatementEntry(at=at(28), kind="Purchase", reference="001", debit=D("4092000")),
+            StatementEntry(at=at(28), kind="Payment (cash)", reference="", credit=D("4000001")),
+        ],
+        "Shree Fabrics": [
+            StatementEntry(at=at(20), kind="Purchase", reference="INV-9", debit=D("5000"))
+        ],
+    }
+
+    workbook = build_ledger(
+        rows,
+        heading="Suppliers",
+        as_of=datetime.date(2026, 7, 29),
+        histories=histories,
+        role="supplier",
+    )
+
+    assert workbook.sheetnames == ["Summary", "Wagdia Textiles", "Shree Fabrics"]
+
+    detail = workbook["Wagdia Textiles"]
+    assert [cell.value for cell in detail[3]] == [
+        "DATE",
+        "TIME",
+        "TYPE",
+        "REFERENCE",
+        "PURCHASED",
+        "PAID",
+        "BALANCE",
+    ]
+    assert detail.cell(row=4, column=5).value == 4092000
+    assert detail.cell(row=5, column=6).value == 4000001
+    # the running balance closes on what the summary says is outstanding
+    assert detail.cell(row=5, column=7).value == 91999
+
+
+def test_two_parties_with_near_identical_names_keep_separate_tabs() -> None:
+    """Excel truncates at 31 characters and silently overwrites a
+    duplicate tab -- which would lose a party's whole history."""
+    from backend.reports.excel.ledger_template import LedgerRow, build_ledger
+    from backend.reports.excel.statement_template import StatementEntry
+
+    long_a = "Wagdia Textile Company Private A"
+    long_b = "Wagdia Textile Company Private B"
+    entry = [
+        StatementEntry(
+            at=datetime.datetime(2026, 7, 28, tzinfo=datetime.UTC),
+            kind="Purchase",
+            reference="X",
+            debit=D("1"),
+        )
+    ]
+    workbook = build_ledger(
+        [
+            LedgerRow(long_a, D("2"), None, None, None),
+            LedgerRow(long_b, D("1"), None, None, None),
+        ],
+        heading="Suppliers",
+        as_of=datetime.date(2026, 7, 29),
+        histories={long_a: entry, long_b: entry},
+        role="supplier",
+    )
+
+    assert len(workbook.sheetnames) == 3
+    assert len(set(workbook.sheetnames)) == 3
+
+
+def test_a_party_with_no_transactions_gets_no_empty_tab() -> None:
+    """An opening balance with no activity is a real row on the summary
+    and an empty sheet nobody wants to click."""
+    from backend.reports.excel.ledger_template import LedgerRow, build_ledger
+
+    workbook = build_ledger(
+        [LedgerRow("Opening only", D("1000"), None, None, None)],
+        heading="Suppliers",
+        as_of=datetime.date(2026, 7, 29),
+        histories={"Opening only": []},
+        role="supplier",
+    )
+
+    assert workbook.sheetnames == ["Summary"]

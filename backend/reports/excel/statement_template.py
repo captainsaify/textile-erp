@@ -19,6 +19,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import decimal
+from typing import Any
 
 from openpyxl import Workbook
 
@@ -53,7 +54,25 @@ def build_statement(
     sheet = workbook.active
     assert sheet is not None
     sheet.title = "Statement"
+    write_statement_sheet(sheet, entries, party=party, role=role, period=period)
+    return workbook
 
+
+def write_statement_sheet(
+    sheet: Any,
+    entries: list[StatementEntry],
+    *,
+    party: str,
+    role: str,
+    period: str,
+) -> decimal.Decimal:
+    """Write one party's history onto an existing worksheet and return
+    the closing balance.
+
+    Split out from `build_statement` so the ledger can repeat it once per
+    party in a single workbook -- one party per tab -- without a second
+    implementation of what a statement looks like.
+    """
     owed_label = "Owed to them" if role == "supplier" else "Owed by them"
     write_row(sheet, 1, [f"{role.capitalize()}: {party}", "", "", "", "", "", ""], bold=True)
     write_row(sheet, 2, [f"Period: {period}", "", "", "", "", "", ""], bold=True)
@@ -101,7 +120,7 @@ def build_statement(
 
     autosize(sheet, HEADERS)
     sheet.freeze_panes = "A4"
-    return workbook
+    return balance
 
 
 def closing_balance(entries: list[StatementEntry]) -> decimal.Decimal:

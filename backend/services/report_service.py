@@ -289,7 +289,13 @@ class ReportService:
             )
             for party in parties
         ]
-        workbook = build_ledger(rows, heading=heading, as_of=today)
+        # Each party's own transactions on their own tab. The summary
+        # says who to chase; this says what the number is made of.
+        histories = {
+            party.name: await self._party_entries(job.org_id, role=role, party_id=party.party_id)
+            for party in parties
+        }
+        workbook = build_ledger(rows, heading=heading, as_of=today, histories=histories, role=role)
         path = self._output_path(job)
         workbook.save(path)
         return path, len(rows)
@@ -315,6 +321,91 @@ class ReportService:
             .group_by(SalesHeader.customer_id)
         )
         return {row[0]: row[1] for row in (await self._session.execute(stmt)).all()}
+
+    async def _party_entries(
+        self,
+        org_id: uuid.UUID,
+        *,
+        role: str,
+        party_id: uuid.UUID,
+        start: datetime.date | None = None,
+        end: datetime.date | None = None,
+    ) -> list[StatementEntry]:
+        """One party's bills/sales and their settlements, merged by time.
+
+        `start`/`end` are optional because a statement is for a period
+        while a ledger tab is the whole relationship -- the queries are
+        otherwise identical, and two copies of them would be two places
+        for the balance to go wrong.
+        """
+        from backend.models import BankLedger, CashLedger, SalesHeader
+
+        entries: list[StatementEntry] = []
+        if role == "supplier":
+            stmt = select(PurchaseHeader).where(
+                PurchaseHeader.org_id == org_id,
+                PurchaseHeader.supplier_id == party_id,
+                PurchaseHeader.deleted_at.is_(None),
+                PurchaseHeader.status == "confirmed",
+            )
+            if start is not None:
+                stmt = stmt.where(PurchaseHeader.invoice_date >= start)
+            if end is not None:
+                stmt = stmt.where(PurchaseHeader.invoice_date <= end)
+            entries += [
+                StatementEntry(
+                    at=self._moment(bill.invoice_date, bill.created_at),
+                    kind="Purchase",
+                    reference=bill.invoice_no,
+                    debit=bill.grand_total,
+                )
+                for bill in (await self._session.execute(stmt)).scalars()
+            ]
+            source_type, payment_label = "supplier_payment", "Payment"
+        else:
+            sale_stmt = select(SalesHeader).where(
+                SalesHeader.org_id == org_id,
+                SalesHeader.customer_id == party_id,
+                SalesHeader.deleted_at.is_(None),
+            )
+            if start is not None:
+                sale_stmt = sale_stmt.where(SalesHeader.sale_date >= start)
+            if end is not None:
+                sale_stmt = sale_stmt.where(SalesHeader.sale_date <= end)
+            entries += [
+                StatementEntry(
+                    at=self._moment(sale.sale_date, sale.created_at),
+                    kind="Sale",
+                    reference=str(sale.id)[:8],
+                    debit=sale.grand_total,
+                )
+                for sale in (await self._session.execute(sale_stmt)).scalars()
+            ]
+            source_type, payment_label = "customer_payment", "Receipt"
+
+        for ledger in (CashLedger, BankLedger):
+            ledger_stmt = select(ledger).where(
+                ledger.org_id == org_id,
+                ledger.source_type == source_type,
+                ledger.source_id == party_id,
+            )
+            if start is not None:
+                ledger_stmt = ledger_stmt.where(ledger.entry_date >= start)
+            if end is not None:
+                ledger_stmt = ledger_stmt.where(ledger.entry_date <= end)
+            via = "cash" if ledger is CashLedger else "bank"
+            entries += [
+                StatementEntry(
+                    at=self._moment(row.entry_date, row.created_at),
+                    kind=f"{payment_label} ({via})",
+                    reference=row.notes or "",
+                    # ledger rows store money leaving as negative; a
+                    # statement reads better with the sign in the column
+                    credit=abs(row.amount),
+                )
+                for row in (await self._session.execute(ledger_stmt)).scalars()
+            ]
+        return entries
 
     async def _build_statement(self, job: ReportJob) -> tuple[Path, int]:
         """Everything that happened with one party, in order, with a

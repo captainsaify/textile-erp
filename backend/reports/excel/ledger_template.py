@@ -16,6 +16,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import decimal
+import re
 from typing import Any
 
 from openpyxl import Workbook
@@ -50,11 +51,44 @@ class LedgerRow:
         return "current"
 
 
-def build_ledger(rows: list[LedgerRow], *, heading: str, as_of: datetime.date) -> Workbook:
+#: Excel forbids these in a sheet name and truncates at 31 characters.
+_SHEET_NAME_BANNED = re.compile(r"[\[\]:*?/\\]")
+_SHEET_NAME_LIMIT = 31
+
+
+def sheet_name(party: str, taken: set[str]) -> str:
+    """Two parties can easily share the first 31 characters of a name,
+    and Excel silently overwrites a duplicate tab -- so a collision gets
+    a suffix rather than one party's history disappearing."""
+    base = (_SHEET_NAME_BANNED.sub("-", party).strip() or "Party")[:_SHEET_NAME_LIMIT]
+    candidate, suffix = base, 2
+    while candidate.lower() in taken:
+        tail = f" ({suffix})"
+        candidate = base[: _SHEET_NAME_LIMIT - len(tail)] + tail
+        suffix += 1
+    taken.add(candidate.lower())
+    return candidate
+
+
+def build_ledger(
+    rows: list[LedgerRow],
+    *,
+    heading: str,
+    as_of: datetime.date,
+    histories: dict[str, list[Any]] | None = None,
+    role: str = "supplier",
+) -> Workbook:
+    """A summary tab, then one tab per party holding that party's own
+    transactions.
+
+    The summary answers "who should I be chasing". The per-party tabs
+    answer "and what is that made of" -- the next question, which used to
+    mean running a separate export for every party.
+    """
     workbook = Workbook()
     sheet = workbook.active
     assert sheet is not None
-    sheet.title = heading[:31]
+    sheet.title = "Summary"
 
     write_row(
         sheet,
@@ -94,4 +128,20 @@ def build_ledger(rows: list[LedgerRow], *, heading: str, as_of: datetime.date) -
 
     autosize(sheet, HEADERS)
     sheet.freeze_panes = "A3"
+
+    if histories:
+        from backend.reports.excel.statement_template import write_statement_sheet
+
+        taken: set[str] = {"summary"}
+        for row in ordered:
+            entries = histories.get(row.name) or []
+            if not entries:
+                continue
+            write_statement_sheet(
+                workbook.create_sheet(sheet_name(row.name, taken)),
+                entries,
+                party=row.name,
+                role=role,
+                period="all activity",
+            )
     return workbook
