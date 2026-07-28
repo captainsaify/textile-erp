@@ -863,3 +863,66 @@ async def test_a_supplier_scoped_export_excludes_other_suppliers(
     }
     assert mine in codes
     assert theirs not in codes
+
+
+def test_the_ledger_ages_the_debt_not_just_its_size() -> None:
+    """₹50,000 owed for ninety days is a different problem from ₹50,000
+    owed since Tuesday. The ledger is opened to decide who to chase, so
+    it sorts by size and marks by age."""
+    from backend.reports.excel.ledger_template import LedgerRow, build_ledger
+
+    today = datetime.date(2026, 7, 29)
+    rows = [
+        LedgerRow(
+            name="Small but ancient",
+            outstanding=D("5000"),
+            oldest_date=datetime.date(2026, 1, 1),
+            days_outstanding=209,
+            last_activity=datetime.date(2026, 1, 1),
+        ),
+        LedgerRow(
+            name="Large and fresh",
+            outstanding=D("500000"),
+            oldest_date=datetime.date(2026, 7, 28),
+            days_outstanding=1,
+            last_activity=datetime.date(2026, 7, 28),
+        ),
+    ]
+    sheet = build_ledger(rows, heading="Suppliers", as_of=today).active
+    assert sheet is not None
+
+    assert [cell.value for cell in sheet[2]] == [
+        "PARTY",
+        "OUTSTANDING",
+        "OLDEST",
+        "DAYS",
+        "LAST ACTIVITY",
+        "STATUS",
+    ]
+    # largest first
+    assert sheet.cell(row=3, column=1).value == "Large and fresh"
+    assert sheet.cell(row=3, column=6).value == "current"
+    assert sheet.cell(row=4, column=6).value == "overdue"
+    # and the total is the sum, not the top row
+    assert sheet.cell(row=5, column=2).value == 505000
+
+
+def test_a_party_never_traded_with_reads_never_rather_than_blank() -> None:
+    from backend.reports.excel.ledger_template import LedgerRow, build_ledger
+
+    sheet = build_ledger(
+        [
+            LedgerRow(
+                name="Opening balance only",
+                outstanding=D("1000"),
+                oldest_date=None,
+                days_outstanding=None,
+                last_activity=None,
+            )
+        ],
+        heading="Suppliers",
+        as_of=datetime.date(2026, 7, 29),
+    ).active
+    assert sheet is not None
+    assert sheet.cell(row=3, column=5).value == "never"
+    assert sheet.cell(row=3, column=6).value == ""

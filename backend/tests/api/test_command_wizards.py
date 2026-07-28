@@ -167,6 +167,8 @@ async def test_export_offers_reports_then_a_period(ctx: RequestContext) -> None:
         "slot sales-customer",
         "slot statement-supplier",
         "slot statement-customer",
+        "slot ledger-supplier",
+        "slot ledger-customer",
         "slot stock",
     ]
 
@@ -379,3 +381,126 @@ def test_settlement_prefill_places_only_what_it_is_sure_of(
     args: str, expected: dict[str, str]
 ) -> None:
     assert wizards.WIZARDS["paid"].prefill(args) == expected
+
+
+# --------------------------------------------------------------------
+# capital, withdraw, edit, delete
+# --------------------------------------------------------------------
+
+
+async def test_capital_asks_partner_amount_method_and_direction(ctx: RequestContext) -> None:
+    result = await begin("capital", "", ctx)
+
+    assert result is not None
+    _, context = await state_of(ctx)
+    assert context["queue"] == ["partner", "amount", "method", "kind"]
+
+
+async def test_capital_direction_is_two_buttons_not_a_word_to_remember(
+    ctx: RequestContext,
+) -> None:
+    """'contribution' vs 'withdrawal' is exactly the kind of vocabulary
+    a usage line makes you memorise."""
+    await begin("capital", "Rahul 50000 cash", ctx)
+    _, context = await state_of(ctx)
+    assert context["queue"] == ["kind"]
+
+    question = await wizards.ask(wizards.WIZARDS["capital"], "kind", ctx, dict(context["filled"]))
+    assert isinstance(question.interactive, Buttons)
+    assert [c.title for c in question.interactive.choices] == ["Contribution", "Withdrawal"]
+
+
+async def test_a_complete_capital_command_still_runs_in_one_shot(ctx: RequestContext) -> None:
+    assert await begin("capital", "Rahul 50000 cash contribution", ctx) is None
+
+
+async def test_withdraw_never_asks_for_a_direction(ctx: RequestContext) -> None:
+    """A withdrawal is a withdrawal; asking would be a question with one
+    answer."""
+    await begin("withdraw", "", ctx)
+    _, context = await state_of(ctx)
+    assert context["queue"] == ["partner", "amount", "method"]
+
+
+async def test_edit_offers_the_fields_that_record_actually_has(ctx: RequestContext) -> None:
+    """Offering a field the command would reject is worse than offering
+    nothing -- and the list depends on the record kind just chosen."""
+    await begin("edit", "", ctx)
+    await answer("slot product", ctx)
+    await answer("TRP", ctx)
+
+    _, context = await state_of(ctx)
+    question = await wizards.ask(wizards.WIZARDS["edit"], "field", ctx, dict(context["filled"]))
+    assert isinstance(question.interactive, ListMenu)
+    offered = [row.title for section in question.interactive.sections for row in section.rows]
+    assert offered == list(wizards.EDITABLE_FIELDS["product"])
+
+    customer_question = await wizards.ask(
+        wizards.WIZARDS["edit"], "field", ctx, {"entity": "customer"}
+    )
+    assert isinstance(customer_question.interactive, ListMenu)
+    customer_fields = [
+        row.title for section in customer_question.interactive.sections for row in section.rows
+    ]
+    assert "credit_limit" in customer_fields
+
+
+async def test_delete_always_confirms_and_names_what_it_will_delete(
+    ctx: RequestContext,
+) -> None:
+    """A wizard makes deleting *easier* to reach, so the last tap has to
+    say what it is about to do."""
+    assert await begin("delete", "product TRP", ctx) is not None, "typed in full, still confirms"
+
+    _, context = await state_of(ctx)
+    assert context["queue"] == ["confirm"]
+
+    question = await wizards.ask(wizards.WIZARDS["delete"], "confirm", ctx, dict(context["filled"]))
+    assert isinstance(question.interactive, Buttons)
+    assert "Delete product TRP?" in question.interactive.body
+    assert [c.title for c in question.interactive.choices] == ["Yes, delete", "Keep it"]
+
+
+async def test_keeping_it_abandons_the_delete(ctx: RequestContext) -> None:
+    await begin("delete", "product TRP", ctx)
+    result = await answer("slot cancel", ctx)
+
+    assert "Cancelled" in result.reply
+    state, _ = await state_of(ctx)
+    assert state == IDLE
+
+
+async def test_an_ambiguous_answer_to_the_delete_confirmation_is_not_a_yes(
+    ctx: RequestContext,
+) -> None:
+    await begin("delete", "product TRP", ctx)
+    result = await answer("maybe", ctx)
+
+    assert "Tap 'Yes, delete'" in result.reply
+    state, context = await state_of(ctx)
+    assert state == AWAITING_COMMAND_SLOT
+    assert context["queue"] == ["confirm"]
+
+
+async def test_the_export_menu_offers_both_ledgers(ctx: RequestContext) -> None:
+    result = await begin("export", "", ctx)
+
+    assert result is not None
+    assert isinstance(result.interactive, ListMenu)
+    offered = [row.id for section in result.interactive.sections for row in section.rows]
+    assert "slot ledger-supplier" in offered
+    assert "slot ledger-customer" in offered
+
+
+async def test_a_ledger_is_not_asked_for_a_period(ctx: RequestContext) -> None:
+    """A ledger is a position as of today, not a range."""
+    await begin("export", "", ctx)
+    await answer("slot ledger-customer", ctx)
+
+    state, _ = await state_of(ctx)
+    assert state == IDLE, "nothing left to ask, so it ran"
+
+
+def test_the_ledger_assembles_to_a_role_not_a_party() -> None:
+    assert wizards.WIZARDS["export"].assemble({"report": "ledger-supplier"}) == "ledger supplier"
+    assert wizards.WIZARDS["export"].assemble({"report": "ledger-customer"}) == "ledger customer"

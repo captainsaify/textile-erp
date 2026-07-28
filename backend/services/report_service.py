@@ -47,11 +47,12 @@ from backend.reports.excel.styling import (
     write_header,
     write_row,
 )
+from backend.repositories.accounting_repository import business_today
 
 logger = get_logger(__name__)
 ZERO = decimal.Decimal("0")
 
-REPORT_TYPES = ("purchases", "sales", "stock", "statement", "invoice")
+REPORT_TYPES = ("purchases", "sales", "stock", "statement", "invoice", "ledger")
 LINK_EXPIRY_DAYS = 7
 
 
@@ -156,6 +157,7 @@ class ReportService:
             "sales": self._build_sales,
             "stock": self._build_stock,
             "statement": self._build_statement,
+            "ledger": self._build_ledger,
             "invoice": self._build_invoice,
         }
         return await builders[job.report_type](job)
@@ -254,6 +256,65 @@ class ReportService:
         """One bill. Same sheet as the purchases export -- it is the same
         thing, scoped to a single invoice."""
         return await self._build_purchases(job)
+
+    async def _build_ledger(self, job: ReportJob) -> tuple[Path, int]:
+        """Every party on one sheet: what they owe, how old it is, and
+        when you last did business with them.
+
+        A statement answers "what happened with this one party"; this
+        answers "who should I be chasing" -- which is the question you
+        open a ledger to ask, and it needs every party side by side.
+        """
+        from backend.reports.excel.ledger_template import LedgerRow, build_ledger
+        from backend.repositories.party_repository import CustomerRepository, SupplierRepository
+
+        role = str(job.filters.get("role", "supplier"))
+        if role == "customer":
+            parties = await CustomerRepository(self._session).outstanding_parties(job.org_id)
+            activity = await self._last_sale_dates(job.org_id)
+            heading = "Customers"
+        else:
+            parties = await SupplierRepository(self._session).outstanding_parties(job.org_id)
+            activity = await self._last_purchase_dates(job.org_id)
+            heading = "Suppliers"
+
+        today = await business_today(self._session, job.org_id)
+        rows = [
+            LedgerRow(
+                name=party.name,
+                outstanding=party.outstanding,
+                oldest_date=party.oldest_date,
+                days_outstanding=(today - party.oldest_date).days if party.oldest_date else None,
+                last_activity=activity.get(party.party_id),
+            )
+            for party in parties
+        ]
+        workbook = build_ledger(rows, heading=heading, as_of=today)
+        path = self._output_path(job)
+        workbook.save(path)
+        return path, len(rows)
+
+    async def _last_purchase_dates(self, org_id: uuid.UUID) -> dict[uuid.UUID, datetime.date]:
+        stmt = (
+            select(PurchaseHeader.supplier_id, func.max(PurchaseHeader.invoice_date))
+            .where(
+                PurchaseHeader.org_id == org_id,
+                PurchaseHeader.deleted_at.is_(None),
+                PurchaseHeader.status == "confirmed",
+            )
+            .group_by(PurchaseHeader.supplier_id)
+        )
+        return {row[0]: row[1] for row in (await self._session.execute(stmt)).all()}
+
+    async def _last_sale_dates(self, org_id: uuid.UUID) -> dict[uuid.UUID, datetime.date]:
+        from backend.models import SalesHeader
+
+        stmt = (
+            select(SalesHeader.customer_id, func.max(SalesHeader.sale_date))
+            .where(SalesHeader.org_id == org_id, SalesHeader.deleted_at.is_(None))
+            .group_by(SalesHeader.customer_id)
+        )
+        return {row[0]: row[1] for row in (await self._session.execute(stmt)).all()}
 
     async def _build_statement(self, job: ReportJob) -> tuple[Path, int]:
         """Everything that happened with one party, in order, with a

@@ -39,7 +39,10 @@ from backend.services.session_service import (
 #: escape hatch for a name that isn't listed.
 PARTY_ROWS = 9
 
-ChoiceBuilder = Callable[[RequestContext], Awaitable[Interactive | None]]
+#: Choices may depend on answers already given -- the field list for
+#: `edit` is the fields of the record kind just chosen -- so a builder
+#: receives what has been filled so far rather than reaching for it.
+ChoiceBuilder = Callable[[RequestContext, dict[str, str]], Awaitable[Interactive | None]]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -94,6 +97,34 @@ def _method(value: str) -> str:
     return token
 
 
+def _capital_kind(value: str) -> str:
+    token = value.strip().lower()
+    if token not in {"contribution", "withdrawal"}:
+        raise ValidationError(
+            f"'{value.strip()}' isn't a kind — say contribution (money in) or "
+            "withdrawal (money out)."
+        )
+    return token
+
+
+def _affirmative(value: str) -> str:
+    token = value.strip().lower()
+    if token not in {"delete", "yes", "confirm"}:
+        # anything else is treated as not-yes; `cancel` is handled by the
+        # wizard's own escape hatch before this ever runs
+        raise ValidationError("Tap 'Yes, delete' to go ahead, or 'Keep it' to stop.")
+    return token
+
+
+def _entity_kind(value: str) -> str:
+    token = value.strip().lower().rstrip("s")
+    if token not in {"product", "supplier", "customer", "brand"}:
+        raise ValidationError(
+            f"I can't change a '{value.strip()}'. Pick product, supplier, customer or brand."
+        )
+    return token
+
+
 def _code(value: str) -> str:
     token = value.strip().upper()
     if not token or " " in token:
@@ -143,7 +174,7 @@ def _party_menu(names: list[str], *, label: str, body: str) -> Interactive | Non
     )
 
 
-async def _suppliers(ctx: RequestContext) -> Interactive | None:
+async def _suppliers(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
     from backend.repositories.party_repository import SupplierRepository
 
     async with ctx.session_factory() as session:
@@ -153,7 +184,7 @@ async def _suppliers(ctx: RequestContext) -> Interactive | None:
     )
 
 
-async def _customers(ctx: RequestContext) -> Interactive | None:
+async def _customers(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
     from backend.repositories.party_repository import CustomerRepository
 
     async with ctx.session_factory() as session:
@@ -163,7 +194,7 @@ async def _customers(ctx: RequestContext) -> Interactive | None:
     )
 
 
-async def _method_buttons(ctx: RequestContext) -> Interactive | None:
+async def _method_buttons(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
     return Buttons(
         body="Cash or bank?",
         choices=(
@@ -173,7 +204,7 @@ async def _method_buttons(ctx: RequestContext) -> Interactive | None:
     )
 
 
-async def _expense_categories(ctx: RequestContext) -> Interactive | None:
+async def _expense_categories(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
     """Categories this business has actually used, rather than a fixed
     list somebody guessed at."""
     from backend.repositories.accounting_repository import ExpenseRepository
@@ -196,7 +227,91 @@ async def _expense_categories(ctx: RequestContext) -> Interactive | None:
     )
 
 
-async def _report_menu(ctx: RequestContext) -> Interactive | None:
+async def _partners(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
+    from backend.repositories.party_repository import PartnerRepository
+
+    async with ctx.session_factory() as session:
+        found = await PartnerRepository(session).list_active(ctx.user.org_id)
+    return _party_menu([p.display_name for p in found], label="partner", body="Which partner?")
+
+
+async def _capital_kind_buttons(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
+    return Buttons(
+        body="Money in, or money out?",
+        choices=(
+            Choice(id="slot contribution", title="Contribution"),
+            Choice(id="slot withdrawal", title="Withdrawal"),
+        ),
+    )
+
+
+async def _entity_menu(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
+    return ListMenu(
+        body="What are you changing?",
+        menu_label="Pick a kind",
+        sections=(
+            Section(
+                title="Records",
+                rows=(
+                    Choice(id="slot product", title="Product", description="Code or description"),
+                    Choice(id="slot supplier", title="Supplier", description="Name or contact"),
+                    Choice(id="slot customer", title="Customer", description="Name or contact"),
+                    Choice(id="slot brand", title="Brand", description="Name"),
+                ),
+            ),
+        ),
+    )
+
+
+#: Which fields each record actually has. Mirrors what the `edit`
+#: command accepts -- offering a field it would reject is worse than
+#: offering nothing.
+EDITABLE_FIELDS = {
+    "product": ("code", "description", "reorder_level", "brand"),
+    "supplier": ("name", "phone", "address"),
+    "customer": ("name", "phone", "address", "credit_limit"),
+    "brand": ("name",),
+}
+
+
+async def _field_menu(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
+    """Built from the entity already chosen, which is why the wizard
+    recomputes its queue after every answer."""
+    entity = filled.get("entity", "")
+    fields = EDITABLE_FIELDS.get(entity)
+    if not fields:
+        return None
+    return ListMenu(
+        body=f"Which field of the {entity}?",
+        menu_label="Pick field",
+        sections=(
+            Section(
+                title=entity.capitalize(),
+                rows=tuple(Choice(id=f"slot {name}", title=name) for name in fields),
+            ),
+        ),
+    )
+
+
+async def _delete_confirm(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
+    """Names the thing being deleted.
+
+    A wizard makes a destructive command *easier* to reach -- three taps
+    from nothing to gone -- so the last of those taps has to state what
+    it is about to do, not just say "confirm?".
+    """
+    what = f"{filled.get('entity', 'record')} {filled.get('reference', '')}".strip()
+    return Buttons(
+        body=f"Delete {what}?",
+        choices=(
+            Choice(id="slot delete", title="Yes, delete"),
+            Choice(id="slot cancel", title="Keep it"),
+        ),
+        footer="It stays on past transactions either way.",
+    )
+
+
+async def _report_menu(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
     """More than three things are exportable, so this is a list rather
     than buttons (docs/19 §2: buttons cap at 3)."""
     return ListMenu(
@@ -242,6 +357,21 @@ async def _report_menu(ctx: RequestContext) -> Interactive | None:
                 ),
             ),
             Section(
+                title="Ledgers",
+                rows=(
+                    Choice(
+                        id="slot ledger-supplier",
+                        title="Supplier ledger",
+                        description="Who we owe, and how old",
+                    ),
+                    Choice(
+                        id="slot ledger-customer",
+                        title="Customer ledger",
+                        description="Who owes us, and how old",
+                    ),
+                ),
+            ),
+            Section(
                 title="Stock",
                 rows=(Choice(id="slot stock", title="Stock on hand", description="With value"),),
             ),
@@ -249,7 +379,7 @@ async def _report_menu(ctx: RequestContext) -> Interactive | None:
     )
 
 
-async def _invoice_menu(ctx: RequestContext) -> Interactive | None:
+async def _invoice_menu(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
     """Recent invoices, so a bill can be picked rather than remembered.
     Scoped to the chosen supplier when there is one."""
     from backend.repositories.purchase_repository import PurchaseRepository
@@ -285,7 +415,7 @@ async def _invoice_menu(ctx: RequestContext) -> Interactive | None:
     )
 
 
-async def _period_menu(ctx: RequestContext) -> Interactive | None:
+async def _period_menu(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
     from backend.api.period import period_menu
 
     menu = period_menu("slot")
@@ -351,6 +481,8 @@ _REPORT_CHOICES = {
     "statement-supplier": "statement",
     "statement-customer": "statement",
     "invoice": "invoice",
+    "ledger-supplier": "ledger",
+    "ledger-customer": "ledger",
     "stock": "stock",
 }
 
@@ -374,6 +506,10 @@ def _assemble_export(filled: dict[str, str]) -> str:
         return f"invoice {filled['invoice']}"
 
     parts = [report_type]
+    if report_type == "ledger":
+        # a ledger is every party of one kind, so the role is the whole
+        # argument -- there is no single party to name
+        return f"ledger {'customer' if choice.endswith('-customer') else 'supplier'}"
     if choice.endswith("-supplier"):
         parts += ["supplier", filled["supplier"]]
     elif choice.endswith("-customer"):
@@ -400,6 +536,56 @@ def _party_lookup_wizard(role: str, choices: ChoiceBuilder) -> CommandWizard:
         assemble=lambda f: f["name"],
         prefill=lambda args: {"name": args.strip()} if args.strip() else {},
     )
+
+
+def _prefill_capital(args: str) -> dict[str, str]:
+    """`capital Rahul 50000 cash` is complete; anything less is asked for.
+
+    Conservative on purpose -- a wrong guess here posts the wrong
+    partner's capital, which is a correction with a paper trail rather
+    than a typo.
+    """
+    tokens = args.split()
+    filled: dict[str, str] = {}
+
+    kind = next((t for t in tokens if t.lower() in {"contribution", "withdrawal"}), None)
+    if kind is not None:
+        filled["kind"] = kind.lower()
+        tokens = [t for t in tokens if t.lower() != kind.lower()]
+
+    method = next((t for t in tokens if t.lower() in {"cash", "bank"}), None)
+    if method is not None:
+        filled["method"] = method.lower()
+        tokens = [t for t in tokens if t.lower() not in {"cash", "bank"}]
+
+    amount_at = next(
+        (i for i in range(len(tokens) - 1, -1, -1) if looks_like_amount(tokens[i])), None
+    )
+    if amount_at is not None:
+        with contextlib.suppress(DomainError):
+            filled["amount"] = str(parse_amount(tokens[amount_at]))
+    partner = " ".join(tokens[:amount_at] if amount_at is not None else tokens).strip()
+    if partner:
+        filled["partner"] = partner
+    return filled
+
+
+def _prefill_entity(args: str) -> dict[str, str]:
+    """Note what this never fills: `confirm`. `delete product TRP` typed
+    in full still stops to ask, because the destructive step is the one
+    thing that should not be skippable by knowing the syntax."""
+    tokens = args.split()
+    filled: dict[str, str] = {}
+    if tokens:
+        with contextlib.suppress(DomainError):
+            filled["entity"] = _entity_kind(tokens[0])
+    if len(tokens) > 1 and "entity" in filled:
+        filled["reference"] = tokens[1]
+    if len(tokens) > 2 and "reference" in filled:
+        filled["field"] = tokens[2]
+    if len(tokens) > 3 and "field" in filled:
+        filled["value"] = " ".join(tokens[3:])
+    return filled
 
 
 def _prefill_export(args: str) -> dict[str, str]:
@@ -510,14 +696,16 @@ WIZARDS: dict[str, CommandWizard] = {
                 question="Which supplier?",
                 choices=_suppliers,
                 validate=_nonempty("Supplier"),
-                applies=lambda f: f.get("report", "").endswith("-supplier"),
+                applies=lambda f: (
+                    f.get("report", "") in {"purchases-supplier", "statement-supplier"}
+                ),
             ),
             CommandSlot(
                 name="customer",
                 question="Which customer?",
                 choices=_customers,
                 validate=_nonempty("Customer"),
-                applies=lambda f: f.get("report", "").endswith("-customer"),
+                applies=lambda f: f.get("report", "") in {"sales-customer", "statement-customer"},
             ),
             CommandSlot(
                 name="invoice",
@@ -535,7 +723,11 @@ WIZARDS: dict[str, CommandWizard] = {
                 example="e.g. month",
                 # one invoice is one bill; asking for a period would only
                 # let you exclude the very thing you asked for
-                applies=lambda f: f.get("report") != "invoice",
+                # one invoice is one bill, and a ledger is a position as
+                # of today -- neither is bounded by a period
+                applies=lambda f: (
+                    f.get("report") not in {"invoice", "ledger-supplier", "ledger-customer"}
+                ),
             ),
         ),
         assemble=_assemble_export,
@@ -543,6 +735,109 @@ WIZARDS: dict[str, CommandWizard] = {
     ),
     "supplier": _party_lookup_wizard("supplier", _suppliers),
     "customer": _party_lookup_wizard("customer", _customers),
+    "capital": CommandWizard(
+        command="capital",
+        slots=(
+            CommandSlot(
+                name="partner",
+                question="Which partner?",
+                choices=_partners,
+                validate=_nonempty("Partner"),
+            ),
+            CommandSlot(
+                name="amount", question="How much?", validate=_amount, example="e.g. 50000"
+            ),
+            CommandSlot(
+                name="method", question="Cash or bank?", choices=_method_buttons, validate=_method
+            ),
+            CommandSlot(
+                name="kind",
+                question="Money in, or money out?",
+                choices=_capital_kind_buttons,
+                validate=_capital_kind,
+            ),
+        ),
+        assemble=lambda f: f"{f['partner']} {f['amount']} {f['method']} {f['kind']}",
+        prefill=_prefill_capital,
+    ),
+    "withdraw": CommandWizard(
+        command="withdraw",
+        slots=(
+            CommandSlot(
+                name="partner",
+                question="Which partner is withdrawing?",
+                choices=_partners,
+                validate=_nonempty("Partner"),
+            ),
+            CommandSlot(
+                name="amount", question="How much?", validate=_amount, example="e.g. 50000"
+            ),
+            CommandSlot(
+                name="method", question="Cash or bank?", choices=_method_buttons, validate=_method
+            ),
+        ),
+        # a withdrawal always needs a second partner's approval, so the
+        # wizard ends by *requesting* it rather than by posting anything
+        assemble=lambda f: f"{f['partner']} {f['amount']} {f['method']}",
+        prefill=_prefill_capital,
+    ),
+    "edit": CommandWizard(
+        command="edit",
+        slots=(
+            CommandSlot(
+                name="entity",
+                question="What are you changing?",
+                choices=_entity_menu,
+                validate=_entity_kind,
+            ),
+            CommandSlot(
+                name="reference",
+                question="Which one? Give its code or name.",
+                validate=_nonempty("Reference"),
+                example="e.g. TRP",
+            ),
+            CommandSlot(
+                name="field",
+                question="Which field?",
+                choices=_field_menu,
+                validate=_nonempty("Field"),
+            ),
+            CommandSlot(
+                name="value",
+                question="What should it be?",
+                validate=_nonempty("Value"),
+            ),
+        ),
+        assemble=lambda f: f"{f['entity']} {f['reference']} {f['field']} {f['value']}",
+        prefill=_prefill_entity,
+    ),
+    "delete": CommandWizard(
+        command="delete",
+        slots=(
+            CommandSlot(
+                name="entity",
+                question="What are you deleting?",
+                choices=_entity_menu,
+                validate=_entity_kind,
+            ),
+            CommandSlot(
+                name="reference",
+                question="Which one? Give its code or name.",
+                validate=_nonempty("Reference"),
+                example="e.g. TRP",
+            ),
+            CommandSlot(
+                name="confirm",
+                question="Are you sure?",
+                choices=_delete_confirm,
+                validate=_affirmative,
+            ),
+        ),
+        # `confirm` is a gate, not an argument -- it never reaches the
+        # command
+        assemble=lambda f: f"{f['entity']} {f['reference']}",
+        prefill=_prefill_entity,
+    ),
 }
 
 
@@ -563,7 +858,12 @@ def missing(wizard: CommandWizard, args: str) -> tuple[dict[str, str], list[str]
     return filled, remaining(wizard, filled)
 
 
-async def ask(wizard: CommandWizard, slot_name: str, ctx: RequestContext) -> CommandResult:
+async def ask(
+    wizard: CommandWizard,
+    slot_name: str,
+    ctx: RequestContext,
+    filled: dict[str, str] | None = None,
+) -> CommandResult:
     """The question goes in exactly one place.
 
     An interactive message carries its own body, so also sending that
@@ -571,12 +871,17 @@ async def ask(wizard: CommandWizard, slot_name: str, ctx: RequestContext) -> Com
     consecutive messages. When there are choices, the menu says it;
     otherwise the plain text does.
     """
+    filled = filled or {}
     slot = next(s for s in wizard.slots if s.name == slot_name)
     body = f"{slot.question}\n{slot.example}".strip()
-    interactive = await slot.choices(ctx) if slot.choices is not None else None
+    interactive = await slot.choices(ctx, filled) if slot.choices is not None else None
     if interactive is None:
         return CommandResult(reply=body)
-    return CommandResult(reply="", interactive=dataclasses.replace(interactive, body=body))
+    # The builder's own body wins. It knows things the static question
+    # can't -- "Delete product TRP?" rather than "Are you sure?" -- and
+    # overwriting it threw exactly that away.
+    detail = f"{interactive.body}\n{slot.example}".strip() if slot.example else interactive.body
+    return CommandResult(reply="", interactive=dataclasses.replace(interactive, body=detail))
 
 
 async def start(wizard: CommandWizard, args: str, ctx: RequestContext) -> CommandResult | None:
@@ -590,7 +895,7 @@ async def start(wizard: CommandWizard, args: str, ctx: RequestContext) -> Comman
         AWAITING_COMMAND_SLOT,
         {"command": wizard.command, "filled": filled, "queue": queue},
     )
-    return await ask(wizard, queue[0], ctx)
+    return await ask(wizard, queue[0], ctx, filled)
 
 
 async def handle_reply(text: str, ctx: RequestContext, state: SessionState) -> CommandResult:
@@ -616,28 +921,30 @@ async def handle_reply(text: str, ctx: RequestContext, state: SessionState) -> C
     if lowered == "back":
         done = list(filled)
         if not done:
-            return await _reask(wizard, queue, ctx, prefix="That's the first question.")
+            return await _reask(
+                wizard, queue, ctx, prefix="That's the first question.", filled=filled
+            )
         previous = done[-1]
         filled.pop(previous)
         queue.insert(0, previous)
         await _save(sessions, ctx, wizard, filled, queue)
-        return await _reask(wizard, queue, ctx, prefix="Going back.")
+        return await _reask(wizard, queue, ctx, prefix="Going back.", filled=filled)
 
     current = queue[0]
     if lowered in {"new", "other", "custom"}:
         # "Someone else" / "Custom range": the row can't answer itself
-        return await _reask(wizard, queue, ctx, prefix="Go ahead and type it.")
+        return await _reask(wizard, queue, ctx, prefix="Go ahead and type it.", filled=filled)
 
     slot = next(s for s in wizard.slots if s.name == current)
     try:
         filled[current] = slot.validate(answer)
     except DomainError as exc:
-        return await _reask(wizard, queue, ctx, prefix=exc.message)
+        return await _reask(wizard, queue, ctx, prefix=exc.message, filled=filled)
 
     queue = remaining(wizard, filled)
     if queue:
         await _save(sessions, ctx, wizard, filled, queue)
-        return await ask(wizard, queue[0], ctx)
+        return await ask(wizard, queue[0], ctx, filled)
 
     # Complete. Hand the assembled one-shot to the real handler, so the
     # wizard and the typed command cannot diverge (§10.5).
@@ -663,7 +970,12 @@ async def _save(
 
 
 async def _reask(
-    wizard: CommandWizard, queue: list[str], ctx: RequestContext, *, prefix: str
+    wizard: CommandWizard,
+    queue: list[str],
+    ctx: RequestContext,
+    *,
+    prefix: str,
+    filled: dict[str, str] | None = None,
 ) -> CommandResult:
-    question = await ask(wizard, queue[0], ctx)
+    question = await ask(wizard, queue[0], ctx, filled)
     return dataclasses.replace(question, reply=f"{prefix}\n{question.reply}".strip())

@@ -98,6 +98,14 @@ async def _export_filters(
             raise ValidationError("Which invoice? e.g. export invoice INV-001")
         return {"invoice_no": rest.split()[0]}, ""
 
+    if report_type == "ledger":
+        role = (rest.split() or ["supplier"])[0].lower()
+        if role not in {"supplier", "customer"}:
+            raise ValidationError(
+                "Which ledger? Say 'export ledger supplier' or 'export ledger customer'."
+            )
+        return {"role": role}, ""
+
     tokens = rest.split()
     if not tokens or tokens[0].lower() not in {"supplier", "customer"}:
         if report_type == "statement":
@@ -136,6 +144,8 @@ def _describe_scope(report_type: str, filters: dict[str, Any], period_label: str
     if report_type == "invoice":
         invoice_no = filters.get("invoice_no")
         return f"for invoice {invoice_no}"
+    if report_type == "ledger":
+        return f"for every {filters.get('role', 'supplier')}"
     narrowed = " (one party)" if filters.get("supplier_id") or filters.get("customer_id") else ""
     return f"for {period_label}{narrowed}"
 

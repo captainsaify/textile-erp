@@ -243,6 +243,20 @@ command's own handler**, so the two forms cannot drift — the wizard
 anything it cannot place with certainty is asked for, because a wrong
 guess here is a wrong payment.
 
+**Phase 3 — extended to every remaining command** (2026-07-29):
+`capital` (partner list → amount → cash/bank → contribution/withdrawal
+buttons), `withdraw`, `edit` (record kind → which one → **the fields
+that kind actually has** → new value) and `delete`.
+
+`delete` is the one that needed care. A wizard makes a destructive
+command *easier* to reach — three taps from nothing to gone — so it
+always confirms, the confirmation **names what it is about to delete**
+("Delete product TRP?"), and `delete product TRP` typed in full still
+stops to ask. Knowing the syntax should not skip the safety step.
+
+This is also why a choice builder now receives the answers so far: the
+field list for `edit` is a function of the record kind just chosen.
+
 **Phase 3 — main menu + handwriting confirmation pass.**
 
 Phase 1 depends on [19](19_InteractiveMessages.md) Phase 1 being done
