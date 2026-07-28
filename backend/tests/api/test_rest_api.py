@@ -637,3 +637,42 @@ async def test_stock_carries_the_brand_because_codes_are_brand_scoped(
     # one carries the brand, the other records that it has none -- the
     # two rows are distinguishable, which is the whole point
     assert sorted(str(row["brand"]) for row in same_code) == [f"Alpha{suffix}", "None"]
+
+
+async def test_the_audit_log_says_what_actually_changed(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Twenty rows reading "product.created" answer nothing. The payload
+    that names the product is written on every mutation already -- it
+    just wasn't being returned."""
+    from backend.models import AuditLog
+
+    async with session_factory() as session:
+        session.add(
+            AuditLog(
+                org_id=ORG,
+                actor_user_id=owner.id,
+                action="product.created",
+                entity_type="products",
+                entity_id=uuid.uuid4(),
+                after_state={"code": "TRP", "description": "Jogging Pant", "brand_id": None},
+                channel="whatsapp",
+            )
+        )
+        await session.commit()
+
+    token = await _token(client, owner)
+    response = await client.get("/api/v1/audit?limit=5", headers=_auth(token))
+
+    assert response.status_code == 200, response.text
+    entry = next(row for row in response.json()["data"] if row["action"] == "product.created")
+    assert entry["after_state"]["code"] == "TRP"
+    assert entry["after_state"]["description"] == "Jogging Pant"
+    assert "entity_id" in entry
+
+    filtered = await client.get("/api/v1/audit?action=product.created", headers=_auth(token))
+    assert {row["action"] for row in filtered.json()["data"]} == {"product.created"}
+
+    actions = await client.get("/api/v1/audit/actions", headers=_auth(token))
+    assert actions.status_code == 200, actions.text
+    assert any(row["action"] == "product.created" for row in actions.json()["data"])

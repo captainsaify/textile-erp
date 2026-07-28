@@ -13,7 +13,7 @@ import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query, Response
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from backend.api.amounts import money_str, qty_str
 from backend.api.deps import CurrentUser, OwnerUser, Paging, Session
@@ -320,10 +320,23 @@ async def payables(user: CurrentUser, session: Session) -> dict[str, Any]:
 
 
 @router.get("/audit")
-async def audit_log(user: OwnerUser, session: Session, paging: Paging) -> dict[str, Any]:
-    """What changed and who changed it (docs/21 §3, Admin).
+async def audit_log(
+    user: OwnerUser,
+    session: Session,
+    paging: Paging,
+    action: Annotated[str | None, Query()] = None,
+    entity_type: Annotated[str | None, Query()] = None,
+) -> dict[str, Any]:
+    """What changed, who changed it, and **what it actually was**
+    (docs/21 §3, Admin).
 
-    Owner-only: the audit trail names people and amounts, which is
+    `before_state` and `after_state` come back in full. Twenty rows all
+    reading "product.created" answer nothing; the same twenty carrying
+    the code and description are a record of what happened. Those
+    payloads are written on every mutation already (`CLAUDE.md` rule 3)
+    -- they simply weren't being returned.
+
+    Owner-only: the trail names people and amounts, which is
     partner-level information (docs/14 #rbac).
     """
     from backend.models import AuditLog
@@ -336,6 +349,10 @@ async def audit_log(user: OwnerUser, session: Session, paging: Paging) -> dict[s
         .order_by(AuditLog.created_at.desc())
         .limit(paging.limit)
     )
+    if action:
+        stmt = stmt.where(AuditLog.action == action)
+    if entity_type:
+        stmt = stmt.where(AuditLog.entity_type == entity_type)
     after = paging.decode_after()
     if after is not None:
         stmt = stmt.where(AuditLog.created_at < after)
@@ -347,12 +364,32 @@ async def audit_log(user: OwnerUser, session: Session, paging: Paging) -> dict[s
                 "created_at": entry.created_at.isoformat(),
                 "action": entry.action,
                 "entity_type": entry.entity_type,
+                "entity_id": str(entry.entity_id),
                 "actor": actor,
                 "channel": entry.channel,
+                "before_state": entry.before_state,
+                "after_state": entry.after_state,
             }
             for entry, actor in rows
         ]
     }
+
+
+@router.get("/audit/actions")
+async def audit_actions(user: OwnerUser, session: Session) -> dict[str, Any]:
+    """The action names actually present, so the filter offers real
+    choices rather than a hand-written list that goes stale."""
+    from backend.models import AuditLog
+
+    rows = (
+        await session.execute(
+            select(AuditLog.action, func.count())
+            .where(AuditLog.org_id == user.org_id)
+            .group_by(AuditLog.action)
+            .order_by(func.count().desc())
+        )
+    ).all()
+    return {"data": [{"action": name, "count": count} for name, count in rows]}
 
 
 @router.post("/purchases/{purchase_id}/undo")
