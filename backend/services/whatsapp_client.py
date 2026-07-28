@@ -11,6 +11,7 @@ contract here stays the same.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Protocol
 
 import httpx
@@ -20,6 +21,8 @@ from backend.core.config import get_settings
 from backend.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 _RETRY_DELAYS_SECONDS = (0.5, 1.0, 2.0)
 
@@ -37,6 +40,15 @@ class SupportsSendInteractive(Protocol):
     (docs/19_InteractiveMessages.md §3)."""
 
     async def send_interactive(self, to_number: str, payload: Interactive) -> bool: ...
+
+
+class SupportsSendDocument(Protocol):
+    """Cloud API only. Checked at runtime, like send_interactive, so the
+    bridge transport needs no changes."""
+
+    async def send_document(
+        self, to_number: str, path: Path, *, filename: str, caption: str
+    ) -> bool: ...
 
 
 class SupportsFetchMedia(Protocol):
@@ -66,6 +78,54 @@ class WhatsAppClient:
     async def send_interactive(self, to_number: str, payload: Interactive) -> bool:
         """Send buttons or a list menu. Same retry semantics as text."""
         return await self._post(to_cloud_api(payload, to_number))
+
+    async def send_document(
+        self, to_number: str, path: Path, *, filename: str, caption: str
+    ) -> bool:
+        """Deliver a file into the chat. Two steps, per Meta's API: upload
+        the bytes to get a media id, then send a message referencing it.
+
+        The alternative -- a public `link` -- would mean exposing report
+        data on an unauthenticated URL, which is not a trade worth making
+        for a file the recipient can already be handed directly.
+        """
+        media_id = await self._upload(path, filename)
+        if media_id is None:
+            return False
+        return await self._post(
+            {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to_number.lstrip("+"),
+                "type": "document",
+                "document": {"id": media_id, "filename": filename, "caption": caption[:1024]},
+            }
+        )
+
+    async def _upload(self, path: Path, filename: str) -> str | None:
+        """Returns Meta's media id, or None -- the caller falls back to
+        telling the user in text rather than failing the whole job."""
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            logger.error("media_upload_unreadable", path=str(path), error=str(exc))
+            return None
+        try:
+            response = await self._http.post(
+                f"/{self._phone_number_id}/media",
+                data={"messaging_product": "whatsapp", "type": _XLSX_MIME},
+                files={"file": (filename, data, _XLSX_MIME)},
+            )
+        except httpx.HTTPError as exc:
+            logger.error("media_upload_transport_error", error=str(exc))
+            return None
+        if response.status_code >= 300:
+            logger.error(
+                "media_upload_rejected", status=response.status_code, body=response.text[:500]
+            )
+            return None
+        media_id = response.json().get("id")
+        return str(media_id) if media_id else None
 
     async def send_text(self, to_number: str, body: str) -> bool:
         """Send a plain text message. Returns delivery-accepted, never raises."""

@@ -485,3 +485,92 @@ def test_every_scheduled_task_is_registered_with_the_app() -> None:
 
     for entry in CELERYBEAT_SCHEDULE.values():
         assert entry["task"] in celery_app.tasks, f"{entry['task']} not registered"
+
+
+# --------------------------------------------------------------------
+# delivering the report, not just announcing it
+# --------------------------------------------------------------------
+
+
+class RecordingClient:
+    """Stands in for the Cloud API client; records what was sent."""
+
+    def __init__(self, *, upload_succeeds: bool = True) -> None:
+        self.upload_succeeds = upload_succeeds
+        self.texts: list[tuple[str, str]] = []
+        self.documents: list[tuple[str, Path, str, str]] = []
+
+    async def send_text(self, to_number: str, body: str) -> bool:
+        self.texts.append((to_number, body))
+        return True
+
+    async def send_document(
+        self, to_number: str, path: Path, *, filename: str, caption: str
+    ) -> bool:
+        self.documents.append((to_number, path, filename, caption))
+        return self.upload_succeeds
+
+
+async def _finished_report(tmp_path: Path, client: object) -> None:
+    from backend.services import whatsapp_client as client_module
+    from backend.services.report_service import GeneratedReport
+    from backend.workers.tasks import _deliver_report
+
+    workbook = tmp_path / "purchases-20260728-abcdef.xlsx"
+    workbook.write_bytes(b"xlsx")
+    record = GeneratedReport(
+        job_id=uuid.uuid4(),
+        status="ready",
+        message="📄 Your purchases export — 26 row(s).",
+        notify_number="+919000000000",
+        file_path=workbook,
+    )
+    original = client_module.get_whatsapp_client
+    client_module.get_whatsapp_client = lambda: client  # type: ignore[assignment,return-value]
+    try:
+        await _deliver_report(record)
+    finally:
+        client_module.get_whatsapp_client = original
+
+
+async def test_a_ready_report_arrives_as_a_file(tmp_path: Path) -> None:
+    """The old message named a file inside a container and said it would
+    expire -- neither of which the recipient could act on. Nothing was
+    ever uploaded."""
+    client = RecordingClient()
+    await _finished_report(tmp_path, client)
+
+    assert len(client.documents) == 1
+    _, path, filename, caption = client.documents[0]
+    assert filename == "purchases-20260728-abcdef.xlsx"
+    assert path.read_bytes() == b"xlsx"
+    assert "26 row(s)" in caption
+    assert client.texts == [], "the caption carries the message; a separate text repeats it"
+
+
+async def test_a_failed_upload_says_so_instead_of_claiming_delivery(tmp_path: Path) -> None:
+    client = RecordingClient(upload_succeeds=False)
+    await _finished_report(tmp_path, client)
+
+    assert len(client.documents) == 1
+    assert len(client.texts) == 1
+    assert "couldn't attach the file" in client.texts[0][1]
+
+
+async def test_a_transport_without_files_falls_back_to_text(tmp_path: Path) -> None:
+    """The whatsapp-web.js bridge has no send_document; the flow still
+    completes rather than raising (docs/19 §3)."""
+
+    class TextOnlyClient:
+        def __init__(self) -> None:
+            self.texts: list[tuple[str, str]] = []
+
+        async def send_text(self, to_number: str, body: str) -> bool:
+            self.texts.append((to_number, body))
+            return True
+
+    client = TextOnlyClient()
+    await _finished_report(tmp_path, client)
+
+    assert len(client.texts) == 1
+    assert "26 row(s)" in client.texts[0][1]

@@ -54,6 +54,10 @@ class GeneratedReport:
     status: str
     message: str
     notify_number: str | None
+    #: Set when the report exists on disk, so the notifier can deliver
+    #: the file itself. Telling someone a filename they have no way to
+    #: reach is not a report they received.
+    file_path: Path | None = None
 
 
 class ReportService:
@@ -122,11 +126,9 @@ class ReportService:
         return GeneratedReport(
             job_id=job_id,
             status="ready",
-            message=(
-                f"📄 Your {job.report_type} export is ready — {rows} row(s).\n"
-                f"Saved to {path.name}. It expires in {LINK_EXPIRY_DAYS} days."
-            ),
+            message=f"📄 Your {job.report_type} export — {rows} row(s).",
             notify_number=await self._notify_number(job),
+            file_path=path,
         )
 
     async def _notify_number(self, job: ReportJob) -> str | None:

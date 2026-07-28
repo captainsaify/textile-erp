@@ -238,6 +238,34 @@ def nightly_backup() -> dict[str, Any]:
     return run_async(_run())
 
 
+async def _deliver_report(record: Any) -> None:
+    """Send the workbook itself, not a note about where it lives.
+
+    A filename inside a container is not something the recipient can
+    open. If the upload fails -- or the transport can't carry files at
+    all -- say so plainly rather than claiming a delivery that didn't
+    happen.
+    """
+    from backend.services.whatsapp_client import get_whatsapp_client
+
+    client = get_whatsapp_client()
+    number, message, path = record.notify_number, record.message, record.file_path
+    try:
+        send_document = getattr(client, "send_document", None)
+        if path is not None and send_document is not None:
+            if await send_document(number, path, filename=path.name, caption=message):
+                return
+            await client.send_text(
+                number,
+                f"{message}\n\n⚠️ I couldn't attach the file to WhatsApp. "
+                "It's saved — ask me to export again, or fetch it from the dashboard.",
+            )
+            return
+        await client.send_text(number, message)
+    except Exception as exc:  # noqa: BLE001 -- a send failure must not fail the job
+        logger.error("report_notify_failed", error=str(exc))
+
+
 @celery_app.task(
     name="report_generation",
     soft_time_limit=180,
@@ -256,12 +284,7 @@ def report_generation(job_id: str) -> dict[str, Any]:
         async with factory() as session:
             record = await ReportService(session).generate(uuid.UUID(job_id))
         if record.notify_number:
-            from backend.services.whatsapp_client import get_whatsapp_client
-
-            try:
-                await get_whatsapp_client().send_text(record.notify_number, record.message)
-            except Exception as exc:  # noqa: BLE001
-                logger.error("report_notify_failed", error=str(exc))
+            await _deliver_report(record)
         return {"job_id": job_id, "status": record.status}
 
     return run_async(_run())
