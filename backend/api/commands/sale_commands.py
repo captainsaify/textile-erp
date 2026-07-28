@@ -15,6 +15,7 @@ import re
 
 from backend.api.command_types import CommandResult, RequestContext
 from backend.api.formatting import fmt_money, fmt_qty
+from backend.api.interactive import is_abandon
 from backend.core.exceptions import (
     DomainError,
     DuplicateSaleError,
@@ -271,7 +272,7 @@ async def handle_sale_session_reply(
     draft = SaleDraft.from_context(state.context)
     lowered = text.strip().lower()
 
-    if lowered in {"cancel", "discard"}:
+    if is_abandon(lowered):
         await sessions.clear(ctx.user.org_id, ctx.user.id)
         return CommandResult(reply="Sale discarded.")
 

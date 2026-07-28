@@ -26,7 +26,14 @@ from typing import Any
 from backend.api.amounts import looks_like_amount, parse_amount
 from backend.api.command_types import CommandResult, RequestContext
 from backend.api.formatting import fmt_date
-from backend.api.interactive import Buttons, Choice, Interactive, ListMenu, Section
+from backend.api.interactive import (
+    Buttons,
+    Choice,
+    Interactive,
+    ListMenu,
+    Section,
+    is_abandon,
+)
 from backend.core.exceptions import DomainError, ValidationError
 from backend.services.session_service import (
     AWAITING_COMMAND_SLOT,
@@ -910,7 +917,7 @@ async def handle_reply(text: str, ctx: RequestContext, state: SessionState) -> C
     answer = text.strip().removeprefix("slot ").strip()
     lowered = answer.lower()
 
-    if lowered == "cancel":
+    if is_abandon(answer):
         await sessions.set(ctx.user.org_id, ctx.user.id, IDLE, {})
         return CommandResult(reply=f"Cancelled — no {wizard.command} was recorded.")
 

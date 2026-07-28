@@ -504,3 +504,26 @@ async def test_a_ledger_is_not_asked_for_a_period(ctx: RequestContext) -> None:
 def test_the_ledger_assembles_to_a_role_not_a_party() -> None:
     assert wizards.WIZARDS["export"].assemble({"report": "ledger-supplier"}) == "ledger supplier"
     assert wizards.WIZARDS["export"].assemble({"report": "ledger-customer"}) == "ledger customer"
+
+
+@pytest.mark.parametrize("word", ["discard", "cancel", "stop", "quit", "never mind"])
+async def test_every_way_of_saying_stop_stops(word: str, ctx: RequestContext) -> None:
+    """The bot prints "discard" on a purchase preview and "cancel" in a
+    wizard. Accepting only one made the system contradict its own
+    instructions -- "discard" mid-expense was read as an amount."""
+    await begin("expense", "", ctx)
+    result = await answer(word, ctx)
+
+    assert "Cancelled" in result.reply
+    state, _ = await state_of(ctx)
+    assert state == IDLE
+
+
+async def test_stopping_works_at_any_point_in_the_wizard(ctx: RequestContext) -> None:
+    await begin("expense", "", ctx)
+    await answer("transport", ctx)
+    result = await answer("discard", ctx)
+
+    assert "no expense was recorded" in result.reply
+    state, _ = await state_of(ctx)
+    assert state == IDLE

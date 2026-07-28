@@ -193,3 +193,28 @@ def as_text(payload: Interactive) -> str:
     if payload.footer:
         lines.extend(["", payload.footer])
     return "\n".join(lines)
+
+
+#: Every way a person says "stop this", accepted identically by every
+#: wizard, slot machine and confirmation. The bot itself prints
+#: "discard" on purchase previews and "cancel" in wizards, so accepting
+#: only one of them makes the system contradict its own instructions --
+#: which is exactly how `discard` came to be read as an amount.
+ABANDON_WORDS = frozenset(
+    {
+        "cancel",
+        "discard",
+        "stop",
+        "quit",
+        "exit",
+        "abort",
+        "nevermind",
+        "never mind",
+        "forget it",
+        "leave it",
+    }
+)
+
+
+def is_abandon(text: str) -> bool:
+    return text.strip().lower().removeprefix("slot ").strip() in ABANDON_WORDS

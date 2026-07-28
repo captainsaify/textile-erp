@@ -12,6 +12,7 @@ import decimal
 from backend.api.amounts import looks_like_amount, parse_amount
 from backend.api.command_types import CommandResult, RequestContext
 from backend.api.formatting import fmt_money
+from backend.api.interactive import is_abandon
 from backend.core.exceptions import DomainError, ValidationError
 from backend.services.session_service import (
     AWAITING_SETTLEMENT_CONFIRMATION,
@@ -195,7 +196,7 @@ async def handle_settlement_session_reply(
 ) -> CommandResult:
     lowered = text.strip().lower()
     sessions = SessionService(ctx.session_factory)
-    if lowered in {"cancel", "discard"}:
+    if is_abandon(lowered):
         await sessions.clear(ctx.user.org_id, ctx.user.id)
         return CommandResult(reply="Payment discarded.")
     if lowered not in {"confirm advance", "confirm"}:

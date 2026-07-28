@@ -16,7 +16,7 @@ import re
 
 from backend.api.command_types import CommandResult, RequestContext
 from backend.api.formatting import fmt_date, fmt_money, fmt_qty
-from backend.api.interactive import Buttons, Choice
+from backend.api.interactive import Buttons, Choice, is_abandon
 from backend.core.exceptions import (
     DomainError,
     ExactDuplicateInvoiceError,
@@ -350,7 +350,7 @@ async def handle_purchase_session_reply(
     draft = Draft.from_context(state.context)
     lowered = text.strip().lower()
 
-    if lowered in {"discard", "cancel"}:
+    if is_abandon(lowered):
         await sessions.clear(ctx.user.org_id, ctx.user.id)
         return CommandResult(reply="Draft discarded.")
 

@@ -23,7 +23,7 @@ from typing import Any
 
 from backend.api.amounts import parse_amount
 from backend.api.command_types import CommandResult, RequestContext
-from backend.api.interactive import Buttons, Choice, ListMenu, Section
+from backend.api.interactive import Buttons, Choice, ListMenu, Section, is_abandon
 from backend.core.exceptions import DomainError, ValidationError
 from backend.services.purchase_service import Draft
 from backend.services.session_service import (
@@ -66,7 +66,7 @@ async def handle_intent_reply(text: str, ctx: RequestContext, state: SessionStat
     sessions = SessionService(ctx.session_factory)
     attachment_id = str(state.context.get("attachment_id", ""))
 
-    if choice in {"cancel", "neither", "something else"}:
+    if is_abandon(choice) or choice in {"neither", "something else"}:
         await sessions.set(ctx.user.org_id, ctx.user.id, IDLE, {})
         return CommandResult(reply="No problem — I've left that photo alone.")
 
@@ -305,7 +305,7 @@ async def handle_slot_reply(text: str, ctx: RequestContext, state: SessionState)
             queue, draft, ctx, prefix="I can't skip that one — a purchase needs it."
         )
 
-    if lowered == "cancel":
+    if is_abandon(answer):
         await sessions.set(ctx.user.org_id, ctx.user.id, IDLE, {})
         return CommandResult(reply="Cancelled — nothing was saved.")
 
