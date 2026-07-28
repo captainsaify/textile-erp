@@ -725,3 +725,141 @@ async def test_label_is_the_brand_so_overlapping_codes_stay_distinguishable(
     assert sheet.cell(row=3, column=8).value == 115
     assert sheet.cell(row=3, column=9).value == 11500
     assert sheet.cell(row=5, column=9).value == 23000
+
+
+# --------------------------------------------------------------------
+# party statement and single-invoice export
+# --------------------------------------------------------------------
+
+
+def test_statement_carries_a_running_balance() -> None:
+    """A list of bills beside a list of payments doesn't answer "what do
+    I owe them"; one chronological column with a carried balance does."""
+    from backend.reports.excel.statement_template import StatementEntry, build_statement
+
+    def at(day: int, hour: int) -> datetime.datetime:
+        return datetime.datetime(2026, 7, day, hour, 30, tzinfo=datetime.UTC)
+
+    entries = [
+        StatementEntry(at=at(27, 10), kind="Purchase", reference="INV-001", debit=D("40920")),
+        StatementEntry(at=at(28, 9), kind="Payment (cash)", reference="", credit=D("10000")),
+        StatementEntry(at=at(28, 15), kind="Purchase", reference="INV-002", debit=D("5000")),
+    ]
+    sheet = build_statement(entries, party="Wagdia", role="supplier", period="July").active
+    assert sheet is not None
+
+    assert [cell.value for cell in sheet[3]] == [
+        "DATE",
+        "TIME",
+        "TYPE",
+        "REFERENCE",
+        "PURCHASED",
+        "PAID",
+        "BALANCE",
+    ]
+    # date and time, because "when" was the question
+    assert sheet.cell(row=4, column=1).value == "27-07-2026"
+    assert sheet.cell(row=4, column=2).value == "10:30"
+    # the balance is carried, not recomputed per row
+    assert [sheet.cell(row=row, column=7).value for row in (4, 5, 6)] == [40920, 30920, 35920]
+
+    total_row = len(entries) + 4
+    assert sheet.cell(row=total_row, column=5).value == 45920
+    assert sheet.cell(row=total_row, column=6).value == 10000
+    assert sheet.cell(row=total_row, column=7).value == 35920
+    assert "Owed to them" in str(sheet.cell(row=total_row + 1, column=1).value)
+
+
+def test_statement_orders_by_time_not_by_the_order_rows_were_read() -> None:
+    """Bills and payments come from different tables; if the merge kept
+    read order the balance column would be arithmetic about nothing."""
+    from backend.reports.excel.statement_template import StatementEntry, build_statement
+
+    late = datetime.datetime(2026, 7, 28, 9, 0, tzinfo=datetime.UTC)
+    early = datetime.datetime(2026, 7, 27, 9, 0, tzinfo=datetime.UTC)
+    sheet = build_statement(
+        [
+            StatementEntry(at=late, kind="Payment (cash)", reference="", credit=D("100")),
+            StatementEntry(at=early, kind="Purchase", reference="INV-1", debit=D("500")),
+        ],
+        party="Wagdia",
+        role="supplier",
+        period="July",
+    ).active
+    assert sheet is not None
+
+    assert sheet.cell(row=4, column=3).value == "Purchase"
+    assert [sheet.cell(row=row, column=7).value for row in (4, 5)] == [500, 400]
+
+
+async def test_exporting_one_invoice_ignores_the_period(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """You asked for that bill. Returning nothing because it falls
+    outside the default month would be the system being clever at your
+    expense."""
+    async with session_factory() as session, session.begin():
+        _, code = await _product_with_movement(session, ctx.user)
+        invoice_no = (
+            await session.execute(sa.text("SELECT invoice_no FROM purchase_headers LIMIT 1"))
+        ).scalar_one()
+
+    async with session_factory() as session, session.begin():
+        job = await ReportService(session).enqueue(
+            ctx.user,
+            report_type="invoice",
+            # a period that deliberately excludes the bill
+            start=datetime.date(2000, 1, 1),
+            end=datetime.date(2000, 1, 2),
+            filters={"invoice_no": invoice_no},
+        )
+        job_id = job.id
+    async with session_factory() as session:
+        report = await ReportService(session).generate(job_id)
+
+    assert report.status == "ready"
+    assert report.file_path is not None
+    sheet = load_workbook(report.file_path).active
+    assert sheet is not None
+    assert sheet.cell(row=3, column=4).value == code
+    assert invoice_no in str(sheet.cell(row=1, column=1).value)
+
+
+async def test_a_supplier_scoped_export_excludes_other_suppliers(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    async with session_factory() as session, session.begin():
+        _, mine = await _product_with_movement(session, ctx.user)
+        _, theirs = await _product_with_movement(session, ctx.user)
+        supplier_id = (
+            await session.execute(
+                sa.text(
+                    "SELECT h.supplier_id FROM purchase_headers h "
+                    "JOIN purchase_lines l ON l.purchase_header_id = h.id "
+                    "JOIN products p ON p.id = l.product_id WHERE p.code = :code"
+                ),
+                {"code": mine},
+            )
+        ).scalar_one()
+
+    async with session_factory() as session, session.begin():
+        job = await ReportService(session).enqueue(
+            ctx.user,
+            report_type="purchases",
+            start=datetime.date.today(),
+            end=datetime.date.today(),
+            filters={"supplier_id": str(supplier_id)},
+        )
+        job_id = job.id
+    async with session_factory() as session:
+        report = await ReportService(session).generate(job_id)
+
+    assert report.file_path is not None
+    workbook = load_workbook(report.file_path)
+    codes = {
+        sheet.cell(row=row, column=4).value
+        for sheet in workbook.worksheets
+        for row in range(3, sheet.max_row + 1)
+    }
+    assert mine in codes
+    assert theirs not in codes

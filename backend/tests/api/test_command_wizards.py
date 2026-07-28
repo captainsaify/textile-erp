@@ -157,8 +157,18 @@ async def test_a_finished_export_does_not_offer_to_export_again(ctx: RequestCont
 async def test_export_offers_reports_then_a_period(ctx: RequestContext) -> None:
     first = await begin("export", "", ctx)
     assert first is not None
-    assert isinstance(first.interactive, Buttons)
-    assert [c.title for c in first.interactive.choices] == ["Purchases", "Sales", "Stock"]
+    assert isinstance(first.interactive, ListMenu)
+    offered = [row.id for section in first.interactive.sections for row in section.rows]
+    assert offered == [
+        "slot purchases",
+        "slot purchases-supplier",
+        "slot invoice",
+        "slot sales",
+        "slot sales-customer",
+        "slot statement-supplier",
+        "slot statement-customer",
+        "slot stock",
+    ]
 
     second = await answer("slot purchases", ctx)
     assert isinstance(second.interactive, ListMenu)
@@ -166,6 +176,64 @@ async def test_export_offers_reports_then_a_period(ctx: RequestContext) -> None:
     # twice, which is what arrived on the phone as two "Which period?"
     assert "Which period?" in second.interactive.body
     assert second.reply == ""
+
+
+async def test_a_report_about_one_party_asks_which_party(ctx: RequestContext) -> None:
+    """The supplier question only exists for reports that are about one
+    supplier -- a queue fixed at the start couldn't express that."""
+    await begin("export", "", ctx)
+    await answer("slot statement-supplier", ctx)
+
+    _, context = await state_of(ctx)
+    assert context["queue"] == ["supplier", "period"]
+    assert "customer" not in context["queue"]
+    assert "invoice" not in context["queue"]
+
+
+async def test_one_invoice_is_never_asked_for_a_period(ctx: RequestContext) -> None:
+    """A period could only exclude the very bill that was asked for."""
+    await begin("export", "", ctx)
+    await answer("slot invoice", ctx)
+
+    _, context = await state_of(ctx)
+    assert context["queue"] == ["invoice"]
+
+
+@pytest.mark.parametrize(
+    ("filled", "expected"),
+    [
+        ({"report": "purchases", "period": "month"}, "purchases month"),
+        (
+            {"report": "purchases-supplier", "supplier": "Wagdia", "period": "year"},
+            "purchases supplier Wagdia year",
+        ),
+        (
+            {"report": "statement-customer", "customer": "Ravi Traders", "period": "month"},
+            "statement customer Ravi Traders month",
+        ),
+        ({"report": "invoice", "invoice": "INV-001"}, "invoice INV-001"),
+        ({"report": "stock", "period": "today"}, "stock today"),
+    ],
+)
+def test_the_wizard_assembles_a_command_someone_could_have_typed(
+    filled: dict[str, str], expected: str
+) -> None:
+    """The wizard hands its answers to the real handler, so what it
+    builds has to be exactly what the typed form looks like."""
+    assert wizards.WIZARDS["export"].assemble(filled) == expected
+
+
+async def test_supplier_lookup_with_no_name_asks_which_one(ctx: RequestContext) -> None:
+    result = await begin("supplier", "", ctx)
+
+    assert result is not None
+    assert "Which supplier?" in (result.reply or result.interactive.body)  # type: ignore[union-attr]
+    _, context = await state_of(ctx)
+    assert context["queue"] == ["name"]
+
+
+async def test_supplier_lookup_with_a_name_runs_straight_away(ctx: RequestContext) -> None:
+    assert await begin("supplier", "Wagdia", ctx) is None
 
 
 # --------------------------------------------------------------------

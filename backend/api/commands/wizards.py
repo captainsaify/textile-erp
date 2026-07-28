@@ -25,6 +25,7 @@ from typing import Any
 
 from backend.api.amounts import looks_like_amount, parse_amount
 from backend.api.command_types import CommandResult, RequestContext
+from backend.api.formatting import fmt_date
 from backend.api.interactive import Buttons, Choice, Interactive, ListMenu, Section
 from backend.core.exceptions import DomainError, ValidationError
 from backend.services.session_service import (
@@ -55,6 +56,10 @@ class CommandSlot:
     #: the value as it should appear in the assembled command.
     validate: Callable[[str], str] = lambda value: value.strip()
     example: str = ""
+    #: Whether this slot is needed at all, given what is already filled.
+    #: `export` asks which supplier only when the chosen report is about
+    #: one -- a queue fixed up front cannot express that.
+    applies: Callable[[dict[str, str]], bool] = lambda filled: True
 
 
 @dataclasses.dataclass(frozen=True)
@@ -191,13 +196,91 @@ async def _expense_categories(ctx: RequestContext) -> Interactive | None:
     )
 
 
-async def _report_buttons(ctx: RequestContext) -> Interactive | None:
-    return Buttons(
-        body="Which report?",
-        choices=(
-            Choice(id="slot purchases", title="Purchases"),
-            Choice(id="slot sales", title="Sales"),
-            Choice(id="slot stock", title="Stock"),
+async def _report_menu(ctx: RequestContext) -> Interactive | None:
+    """More than three things are exportable, so this is a list rather
+    than buttons (docs/19 §2: buttons cap at 3)."""
+    return ListMenu(
+        body="What would you like to export?",
+        menu_label="Pick report",
+        sections=(
+            Section(
+                title="Purchases",
+                rows=(
+                    Choice(id="slot purchases", title="All purchases", description="For a period"),
+                    Choice(
+                        id="slot purchases-supplier",
+                        title="By supplier",
+                        description="One supplier's purchases",
+                    ),
+                    Choice(id="slot invoice", title="One invoice", description="A single bill"),
+                ),
+            ),
+            Section(
+                title="Sales",
+                rows=(
+                    Choice(id="slot sales", title="All sales", description="For a period"),
+                    Choice(
+                        id="slot sales-customer",
+                        title="By customer",
+                        description="One customer's sales",
+                    ),
+                ),
+            ),
+            Section(
+                title="Statements",
+                rows=(
+                    Choice(
+                        id="slot statement-supplier",
+                        title="Supplier statement",
+                        description="Bills, payments, balance",
+                    ),
+                    Choice(
+                        id="slot statement-customer",
+                        title="Customer statement",
+                        description="Sales, receipts, balance",
+                    ),
+                ),
+            ),
+            Section(
+                title="Stock",
+                rows=(Choice(id="slot stock", title="Stock on hand", description="With value"),),
+            ),
+        ),
+    )
+
+
+async def _invoice_menu(ctx: RequestContext) -> Interactive | None:
+    """Recent invoices, so a bill can be picked rather than remembered.
+    Scoped to the chosen supplier when there is one."""
+    from backend.repositories.purchase_repository import PurchaseRepository
+
+    async with ctx.session_factory() as session:
+        recent = await PurchaseRepository(session).recent_invoices(
+            ctx.user.org_id, limit=PARTY_ROWS
+        )
+    rows = tuple(
+        Choice(
+            id=f"slot {invoice_no}",
+            title=invoice_no[:24],
+            description=f"{supplier} · {fmt_date(day)}"[:72],
+        )
+        for invoice_no, supplier, day in recent
+    )
+    if not rows:
+        return None
+    return ListMenu(
+        body="Which invoice?",
+        menu_label="Pick invoice",
+        sections=(
+            Section(title="Recent", rows=rows),
+            Section(
+                title="Or",
+                rows=(
+                    Choice(
+                        id="slot new", title="Another one", description="You'll type the number"
+                    ),
+                ),
+            ),
         ),
     )
 
@@ -259,12 +342,75 @@ def _prefill_money(args: str) -> dict[str, str]:
     return filled
 
 
+#: Menu row id -> (report type the command takes, what else it needs).
+_REPORT_CHOICES = {
+    "purchases": "purchases",
+    "purchases-supplier": "purchases",
+    "sales": "sales",
+    "sales-customer": "sales",
+    "statement-supplier": "statement",
+    "statement-customer": "statement",
+    "invoice": "invoice",
+    "stock": "stock",
+}
+
+
+def _report_choice(value: str) -> str:
+    token = value.strip().lower()
+    if token not in _REPORT_CHOICES:
+        raise ValidationError(
+            f"'{value.strip()}' isn't something I can export. "
+            "Pick one from the list, or say purchases, sales, stock, statement or invoice."
+        )
+    return token
+
+
+def _assemble_export(filled: dict[str, str]) -> str:
+    """Turn the answers into the canonical `export ...` line, so the
+    wizard runs the same command anyone could have typed."""
+    choice = filled["report"]
+    report_type = _REPORT_CHOICES[choice]
+    if report_type == "invoice":
+        return f"invoice {filled['invoice']}"
+
+    parts = [report_type]
+    if choice.endswith("-supplier"):
+        parts += ["supplier", filled["supplier"]]
+    elif choice.endswith("-customer"):
+        parts += ["customer", filled["customer"]]
+    parts.append(filled.get("period", "month"))
+    return " ".join(parts)
+
+
+def _party_lookup_wizard(role: str, choices: ChoiceBuilder) -> CommandWizard:
+    """`supplier` / `customer` with no name asks which one, rather than
+    printing a usage line for a command whose only argument is a name
+    the system already knows."""
+    return CommandWizard(
+        command=role,
+        slots=(
+            CommandSlot(
+                name="name",
+                question=f"Which {role}?",
+                choices=choices,
+                validate=_nonempty(role.capitalize()),
+                example="e.g. Wagdia",
+            ),
+        ),
+        assemble=lambda f: f["name"],
+        prefill=lambda args: {"name": args.strip()} if args.strip() else {},
+    )
+
+
 def _prefill_export(args: str) -> dict[str, str]:
+    """Only the plain forms prefill. `export purchases supplier ...` is
+    already complete enough for the command itself to parse, and
+    half-reading it here would risk asking for something already said."""
     tokens = args.split()
     filled: dict[str, str] = {}
     if tokens and tokens[0].lower() in {"purchases", "sales", "stock"}:
         filled["report"] = tokens[0].lower()
-        if len(tokens) > 1:
+        if len(tokens) > 1 and tokens[1].lower() not in {"supplier", "customer"}:
             filled["period"] = " ".join(tokens[1:])
     return filled
 
@@ -355,9 +501,31 @@ WIZARDS: dict[str, CommandWizard] = {
         slots=(
             CommandSlot(
                 name="report",
-                question="Which report?",
-                choices=_report_buttons,
-                validate=_nonempty("Report"),
+                question="What would you like to export?",
+                choices=_report_menu,
+                validate=_report_choice,
+            ),
+            CommandSlot(
+                name="supplier",
+                question="Which supplier?",
+                choices=_suppliers,
+                validate=_nonempty("Supplier"),
+                applies=lambda f: f.get("report", "").endswith("-supplier"),
+            ),
+            CommandSlot(
+                name="customer",
+                question="Which customer?",
+                choices=_customers,
+                validate=_nonempty("Customer"),
+                applies=lambda f: f.get("report", "").endswith("-customer"),
+            ),
+            CommandSlot(
+                name="invoice",
+                question="Which invoice?",
+                choices=_invoice_menu,
+                validate=_nonempty("Invoice"),
+                example="e.g. INV-001",
+                applies=lambda f: f.get("report") == "invoice",
             ),
             CommandSlot(
                 name="period",
@@ -365,11 +533,16 @@ WIZARDS: dict[str, CommandWizard] = {
                 choices=_period_menu,
                 validate=_nonempty("Period"),
                 example="e.g. month",
+                # one invoice is one bill; asking for a period would only
+                # let you exclude the very thing you asked for
+                applies=lambda f: f.get("report") != "invoice",
             ),
         ),
-        assemble=lambda f: f"{f['report']} {f['period']}",
+        assemble=_assemble_export,
         prefill=_prefill_export,
     ),
+    "supplier": _party_lookup_wizard("supplier", _suppliers),
+    "customer": _party_lookup_wizard("customer", _customers),
 }
 
 
@@ -378,11 +551,16 @@ WIZARDS: dict[str, CommandWizard] = {
 # --------------------------------------------------------------------
 
 
+def remaining(wizard: CommandWizard, filled: dict[str, str]) -> list[str]:
+    """Recomputed after every answer, not fixed at the start: an answer
+    can decide whether a later question is needed at all."""
+    return [slot.name for slot in wizard.slots if slot.name not in filled and slot.applies(filled)]
+
+
 def missing(wizard: CommandWizard, args: str) -> tuple[dict[str, str], list[str]]:
     """What the typed args already answered, and what is still needed."""
     filled = {k: v for k, v in wizard.prefill(args).items() if v}
-    queue = [slot.name for slot in wizard.slots if slot.name not in filled]
-    return filled, queue
+    return filled, remaining(wizard, filled)
 
 
 async def ask(wizard: CommandWizard, slot_name: str, ctx: RequestContext) -> CommandResult:
@@ -456,7 +634,7 @@ async def handle_reply(text: str, ctx: RequestContext, state: SessionState) -> C
     except DomainError as exc:
         return await _reask(wizard, queue, ctx, prefix=exc.message)
 
-    queue.pop(0)
+    queue = remaining(wizard, filled)
     if queue:
         await _save(sessions, ctx, wizard, filled, queue)
         return await ask(wizard, queue[0], ctx)

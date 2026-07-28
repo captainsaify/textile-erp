@@ -8,56 +8,136 @@ inside a webhook's response window.
 
 from __future__ import annotations
 
+from typing import Any
+
 from backend.api.command_types import CommandResult, RequestContext
-from backend.api.formatting import fmt_date
 from backend.api.period import parse_period
-from backend.core.exceptions import DomainError, ValidationError
+from backend.core.exceptions import DomainError, NotFoundError, ValidationError
 from backend.repositories.accounting_repository import business_today
 from backend.services.backup_service import BackupService
 from backend.services.report_service import REPORT_TYPES, ReportService
 
 EXPORT_USAGE = (
-    "Usage: export <purchases|sales|stock> [today|week|month|year|<DD-MM-YYYY> to <DD-MM-YYYY>]"
+    "Usage:\n"
+    "export purchases|sales|stock [period]\n"
+    "export purchases supplier <name> [period]\n"
+    "export sales customer <name> [period]\n"
+    "export statement supplier|customer <name> [period]\n"
+    "export invoice <no>\n"
+    "Period: today|week|month|year|<DD-MM-YYYY> to <DD-MM-YYYY>"
 )
 RESTORE_USAGE = "Usage: restore <backup-name> confirm <backup-name>"
 
 
 async def handle_export(args: str, ctx: RequestContext) -> CommandResult:
+    """`export <what> [supplier|customer <name>] [period]`, or
+    `export invoice <no>`.
+
+    The party and invoice forms exist because "what did we buy from
+    Wagdia" and "send me that bill" are the two questions actually asked
+    of an export; answering them by exporting everything and filtering in
+    Excel is not an answer.
+    """
     parts = args.split(maxsplit=1)
     if not parts:
         # Reached only by a direct caller: over WhatsApp the wizard asks
-        # for the report and the period first (docs/20 §7).
+        # for the report and everything it needs (docs/20 §7).
         return CommandResult(reply=EXPORT_USAGE)
+
     report_type = parts[0].strip().lower()
     if report_type not in REPORT_TYPES:
         return CommandResult(
             reply=f"'{report_type}' isn't a report I can export. "
             f"Try: {', '.join(REPORT_TYPES)}.\n{EXPORT_USAGE}"
         )
-    period_args = parts[1] if len(parts) > 1 else "month"
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    try:
+        filters, period_args = await _export_filters(report_type, rest, ctx)
+    except DomainError as exc:
+        return CommandResult(reply=exc.message)
 
     try:
         async with ctx.session_factory() as session, session.begin():
             today = await business_today(session, ctx.user.org_id)
-            period = parse_period(period_args, today)
+            period = parse_period(period_args or "month", today)
             job = await ReportService(session).enqueue(
                 ctx.user,
                 report_type=report_type,
                 start=period.start,
                 end=period.end,
+                filters=filters,
             )
             job_id = job.id
     except DomainError as exc:
         return CommandResult(reply=exc.message)
 
     _dispatch_report(str(job_id))
+    scope = _describe_scope(report_type, filters, period.label)
     return CommandResult(
         reply=(
-            f"⏳ Building your {report_type} export for {period.label} "
-            f"({fmt_date(period.start)} – {fmt_date(period.end)}).\n"
+            f"⏳ Building your {report_type} export {scope}.\n"
             f"Reference {str(job_id)[:8]} — I'll message you when it's ready."
         )
     )
+
+
+async def _export_filters(
+    report_type: str, rest: str, ctx: RequestContext
+) -> tuple[dict[str, Any], str]:
+    """Split `supplier Wagdia month` into a filter and a period.
+
+    An unknown party is refused by name rather than silently exported as
+    everything -- a report that quietly answers a different question than
+    the one asked is worse than no report.
+    """
+    from backend.repositories.party_repository import CustomerRepository, SupplierRepository
+
+    if report_type == "invoice":
+        if not rest:
+            raise ValidationError("Which invoice? e.g. export invoice INV-001")
+        return {"invoice_no": rest.split()[0]}, ""
+
+    tokens = rest.split()
+    if not tokens or tokens[0].lower() not in {"supplier", "customer"}:
+        if report_type == "statement":
+            raise ValidationError(
+                "A statement is for one party — say 'export statement supplier <name>' "
+                "or 'export statement customer <name>'."
+            )
+        return {}, rest
+
+    role, remainder = tokens[0].lower(), tokens[1:]
+    if not remainder:
+        raise ValidationError(f"Which {role}?")
+
+    # the period, if given, is the tail; the name is everything before it
+    period_args = ""
+    if len(remainder) > 1 and _looks_like_period(remainder[-1]):
+        period_args, remainder = remainder[-1], remainder[:-1]
+    name = " ".join(remainder)
+
+    async with ctx.session_factory() as session:
+        matches: list[Any] = (
+            await SupplierRepository(session).search(ctx.user.org_id, name, limit=1)
+            if role == "supplier"
+            else await CustomerRepository(session).search(ctx.user.org_id, name, limit=1)
+        )
+    if not matches:
+        raise NotFoundError(role, name)
+    return {f"{role}_id": str(matches[0].id)}, period_args
+
+
+def _looks_like_period(token: str) -> bool:
+    return token.lower() in {"today", "week", "month", "year"}
+
+
+def _describe_scope(report_type: str, filters: dict[str, Any], period_label: str) -> str:
+    if report_type == "invoice":
+        invoice_no = filters.get("invoice_no")
+        return f"for invoice {invoice_no}"
+    narrowed = " (one party)" if filters.get("supplier_id") or filters.get("customer_id") else ""
+    return f"for {period_label}{narrowed}"
 
 
 def _dispatch_report(job_id: str) -> None:

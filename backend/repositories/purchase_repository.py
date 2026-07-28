@@ -28,6 +28,26 @@ class PurchaseRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def recent_invoices(
+        self, org_id: uuid.UUID, *, limit: int = 9
+    ) -> list[tuple[str, str, datetime.date]]:
+        """Most recent confirmed bills, for picking one instead of
+        remembering its number. (invoice_no, supplier name, date)."""
+        from backend.models import Supplier
+
+        stmt = (
+            select(PurchaseHeader.invoice_no, Supplier.name, PurchaseHeader.invoice_date)
+            .join(Supplier, Supplier.id == PurchaseHeader.supplier_id)
+            .where(
+                PurchaseHeader.org_id == org_id,
+                PurchaseHeader.deleted_at.is_(None),
+                PurchaseHeader.status == "confirmed",
+            )
+            .order_by(PurchaseHeader.invoice_date.desc(), PurchaseHeader.created_at.desc())
+            .limit(limit)
+        )
+        return [(row[0], row[1], row[2]) for row in (await self._session.execute(stmt)).all()]
+
     async def find_potential_duplicates(
         self,
         org_id: uuid.UUID,

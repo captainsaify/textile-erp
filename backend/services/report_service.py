@@ -15,10 +15,12 @@ import datetime
 import decimal
 import uuid
 from pathlib import Path
+from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.api.formatting import fmt_date
 from backend.core.config import get_settings
 from backend.core.exceptions import NotFoundError, ValidationError
 from backend.core.logging import get_logger
@@ -37,6 +39,7 @@ from backend.reports.excel.purchase_sheet_template import (
     PurchaseSheetRow,
     build_purchase_sheet,
 )
+from backend.reports.excel.statement_template import StatementEntry, build_statement
 from backend.reports.excel.styling import (
     MONEY_FORMAT,
     QTY_FORMAT,
@@ -48,7 +51,7 @@ from backend.reports.excel.styling import (
 logger = get_logger(__name__)
 ZERO = decimal.Decimal("0")
 
-REPORT_TYPES = ("purchases", "sales", "stock")
+REPORT_TYPES = ("purchases", "sales", "stock", "statement", "invoice")
 LINK_EXPIRY_DAYS = 7
 
 
@@ -75,6 +78,7 @@ class ReportService:
         report_type: str,
         start: datetime.date,
         end: datetime.date,
+        filters: dict[str, Any] | None = None,
     ) -> ReportJob:
         if report_type not in REPORT_TYPES:
             raise ValidationError(
@@ -86,6 +90,7 @@ class ReportService:
             output_format="excel",
             period_start=start,
             period_end=end,
+            filters=filters or {},
             status="queued",
             expires_at=datetime.datetime.now(datetime.UTC)
             + datetime.timedelta(days=LINK_EXPIRY_DAYS),
@@ -150,6 +155,8 @@ class ReportService:
             "purchases": self._build_purchases,
             "sales": self._build_sales,
             "stock": self._build_stock,
+            "statement": self._build_statement,
+            "invoice": self._build_invoice,
         }
         return await builders[job.report_type](job)
 
@@ -180,8 +187,7 @@ class ReportService:
                 PurchaseHeader.org_id == job.org_id,
                 PurchaseHeader.deleted_at.is_(None),
                 PurchaseHeader.status == "confirmed",
-                PurchaseHeader.invoice_date >= job.period_start,
-                PurchaseHeader.invoice_date <= job.period_end,
+                *self._purchase_scope(job),
             )
             .order_by(PurchaseHeader.invoice_date, PurchaseHeader.invoice_no, PurchaseLine.line_no)
         )
@@ -223,6 +229,147 @@ class ReportService:
         path = self._output_path(job)
         workbook.save(path)
         return path, row_count
+
+    def _purchase_scope(self, job: ReportJob) -> list[Any]:
+        """Narrow a purchases export to one supplier or one invoice.
+
+        A single invoice ignores the period on purpose: you asked for
+        *that bill*, and silently returning nothing because it falls
+        outside the default month would be the system being clever at
+        your expense.
+        """
+        invoice_no = job.filters.get("invoice_no")
+        if invoice_no:
+            return [func.lower(PurchaseHeader.invoice_no) == str(invoice_no).lower()]
+        scope: list[Any] = [
+            PurchaseHeader.invoice_date >= job.period_start,
+            PurchaseHeader.invoice_date <= job.period_end,
+        ]
+        supplier_id = job.filters.get("supplier_id")
+        if supplier_id:
+            scope.append(PurchaseHeader.supplier_id == uuid.UUID(str(supplier_id)))
+        return scope
+
+    async def _build_invoice(self, job: ReportJob) -> tuple[Path, int]:
+        """One bill. Same sheet as the purchases export -- it is the same
+        thing, scoped to a single invoice."""
+        return await self._build_purchases(job)
+
+    async def _build_statement(self, job: ReportJob) -> tuple[Path, int]:
+        """Everything that happened with one party, in order, with a
+        running balance (docs/13_Reports.md §5).
+
+        Bills and payments come from different tables, so they are read
+        separately and merged by time -- which is also the only way the
+        balance column can be right.
+        """
+        from backend.models import BankLedger, CashLedger, Customer, SalesHeader
+
+        supplier_id = job.filters.get("supplier_id")
+        customer_id = job.filters.get("customer_id")
+        role = "supplier" if supplier_id else "customer"
+        party_id = uuid.UUID(str(supplier_id or customer_id))
+        entries: list[StatementEntry] = []
+
+        party_name = "(unknown)"
+        if role == "supplier":
+            supplier = await self._session.get(Supplier, party_id)
+            party_name = supplier.name if supplier else "(unknown)"
+            bills = (
+                await self._session.execute(
+                    select(PurchaseHeader).where(
+                        PurchaseHeader.org_id == job.org_id,
+                        PurchaseHeader.supplier_id == party_id,
+                        PurchaseHeader.deleted_at.is_(None),
+                        PurchaseHeader.status == "confirmed",
+                        PurchaseHeader.invoice_date >= job.period_start,
+                        PurchaseHeader.invoice_date <= job.period_end,
+                    )
+                )
+            ).scalars()
+            entries += [
+                StatementEntry(
+                    at=self._moment(bill.invoice_date, bill.created_at),
+                    kind="Purchase",
+                    reference=bill.invoice_no,
+                    debit=bill.grand_total,
+                )
+                for bill in bills
+            ]
+            source_type, payment_label = "supplier_payment", "Payment"
+        else:
+            customer = await self._session.get(Customer, party_id)
+            party_name = customer.name if customer else "(unknown)"
+            sales = (
+                await self._session.execute(
+                    select(SalesHeader).where(
+                        SalesHeader.org_id == job.org_id,
+                        SalesHeader.customer_id == party_id,
+                        SalesHeader.deleted_at.is_(None),
+                        SalesHeader.sale_date >= job.period_start,
+                        SalesHeader.sale_date <= job.period_end,
+                    )
+                )
+            ).scalars()
+            entries += [
+                StatementEntry(
+                    at=self._moment(sale.sale_date, sale.created_at),
+                    kind="Sale",
+                    # a sale has no invoice number of its own; its id
+                    # is what `undo`/`search` already quote back
+                    reference=str(sale.id)[:8],
+                    debit=sale.grand_total,
+                )
+                for sale in sales
+            ]
+            source_type, payment_label = "customer_payment", "Receipt"
+
+        for ledger in (CashLedger, BankLedger):
+            rows = (
+                await self._session.execute(
+                    select(ledger).where(
+                        ledger.org_id == job.org_id,
+                        ledger.source_type == source_type,
+                        ledger.source_id == party_id,
+                        ledger.entry_date >= job.period_start,
+                        ledger.entry_date <= job.period_end,
+                    )
+                )
+            ).scalars()
+            via = "cash" if ledger is CashLedger else "bank"
+            entries += [
+                StatementEntry(
+                    at=self._moment(row.entry_date, row.created_at),
+                    kind=f"{payment_label} ({via})",
+                    reference=row.notes or "",
+                    # ledger rows store money leaving as negative; a
+                    # statement reads better with the sign in the column
+                    credit=abs(row.amount),
+                )
+                for row in rows
+            ]
+
+        workbook = build_statement(
+            entries,
+            party=party_name,
+            role=role,
+            period=f"{fmt_date(job.period_start)} to {fmt_date(job.period_end)}"
+            if job.period_start and job.period_end
+            else "all time",
+        )
+        path = self._output_path(job)
+        workbook.save(path)
+        return path, len(entries)
+
+    @staticmethod
+    def _moment(day: datetime.date | None, recorded: datetime.datetime | None) -> datetime.datetime:
+        """The business date decides the order; the recorded timestamp
+        supplies the time of day and breaks ties within a date."""
+        if day is None:
+            return recorded or datetime.datetime.now(datetime.UTC)
+        if recorded is None:
+            return datetime.datetime.combine(day, datetime.time.min, tzinfo=datetime.UTC)
+        return datetime.datetime.combine(day, recorded.timetz())
 
     async def _build_sales(self, job: ReportJob) -> tuple[Path, int]:
         from openpyxl import Workbook

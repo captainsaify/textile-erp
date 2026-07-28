@@ -137,6 +137,12 @@ class ReportJob(UUIDPkMixin, OrgScopedMixin, Base):
     )
 
     report_type: Mapped[str] = mapped_column(String, nullable=False)
+    #: What the export was narrowed to -- {"supplier_id": ...},
+    #: {"customer_id": ...} or {"invoice_no": ...}. JSONB because the
+    #: things a report can be narrowed by grow with the reports.
+    filters: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
     output_format: Mapped[str] = mapped_column(String, nullable=False, server_default="excel")
     period_start: Mapped[datetime.date | None]
     period_end: Mapped[datetime.date | None]
