@@ -386,10 +386,19 @@ def missing(wizard: CommandWizard, args: str) -> tuple[dict[str, str], list[str]
 
 
 async def ask(wizard: CommandWizard, slot_name: str, ctx: RequestContext) -> CommandResult:
+    """The question goes in exactly one place.
+
+    An interactive message carries its own body, so also sending that
+    text asks twice -- which is how "Which period?" arrived as two
+    consecutive messages. When there are choices, the menu says it;
+    otherwise the plain text does.
+    """
     slot = next(s for s in wizard.slots if s.name == slot_name)
     body = f"{slot.question}\n{slot.example}".strip()
     interactive = await slot.choices(ctx) if slot.choices is not None else None
-    return CommandResult(reply=body, interactive=interactive)
+    if interactive is None:
+        return CommandResult(reply=body)
+    return CommandResult(reply="", interactive=dataclasses.replace(interactive, body=body))
 
 
 async def start(wizard: CommandWizard, args: str, ctx: RequestContext) -> CommandResult | None:
@@ -479,4 +488,4 @@ async def _reask(
     wizard: CommandWizard, queue: list[str], ctx: RequestContext, *, prefix: str
 ) -> CommandResult:
     question = await ask(wizard, queue[0], ctx)
-    return dataclasses.replace(question, reply=f"{prefix}\n{question.reply}")
+    return dataclasses.replace(question, reply=f"{prefix}\n{question.reply}".strip())

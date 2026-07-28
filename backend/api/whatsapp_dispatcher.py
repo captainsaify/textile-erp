@@ -173,7 +173,8 @@ class WhatsAppDispatcher:
         message's body caps at 1024 chars, which several replies exceed
         (docs/19 §5), and truncating would hide the very line items the
         user is being asked to check."""
-        await self._client.send_text(to_number, result.reply)
+        if result.reply.strip():
+            await self._client.send_text(to_number, result.reply)
         if result.interactive is None:
             return
         sender = getattr(self._client, "send_interactive", None)

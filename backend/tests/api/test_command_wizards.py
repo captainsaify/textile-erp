@@ -139,6 +139,19 @@ async def test_the_payment_method_is_offered_as_buttons(ctx: RequestContext) -> 
     assert result is not None
     assert isinstance(result.interactive, Buttons)
     assert [c.title for c in result.interactive.choices] == ["Cash", "Bank"]
+    assert result.reply == "", "the buttons already ask; text as well asks twice"
+
+
+async def test_a_finished_export_does_not_offer_to_export_again(ctx: RequestContext) -> None:
+    """Every completed export used to come back with a period menu whose
+    rows re-ran it -- so a finished job looked unfinished, and tapping
+    queued a second one."""
+    from backend.api.commands.ops_commands import handle_export
+
+    result = await handle_export("purchases year", ctx)
+
+    assert "Building your purchases export" in result.reply
+    assert result.interactive is None
 
 
 async def test_export_offers_reports_then_a_period(ctx: RequestContext) -> None:
@@ -149,7 +162,10 @@ async def test_export_offers_reports_then_a_period(ctx: RequestContext) -> None:
 
     second = await answer("slot purchases", ctx)
     assert isinstance(second.interactive, ListMenu)
-    assert "Which period?" in second.reply
+    # the menu carries the question; sending it as text as well asked
+    # twice, which is what arrived on the phone as two "Which period?"
+    assert "Which period?" in second.interactive.body
+    assert second.reply == ""
 
 
 # --------------------------------------------------------------------

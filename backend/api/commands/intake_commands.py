@@ -226,7 +226,7 @@ async def ask_slot(slot_name: str, ctx: RequestContext, *, draft: Draft) -> Comm
         rows = tuple(Choice(id=f"slot {s.name}", title=s.name[:24]) for s in recent[:SUPPLIER_ROWS])
         if rows:
             return CommandResult(
-                reply=f"{body}\n{spec.example}",
+                reply="",
                 interactive=ListMenu(
                     body=body,
                     menu_label="Pick supplier",
@@ -248,7 +248,7 @@ async def ask_slot(slot_name: str, ctx: RequestContext, *, draft: Draft) -> Comm
 
     if slot_name == "invoice_date":
         return CommandResult(
-            reply=f"{body}\n{spec.example}",
+            reply="",
             interactive=Buttons(
                 body=body,
                 choices=(
@@ -282,7 +282,7 @@ async def begin_slots(draft: Draft, queue: list[str], ctx: RequestContext) -> Co
     )
     question = await ask_slot(queue[0], ctx, draft=draft)
     return dataclasses.replace(
-        question, reply=f"{summarise_gaps(draft, queue)}\n\n{question.reply}"
+        question, reply=f"{summarise_gaps(draft, queue)}\n\n{question.reply}".strip()
     )
 
 
@@ -393,4 +393,4 @@ async def _reask(
     queue: list[str], draft: Draft, ctx: RequestContext, *, prefix: str
 ) -> CommandResult:
     question = await ask_slot(queue[0], ctx, draft=draft)
-    return dataclasses.replace(question, reply=f"{prefix}\n{question.reply}")
+    return dataclasses.replace(question, reply=f"{prefix}\n{question.reply}".strip())
