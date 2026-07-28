@@ -187,6 +187,7 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.STAFF,
         handler=handle_stock,
         help_text="Stock summary, one product's detail, or low/negative lists.",
+        shareable=True,
     ),
     "search": CommandSpec(
         name="search",
@@ -194,6 +195,7 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.STAFF,
         handler=handle_search,
         help_text="Fuzzy-search products, suppliers and customers.",
+        shareable=True,
     ),
     "expense": CommandSpec(
         name="expense",
@@ -215,6 +217,7 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.STAFF,
         handler=handle_cash,
         help_text="Cash balance and recent entries.",
+        shareable=True,
     ),
     "bank": CommandSpec(
         name="bank",
@@ -222,6 +225,7 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.STAFF,
         handler=handle_bank,
         help_text="Bank balance and recent entries.",
+        shareable=True,
     ),
     "capital": CommandSpec(
         name="capital",
@@ -257,6 +261,7 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.STAFF,
         handler=handle_dashboard,
         help_text="Cash, bank, inventory, today's activity, profit, receivables/payables.",
+        shareable=True,
     ),
     "summary": CommandSpec(
         name="summary",
@@ -264,6 +269,7 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.STAFF,
         handler=handle_summary,
         help_text="Condensed sales/purchases/expenses/profit digest for a period.",
+        shareable=True,
     ),
     "profit": CommandSpec(
         name="profit",
@@ -271,6 +277,7 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.OWNER,
         handler=handle_profit,
         help_text="Profit & loss for a period.",
+        shareable=True,
     ),
     "supplier": CommandSpec(
         name="supplier",
@@ -278,6 +285,7 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.STAFF,
         handler=handle_supplier,
         help_text="Outstanding payable, aging, and recent purchases for a supplier.",
+        shareable=True,
     ),
     "customer": CommandSpec(
         name="customer",
@@ -285,6 +293,7 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.STAFF,
         handler=handle_customer,
         help_text="Outstanding receivable, aging, and recent sales for a customer.",
+        shareable=True,
     ),
     "ledger": CommandSpec(
         name="ledger",
@@ -292,6 +301,7 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.STAFF,
         handler=handle_ledger,
         help_text="Statement of invoices/payments for a party, or movement history for a product.",
+        shareable=True,
     ),
     "edit": CommandSpec(
         name="edit",

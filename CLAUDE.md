@@ -196,6 +196,7 @@ trigger, threshold, and message copy in the linked doc.
 | [docs/19_InteractiveMessages.md](docs/19_InteractiveMessages.md) | WhatsApp buttons and list menus, and their limits |
 | [docs/20_ConversationalIntake.md](docs/20_ConversationalIntake.md) | Photo → intent → gap analysis → one question at a time |
 | [docs/21_WebDashboard.md](docs/21_WebDashboard.md) | Read-heavy dashboard, chart forms, deployment on the domain |
+| [docs/22_GroupBroadcast.md](docs/22_GroupBroadcast.md) | Posting to the partners' group via an outbound-only relay |
 
 ## Coding Standards (summary — full detail in [`docs/17_CodingStandards.md`](docs/17_CodingStandards.md))
 

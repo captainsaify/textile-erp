@@ -251,6 +251,7 @@ class WhatsAppDispatcher:
 
         from backend.api.commands import wizards
         from backend.api.commands.intake_commands import handle_intent_reply, handle_slot_reply
+        from backend.api.commands.share_commands import handle_share_reply
         from backend.services.session_service import (
             AWAITING_COMMAND_SLOT,
             AWAITING_INTENT,
@@ -258,6 +259,7 @@ class WhatsAppDispatcher:
             AWAITING_RETURN_REFUND_CHOICE,
             AWAITING_SALE_CONFIRMATION,
             AWAITING_SETTLEMENT_CONFIRMATION,
+            AWAITING_SHARE_CHOICE,
             AWAITING_SLOT,
             IDLE,
             SessionService,
@@ -277,6 +279,8 @@ class WhatsAppDispatcher:
             return await handle_slot_reply(text, context, session_state)
         if session_state.state == AWAITING_COMMAND_SLOT and spec is None:
             return await wizards.handle_reply(text, context, session_state)
+        if session_state.state == AWAITING_SHARE_CHOICE and spec is None:
+            return await handle_share_reply(text, context, session_state)
 
         if spec is None:
             # not a command: an active session interprets it as a reply in
@@ -333,7 +337,26 @@ class WhatsAppDispatcher:
             org_id=str(user.org_id),
             message_id=message.message_id,
         )
-        return await self._run(spec, args, context)
+        result = await self._run(spec, args, context)
+        return await self._offer_sharing(spec, result, context)
+
+    @staticmethod
+    async def _offer_sharing(
+        spec: CommandSpec, result: CommandResult, context: RequestContext
+    ) -> CommandResult:
+        """A result worth sharing ends with one button
+        (docs/22_GroupBroadcast.md §4). The text is parked in the session
+        so tapping it shares what was shown, not a fresh query."""
+        from backend.api.commands import share_commands
+        from backend.services.group_relay import get_group_relay
+
+        if not spec.shareable or result.interactive is not None:
+            return result
+        if not get_group_relay().enabled:
+            # no relay configured: don't offer something that can't work
+            return result
+        await share_commands.remember(result, context)
+        return dataclasses.replace(result, interactive=share_commands.offer(result))
 
     @staticmethod
     async def _run(spec: CommandSpec, args: str, context: RequestContext) -> CommandResult:

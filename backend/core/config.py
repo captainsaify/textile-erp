@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     bridge_url: str = "http://localhost:3001"
     bridge_shared_secret: str = ""
 
+    #: The partners' group chat, reached through the whatsapp-web.js
+    #: relay because Meta's Cloud API cannot post to a group at all.
+    #: Empty means group sharing is simply off -- the ERP is unaffected.
+    group_chat_id: str = ""
+    group_broadcast_enabled: bool = False
+
     anthropic_api_key: str = ""
 
     backup_encryption_key: str = ""

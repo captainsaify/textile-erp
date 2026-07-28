@@ -324,3 +324,64 @@ def report_generation(job_id: str) -> dict[str, Any]:
         return {"job_id": job_id, "status": record.status}
 
     return run_async(_run())
+
+
+@celery_app.task(
+    name="group_broadcast_sweep",
+    soft_time_limit=60,
+    time_limit=90,
+    max_retries=0,
+)
+def group_broadcast_sweep() -> dict[str, Any]:
+    """Post recent activity to the partners' group
+    (docs/22_GroupBroadcast.md).
+
+    A sweep rather than a hook on each command: it reads only committed
+    audit rows, so it can never announce a transaction that rolled back,
+    and nobody's WhatsApp reply ever waits on the unofficial relay.
+
+    No retries. A missed sweep is picked up by the next one because the
+    watermark only advances over what was actually delivered; retrying
+    would risk posting the same activity twice, which is worse than
+    posting it a minute late.
+    """
+
+    async def _run() -> dict[str, Any]:
+        from backend.models import Organization
+        from backend.services.broadcast_service import (
+            pending_lines,
+            read_watermark,
+            write_watermark,
+        )
+        from backend.services.group_relay import get_group_relay
+
+        relay = get_group_relay()
+        if not relay.enabled:
+            return {"skipped": "group broadcasting is off"}
+
+        factory = get_session_factory()
+        async with factory() as session:
+            org_ids = list((await session.execute(select(Organization.id))).scalars())
+
+        sent = 0
+        for org_id in org_ids:
+            async with factory() as session:
+                since = await read_watermark(session, org_id)
+                lines, newest = await pending_lines(session, org_id, since)
+            if not lines or newest is None:
+                continue
+
+            body = "\n".join(lines)
+            result = await relay.send_text(body)
+            if not result.delivered:
+                # the watermark stays put, so the next sweep retries the
+                # same activity rather than losing it
+                logger.warning("group_broadcast_undelivered", reason=result.reason)
+                continue
+
+            async with factory() as session, session.begin():
+                await write_watermark(session, org_id, newest)
+            sent += len(lines)
+        return {"lines": sent}
+
+    return run_async(_run())

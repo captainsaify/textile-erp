@@ -50,6 +50,14 @@ class CommandResult:
     #: to reach a second person. Delivered after the reply, best-effort:
     #: a partner being unreachable must not undo a committed transaction.
     notifications: tuple[Notification, ...] = ()
+    #: Set on read commands whose answer is worth sharing. The
+    #: dispatcher turns it into a "Share to group" button and keeps the
+    #: text around, so tapping it posts what was actually shown rather
+    #: than re-running the query and possibly showing something else
+    #: (docs/22_GroupBroadcast.md §4).
+    shareable: bool = False
+    #: A file to share instead of the text, when there is one.
+    share_file: str | None = None
     #: Optional buttons/list menu accompanying `reply`
     #: (docs/19_InteractiveMessages.md). `reply` is always sent and is
     #: always sufficient on its own -- a transport that can't render
@@ -67,3 +75,8 @@ class CommandSpec:
     min_role: UserRole
     handler: CommandHandler
     help_text: str
+    #: Whether this command's answer is one the other partner would want
+    #: too. Declared here rather than set by each handler: it is a
+    #: property of the command, and eight handlers each setting a flag
+    #: is eight places for it to drift (docs/22_GroupBroadcast.md §4).
+    shareable: bool = False

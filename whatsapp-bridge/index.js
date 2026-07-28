@@ -360,12 +360,26 @@ app.post('/send', async (req, res) => {
   if (!secretMatches(req.get('X-Bridge-Secret'))) {
     return res.status(401).json({ error: 'unauthorized' });
   }
-  const { chat_id: chatId, body } = req.body || {};
-  if (!chatId || !body) {
-    return res.status(400).json({ error: 'chat_id and body are required' });
+  const { chat_id: chatId, body, media } = req.body || {};
+  if (!chatId || (!body && !media)) {
+    return res.status(400).json({ error: 'chat_id and body (or media) are required' });
   }
   try {
     const target = toChatId(chatId);
+    // A file goes with its caption in one message: two messages would
+    // arrive out of order in a busy group and separate the report from
+    // what it is.
+    if (media && media.data) {
+      const { MessageMedia } = require('whatsapp-web.js');
+      const attachment = new MessageMedia(
+        media.mime_type || 'application/octet-stream',
+        media.data,
+        media.filename || 'report',
+      );
+      markPendingSend(target, body || media.filename || '');
+      await client.sendMessage(target, attachment, { caption: body || undefined });
+      return res.json({ status: 'sent' });
+    }
     markPendingSend(target, body);
     await client.sendMessage(target, body);
     return res.json({ status: 'sent' });

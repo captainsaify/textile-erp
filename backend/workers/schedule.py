@@ -13,6 +13,12 @@ from typing import Any
 from celery.schedules import crontab
 
 CELERYBEAT_SCHEDULE: dict[str, dict[str, Any]] = {
+    # Every minute: near-real-time for a group chat without hooking the
+    # relay into any command's critical path (docs/22 §3).
+    "group-broadcast-sweep": {
+        "task": "group_broadcast_sweep",
+        "schedule": crontab(minute="*"),
+    },
     "low-stock-scan": {
         "task": "low_stock_scan",
         "schedule": crontab(hour="6", minute="0"),

@@ -36,6 +36,8 @@ AWAITING_SLOT = "awaiting_slot"
 #: docs/20 §7 -- a command invoked with missing arguments asks for them
 #: instead of printing usage
 AWAITING_COMMAND_SLOT = "awaiting_command_slot"
+#: docs/22_GroupBroadcast.md §4 -- "share this with the group?"
+AWAITING_SHARE_CHOICE = "awaiting_share_choice"
 
 
 @dataclasses.dataclass(frozen=True)
