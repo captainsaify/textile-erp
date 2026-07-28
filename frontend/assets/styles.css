@@ -41,6 +41,17 @@
   box-sizing: border-box;
 }
 
+/* The `hidden` attribute hides an element by way of the user-agent's
+ * `display: none`, which ANY author `display` declaration outranks.
+ * `.login` and `.page` both set `display: grid`, so hiding them did
+ * nothing: signing in worked, fetched the data and swapped the panels,
+ * and the login screen stayed on top of it all -- indistinguishable
+ * from a login that failed. This is the fix, and it has to stay above
+ * every layout rule that sets `display`. */
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   background: var(--surface);
