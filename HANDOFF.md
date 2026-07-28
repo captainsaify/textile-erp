@@ -373,6 +373,18 @@ kept because the user wants WhatsApp *group* support eventually, which
 Meta doesn't offer. Don't delete it, don't try to revive it without
 checking upstream first.
 
+**nginx must re-resolve `api`, and now does.** An `upstream api { server
+api:8000; }` block makes nginx resolve the name once at startup and
+cache that IP for its whole life. Every `docker compose build && up -d`
+gives the api container a new address, so nginx kept posting to the old
+one and Meta received 502s -- the bot went silent with every container
+healthy and nothing wrong in the app logs. `docker/nginx.conf` now uses
+Docker's embedded resolver (`127.0.0.11 valid=10s`) with the address in
+a variable, which forces per-request resolution. Verified by
+force-recreating `api` and confirming the public webhook still answered
+without touching nginx. Don't reintroduce an `upstream` block for the
+keepalive; it costs a silent outage per deploy.
+
 **Quick tunnels are gone; don't bring them back.** The bot used to be
 exposed with `cloudflared tunnel --url http://localhost:8000`. That
 hostname is random and dies with the process, and the resulting failure
