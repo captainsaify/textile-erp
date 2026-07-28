@@ -16,6 +16,7 @@ import decimal
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import sqlalchemy as sa
@@ -281,36 +282,46 @@ def test_purchase_sheet_uses_the_partners_column_order() -> None:
         "LABEL",
         "KG",
         "T.KG",
+        # a purchase sheet is a bill, so it carries what was paid
+        "RATE",
+        "AMOUNT",
     ]
 
 
-def test_purchase_sheet_writes_headers_rows_and_a_totals_row(tmp_path: object) -> None:
+def _row(serial: int, code: str, pieces: str, total: str, label: str = "Wagdia") -> Any:
     from backend.reports.excel.purchase_sheet_template import PurchaseSheetRow
 
-    rows = [
-        PurchaseSheetRow(
-            serial=1,
-            pieces=D("10"),
-            description="Men Zipper Jacket",
-            code="35A",
-            label="Wagdia",
-            weight_per_unit=D("80"),
-            total_weight=D("800"),
-        ),
-        PurchaseSheetRow(
-            serial=2,
-            pieces=D("19"),
-            description="Corduroy Pant",
-            code="VVP-1",
-            label="Wagdia",
-            weight_per_unit=D("80"),
-            total_weight=D("1520"),
-        ),
-    ]
-    workbook = build_purchase_sheet(rows)
+    return PurchaseSheetRow(
+        serial=serial,
+        pieces=D(pieces),
+        description="Men Zipper Jacket",
+        code=code,
+        label=label,
+        weight_per_unit=D("80"),
+        total_weight=D(total),
+        rate=D("115"),
+        amount=D(total) * D("115"),
+    )
+
+
+def test_purchase_sheet_writes_headers_rows_and_a_totals_row() -> None:
+    from backend.reports.excel.purchase_sheet_template import PurchaseBill
+
+    rows = [_row(1, "35A", "10", "800"), _row(2, "VVP-1", "19", "1520")]
+    bill = PurchaseBill(
+        supplier="Wagdia Textiles",
+        invoice_no="INV-001",
+        invoice_date=datetime.date(2026, 7, 27),
+        rows=rows,
+    )
+    workbook = build_purchase_sheet([bill])
     sheet = workbook.active
     assert sheet is not None
-    assert [cell.value for cell in sheet[1]] == [
+
+    # row 1 identifies the bill; the table starts at row 2
+    assert "INV-001" in str(sheet.cell(row=1, column=1).value)
+    assert "Wagdia Textiles" in str(sheet.cell(row=1, column=1).value)
+    assert [cell.value for cell in sheet[2]] == [
         "S.NO",
         "QTY",
         "DESCRIPTION",
@@ -318,15 +329,64 @@ def test_purchase_sheet_writes_headers_rows_and_a_totals_row(tmp_path: object) -
         "LABEL",
         "KG",
         "T.KG",
+        "RATE",
+        "AMOUNT",
     ]
-    assert sheet.cell(row=2, column=4).value == "35A"
-    # totals row: QTY and T.KG summed, KG (a per-unit rate) left blank
-    total_row = len(rows) + 2
+    assert sheet.cell(row=3, column=4).value == "35A"
+    assert sheet.cell(row=3, column=8).value == 115
+
+    # totals: QTY, T.KG and AMOUNT summed; KG and RATE are per-unit
+    # figures, so summing them would mean nothing
+    total_row = len(rows) + 3
     assert sheet.cell(row=total_row, column=1).value == "TOTAL"
     assert sheet.cell(row=total_row, column=2).value == 29
     assert sheet.cell(row=total_row, column=7).value == 2320
+    assert sheet.cell(row=total_row, column=9).value == 2320 * 115
     assert sheet.cell(row=total_row, column=6).value == ""
+    assert sheet.cell(row=total_row, column=8).value == ""
     assert sheet.cell(row=total_row, column=1).font.bold
+
+
+def test_each_bill_gets_its_own_sheet_and_its_own_total() -> None:
+    """A purchase sheet is a bill. One flat sheet across three invoices
+    produced a single TOTAL that summed unrelated bills."""
+    from backend.reports.excel.purchase_sheet_template import PurchaseBill
+
+    workbook = build_purchase_sheet(
+        [
+            PurchaseBill(
+                "Wagdia", "INV-001", datetime.date(2026, 7, 27), [_row(1, "35A", "10", "800")]
+            ),
+            PurchaseBill(
+                "Shree", "INV-002", datetime.date(2026, 7, 28), [_row(1, "22D", "19", "1520")]
+            ),
+        ]
+    )
+
+    assert workbook.sheetnames == ["INV-001 Wagdia", "INV-002 Shree"]
+    assert workbook["INV-001 Wagdia"].cell(row=4, column=7).value == 800
+    assert workbook["INV-002 Shree"].cell(row=4, column=7).value == 1520
+
+
+def test_two_suppliers_using_the_same_invoice_number_get_separate_sheets() -> None:
+    """Excel silently overwrites a duplicate sheet name; an invoice "001"
+    is not rare enough to risk that."""
+    from backend.reports.excel.purchase_sheet_template import PurchaseBill
+
+    workbook = build_purchase_sheet(
+        [
+            PurchaseBill("Wagdia", "001", None, [_row(1, "35A", "10", "800")]),
+            PurchaseBill("Wagdia", "001", None, [_row(1, "22D", "19", "1520")]),
+        ]
+    )
+
+    assert len(workbook.sheetnames) == 2
+    assert workbook.sheetnames[1].endswith("(2)")
+
+
+def test_an_empty_period_still_produces_an_openable_file() -> None:
+    workbook = build_purchase_sheet([])
+    assert len(workbook.sheetnames) == 1
 
 
 async def test_export_enqueues_a_job_and_reports_the_reference(
@@ -372,7 +432,8 @@ async def test_generated_purchases_workbook_contains_the_data(
         workbook = load_workbook(stored.file_path)
     sheet = workbook.active
     assert sheet is not None
-    assert sheet.cell(row=2, column=4).value == code
+    # row 1 names the bill, row 2 is the header, so data starts at row 3
+    assert sheet.cell(row=3, column=4).value == code
 
 
 async def test_a_failed_report_records_the_error_on_the_job(
@@ -574,3 +635,93 @@ async def test_a_transport_without_files_falls_back_to_text(tmp_path: Path) -> N
 
     assert len(client.texts) == 1
     assert "26 row(s)" in client.texts[0][1]
+
+
+async def test_label_is_the_brand_so_overlapping_codes_stay_distinguishable(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """LABEL used to carry the supplier, which implied codes were unique
+    per supplier. They are not: a code is unique within a *brand*
+    (`products_org_code_active_uq`), and one supplier ships many brands.
+    The export has to show which brand a code belongs to, or two
+    legitimately different products read as the same row.
+    """
+    from backend.models import Brand
+
+    suffix = uuid.uuid4().hex[:6]
+    shared_code = f"VVP{suffix.upper()}"
+
+    async with session_factory() as session, session.begin():
+        supplier = Supplier(org_id=ORG, name=f"One Supplier {suffix}", created_by=ctx.user.id)
+        brands = [Brand(org_id=ORG, name=f"{name}{suffix}") for name in ("Alpha", "Beta")]
+        session.add_all([supplier, *brands])
+        await session.flush()
+
+        header = PurchaseHeader(
+            org_id=ORG,
+            supplier_id=supplier.id,
+            warehouse_id=WAREHOUSE,
+            invoice_no=f"BR-{suffix}",
+            invoice_date=datetime.date.today(),
+            grand_total=D("0"),
+            status="confirmed",
+            created_by=ctx.user.id,
+        )
+        session.add(header)
+        await session.flush()
+
+        # the same code under two brands: legal, and the reason LABEL matters
+        for line_no, brand in enumerate(brands, start=1):
+            product = Product(
+                org_id=ORG,
+                product_type_id=uuid.UUID(SEEDED_TEXTILE_TYPE_ID),
+                code=shared_code,
+                brand_id=brand.id,
+                description=f"{brand.name} Velvet Pant",
+                unit_id=uuid.UUID(SEEDED_KG_UNIT_ID),
+                created_by=ctx.user.id,
+            )
+            session.add(product)
+            await session.flush()
+            session.add(
+                PurchaseLine(
+                    org_id=ORG,
+                    purchase_header_id=header.id,
+                    line_no=line_no,
+                    product_id=product.id,
+                    description=product.description,
+                    qty=D("100"),
+                    weight_kg=D("10"),
+                    total_weight_kg=D("100"),
+                    rate=D("115"),
+                    line_total=D("11500"),
+                    landed_cost_per_unit=D("115"),
+                )
+            )
+
+    async with session_factory() as session, session.begin():
+        job = await ReportService(session).enqueue(
+            ctx.user,
+            report_type="purchases",
+            start=datetime.date.today(),
+            end=datetime.date.today(),
+        )
+        job_id = job.id
+    async with session_factory() as session:
+        report = await ReportService(session).generate(job_id)
+
+    assert report.status == "ready"
+    assert report.file_path is not None
+    sheet = load_workbook(report.file_path).active
+    assert sheet is not None
+
+    codes = [sheet.cell(row=row, column=4).value for row in (3, 4)]
+    labels = [sheet.cell(row=row, column=5).value for row in (3, 4)]
+    assert codes == [shared_code, shared_code]
+    assert sorted(labels) == [f"Alpha{suffix}", f"Beta{suffix}"], "the brand tells the rows apart"
+    assert f"One Supplier {suffix}" not in labels
+
+    # and the bill carries what was paid
+    assert sheet.cell(row=3, column=8).value == 115
+    assert sheet.cell(row=3, column=9).value == 11500
+    assert sheet.cell(row=5, column=9).value == 23000

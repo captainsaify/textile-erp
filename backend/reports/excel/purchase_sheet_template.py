@@ -2,13 +2,23 @@
 
 Column layout matches the partners' existing sheet convention:
 
-    S.NO | QTY | DESCRIPTION | CODE | LABEL | KG | T.KG
+    S.NO | QTY | DESCRIPTION | CODE | LABEL | KG | T.KG | RATE | AMOUNT
 
-with a bold totals row summing QTY, KG and T.KG. That layout is the
+with a bold totals row summing QTY, T.KG and AMOUNT. That layout is the
 *textile product type's* export template, not a hard-coded format --
 `COLUMNS` below is the same config-over-code shape `ocr_templates`
 uses, so a second product type ships its own column list without this
 module's structure changing (docs/00_ProjectVision.md §4).
+
+**LABEL is the brand, not the supplier.** One supplier ships many
+brands, and a product code is only unique *within* a brand -- which is
+what `products_org_code_active_uq` enforces. A supplier name in that
+column implied the wrong thing about which codes may collide.
+
+**One worksheet per bill.** A purchase sheet *is* a bill, and its TOTAL
+is that invoice's total. Flattening several bills into one sheet gave a
+single total that summed unrelated invoices and belonged to none of
+them.
 
 The point of matching the legacy layout is that what comes out looks
 like the sheet the partners already read. A golden-file test pins it so
@@ -18,12 +28,21 @@ an openpyxl upgrade or a refactor can't quietly drift it.
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import decimal
+import re
 from typing import Any
 
 from openpyxl import Workbook
+from openpyxl.worksheet.worksheet import Worksheet
 
-from backend.reports.excel.styling import QTY_FORMAT, autosize, write_header, write_row
+from backend.reports.excel.styling import (
+    MONEY_FORMAT,
+    QTY_FORMAT,
+    autosize,
+    write_header,
+    write_row,
+)
 
 ZERO = decimal.Decimal("0")
 
@@ -36,12 +55,21 @@ COLUMNS: list[tuple[str, str]] = [
     ("LABEL", "label"),
     ("KG", "weight_per_unit"),
     ("T.KG", "total_weight"),
+    ("RATE", "rate"),
+    ("AMOUNT", "amount"),
 ]
 
-#: 1-indexed columns that carry a quantity and get summed in the totals
-#: row -- QTY, KG, T.KG.
+#: 1-indexed columns carrying a quantity, shown to 3dp.
 NUMERIC_COLUMNS = (2, 6, 7)
-TOTALLED_COLUMNS = (2, 7)  # KG is a per-unit rate; summing it is meaningless
+#: Money columns, in the same en-IN grouping every WhatsApp reply uses.
+MONEY_COLUMNS = (8, 9)
+#: Summed in the totals row. KG and RATE are per-unit figures; adding
+#: them up would produce a number that means nothing.
+TOTALLED_COLUMNS = (2, 7, 9)
+
+#: Excel forbids these characters in a sheet name and truncates at 31.
+_SHEET_NAME_BANNED = re.compile(r"[\[\]:*?/\\]")
+_SHEET_NAME_LIMIT = 31
 
 
 @dataclasses.dataclass(frozen=True)
@@ -50,22 +78,76 @@ class PurchaseSheetRow:
     pieces: decimal.Decimal | None
     description: str
     code: str
+    #: The brand. Blank when the purchase never recorded one -- an empty
+    #: cell reads as "not recorded", which is true, and cannot later be
+    #: mistaken for a brand actually called that.
     label: str
     weight_per_unit: decimal.Decimal | None
     total_weight: decimal.Decimal | None
+    rate: decimal.Decimal | None = None
+    amount: decimal.Decimal | None = None
 
 
-def build_purchase_sheet(rows: list[PurchaseSheetRow], *, title: str = "Purchases") -> Workbook:
+@dataclasses.dataclass(frozen=True)
+class PurchaseBill:
+    """One invoice -- what the partners call one purchase sheet."""
+
+    supplier: str
+    invoice_no: str
+    invoice_date: datetime.date | None
+    rows: list[PurchaseSheetRow]
+
+    def caption(self) -> str:
+        date = self.invoice_date.strftime("%d-%m-%Y") if self.invoice_date else "date not recorded"
+        return f"Supplier: {self.supplier}    Invoice: {self.invoice_no}    Date: {date}"
+
+
+def sheet_name(bill: PurchaseBill, taken: set[str]) -> str:
+    """Sheet names are short, restricted, and must be unique -- two
+    suppliers can easily both issue an "001". A collision gets a suffix
+    rather than silently overwriting the earlier tab."""
+    base = _SHEET_NAME_BANNED.sub("-", f"{bill.invoice_no} {bill.supplier}").strip()
+    base = (base or "Purchases")[:_SHEET_NAME_LIMIT]
+    candidate, suffix = base, 2
+    while candidate.lower() in taken:
+        tail = f" ({suffix})"
+        candidate = base[: _SHEET_NAME_LIMIT - len(tail)] + tail
+        suffix += 1
+    taken.add(candidate.lower())
+    return candidate
+
+
+def build_purchase_sheet(bills: list[PurchaseBill], *, title: str = "Purchases") -> Workbook:
+    """One workbook, one worksheet per bill.
+
+    An export covering no purchases still produces a readable empty
+    sheet -- a workbook with zero sheets is a file Excel refuses to open.
+    """
     workbook = Workbook()
-    sheet = workbook.active
-    assert sheet is not None
-    sheet.title = title[:31]  # Excel's hard limit on sheet names
+    default = workbook.active
+    assert default is not None
+    workbook.remove(default)
 
+    if not bills:
+        bills = [PurchaseBill(supplier="", invoice_no=title, invoice_date=None, rows=[])]
+
+    taken: set[str] = set()
+    for bill in bills:
+        _write_bill(workbook.create_sheet(sheet_name(bill, taken)), bill)
+    return workbook
+
+
+def _write_bill(sheet: Worksheet, bill: PurchaseBill) -> None:
     headers = [header for header, _ in COLUMNS]
-    write_header(sheet, headers)
+    # The bill's identity sits above its table: with one tab per invoice,
+    # a truncated tab name alone can't tell two of them apart.
+    write_row(sheet, 1, [bill.caption(), *[""] * (len(COLUMNS) - 1)], bold=True)
+    write_header(sheet, headers, row=2)
 
-    formats = {index: QTY_FORMAT for index in NUMERIC_COLUMNS}
-    for offset, row in enumerate(rows, start=2):
+    formats: dict[int, str] = {index: QTY_FORMAT for index in NUMERIC_COLUMNS}
+    formats.update({index: MONEY_FORMAT for index in MONEY_COLUMNS})
+
+    for offset, row in enumerate(bill.rows, start=3):
         write_row(
             sheet,
             offset,
@@ -73,17 +155,16 @@ def build_purchase_sheet(rows: list[PurchaseSheetRow], *, title: str = "Purchase
             formats=formats,
         )
 
-    total_row = len(rows) + 2
+    total_row = len(bill.rows) + 3
     totals: list[Any] = [""] * len(COLUMNS)
     totals[0] = "TOTAL"
     for index in TOTALLED_COLUMNS:
         attribute = COLUMNS[index - 1][1]
-        totals[index - 1] = sum((getattr(row, attribute) or ZERO for row in rows), ZERO)
+        totals[index - 1] = float(sum((getattr(row, attribute) or ZERO for row in bill.rows), ZERO))
     write_row(sheet, total_row, totals, formats=formats, bold=True)
 
     autosize(sheet, headers)
-    sheet.freeze_panes = "A2"
-    return workbook
+    sheet.freeze_panes = "A3"
 
 
 def _cell_value(row: PurchaseSheetRow, attribute: str) -> Any:

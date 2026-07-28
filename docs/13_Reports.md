@@ -59,6 +59,15 @@ are all computed from the org's local calendar, never UTC-day
 boundaries, so a report run at 11:50 PM never mislabels the next few
 minutes' transactions into the wrong day.
 
+> **Corrected 2026-07-28 from real output.** LABEL carries the
+> **brand**, not the supplier: a supplier ships many brands, and a
+> product code is unique only *within* a brand
+> (`products_org_code_active_uq`). A supplier name there implied codes
+> could not collide under one supplier, which is the opposite of the
+> rule. The sheet also carries RATE and AMOUNT — it is a bill — and
+> **one worksheet per invoice**, because a single TOTAL across several
+> bills belongs to none of them.
+
 ## 5. Excel export format compatibility {#excel-export-format-compatibility}
 
 The **Purchases export** must byte-for-byte match the partners'

@@ -32,7 +32,11 @@ from backend.models import (
     Supplier,
     User,
 )
-from backend.reports.excel.purchase_sheet_template import PurchaseSheetRow, build_purchase_sheet
+from backend.reports.excel.purchase_sheet_template import (
+    PurchaseBill,
+    PurchaseSheetRow,
+    build_purchase_sheet,
+)
 from backend.reports.excel.styling import (
     MONEY_FORMAT,
     QTY_FORMAT,
@@ -150,15 +154,28 @@ class ReportService:
         return await builders[job.report_type](job)
 
     async def _build_purchases(self, job: ReportJob) -> tuple[Path, int]:
-        """The legacy-format export (docs/13_Reports.md §5). `pieces` and
-        `weight_per_unit` come from the purchase line as captured from
-        the original sheet, so a re-export reads like the sheet that was
-        photographed."""
+        """The legacy-format export (docs/13_Reports.md §5), one sheet per
+        bill. `pieces` and `weight_per_unit` come from the purchase line
+        as captured from the original sheet, so a re-export reads like the
+        sheet that was photographed.
+
+        LABEL is the *brand*: a supplier ships many brands, and a code is
+        only unique within one. The line's own product brand wins over the
+        header's, because that is what the code was resolved against.
+        """
+        from sqlalchemy.orm import aliased
+
+        from backend.models import Brand
+
+        product_brand = aliased(Brand)
+        header_brand = aliased(Brand)
         stmt = (
-            select(PurchaseLine, PurchaseHeader, Product, Supplier)
+            select(PurchaseLine, PurchaseHeader, Product, Supplier, product_brand, header_brand)
             .join(PurchaseHeader, PurchaseHeader.id == PurchaseLine.purchase_header_id)
             .join(Product, Product.id == PurchaseLine.product_id)
             .join(Supplier, Supplier.id == PurchaseHeader.supplier_id)
+            .outerjoin(product_brand, product_brand.id == Product.brand_id)
+            .outerjoin(header_brand, header_brand.id == PurchaseHeader.brand_id)
             .where(
                 PurchaseHeader.org_id == job.org_id,
                 PurchaseHeader.deleted_at.is_(None),
@@ -168,24 +185,44 @@ class ReportService:
             )
             .order_by(PurchaseHeader.invoice_date, PurchaseHeader.invoice_no, PurchaseLine.line_no)
         )
-        rows = [
-            PurchaseSheetRow(
-                serial=index,
-                pieces=line.weight_kg and (line.qty / line.weight_kg) or None,
-                description=line.description or product.description,
-                code=product.code,
-                label=supplier.name,
-                weight_per_unit=line.weight_kg,
-                total_weight=line.total_weight_kg or line.qty,
+
+        bills: dict[uuid.UUID, PurchaseBill] = {}
+        row_count = 0
+        for line, header, product, supplier, line_brand, invoice_brand in (
+            await self._session.execute(stmt)
+        ).all():
+            bill = bills.get(header.id)
+            if bill is None:
+                bill = PurchaseBill(
+                    supplier=supplier.name,
+                    invoice_no=header.invoice_no,
+                    invoice_date=header.invoice_date,
+                    rows=[],
+                )
+                bills[header.id] = bill
+            brand = line_brand or invoice_brand
+            total_weight = line.total_weight_kg or line.qty
+            bill.rows.append(
+                PurchaseSheetRow(
+                    serial=len(bill.rows) + 1,
+                    pieces=line.weight_kg and (line.qty / line.weight_kg) or None,
+                    description=line.description or product.description,
+                    code=product.code,
+                    label=brand.name if brand else "",
+                    weight_per_unit=line.weight_kg,
+                    total_weight=total_weight,
+                    rate=line.rate,
+                    # the rate is per costing unit, so the line's value is
+                    # rate x T.KG -- the same basis the payable was raised on
+                    amount=(line.rate * total_weight) if total_weight is not None else None,
+                )
             )
-            for index, (line, _header, product, supplier) in enumerate(
-                (await self._session.execute(stmt)).all(), start=1
-            )
-        ]
-        workbook = build_purchase_sheet(rows, title="Purchases")
+            row_count += 1
+
+        workbook = build_purchase_sheet(list(bills.values()), title="Purchases")
         path = self._output_path(job)
         workbook.save(path)
-        return path, len(rows)
+        return path, row_count
 
     async def _build_sales(self, job: ReportJob) -> tuple[Path, int]:
         from openpyxl import Workbook
