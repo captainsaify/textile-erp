@@ -2,6 +2,11 @@
 
 ## 1. Target topology
 
+> **How this is actually deployed today:** on a Mac behind a home
+> connection, reached through a Cloudflare Tunnel rather than an open
+> port 443 — see [§11](#tunnel). The topology below is otherwise
+> accurate; only the edge differs.
+
 Single production host (a modest VPS is sufficient at current scale —
 see [01_Architecture.md §11](01_Architecture.md#11-performance--scalability-considerations)),
 everything orchestrated via Docker Compose:
@@ -395,3 +400,111 @@ infrastructure change layered on top of the existing service
 boundaries, not a rewrite, because those boundaries (stateless API,
 stateless workers, `org_id`-scoped data model) were chosen with this
 path in mind from day one.
+
+## 11. Public hostname: Cloudflare Tunnel {#tunnel}
+
+§1's topology assumes a VPS with a public IP, port 443 open, and certbot
+renewing a certificate. **That is not how this is actually deployed.**
+The stack runs on the partners' own Mac behind a home connection, which
+has no inbound reachability at all — so the public entrance is a
+**Cloudflare Tunnel**: an outbound connection from `cloudflared` to
+Cloudflare's edge, which then forwards requests back down it. No port
+forwarding, no public IP, and no certbot — the edge presents the
+certificate.
+
+### Why this replaced quick tunnels
+
+The bot was previously exposed with `cloudflared tunnel --url
+http://localhost:8000`. That is a **quick tunnel**: it invents a random
+`*.trycloudflare.com` hostname, and that hostname is gone the moment the
+process restarts. Meta's callback URL then points at nothing.
+
+The failure is silent in the worst way. Cloudflare returns error 1016 to
+the caller, Meta's dashboard keeps showing the webhook as subscribed,
+nothing is logged on this side because nothing arrives, and the first
+sign of trouble is a partner saying the bot has stopped replying. This
+happened twice in July 2026. A dead quick tunnel was also found running
+while writing this section — the process was alive, with zero edge
+connections.
+
+A **named tunnel** fixes the cause: the hostname is a DNS record in the
+zone, permanent across restarts, reboots and `cloudflared` upgrades. The
+callback URL is configured once and never touched again.
+
+### What is in the repo
+
+| Path | Role |
+|---|---|
+| `docker/cloudflared/config.yml` | ingress rules — tracked, holds no secret |
+| `docker/cloudflared/credentials.json` | the tunnel's identity — **gitignored**, written by `tunnel create` |
+| `cloudflared` service in `docker-compose.yml` | runs it, restarts it, health-checks it |
+| `docker/tunnel-check.sh` | says which step of the setup is incomplete |
+
+Traffic goes to `https://nginx:443`, not straight to `api:8000`, so a
+tunnelled request takes exactly the same path as any other public one —
+the webhook rate limit, the security headers and the access log all
+still apply. Verification of nginx's certificate is off (`noTLSVerify`)
+because that hop is inside the compose network and the certificate is
+self-signed; the encryption that matters is the tunnel's own.
+
+### One-time setup
+
+Steps 1–2 need a browser and the domain registrar; the rest is local.
+
+1. **Move the zone to Cloudflare.** Add `example.com` at
+   dash.cloudflare.com (Free plan is sufficient), then replace the
+   nameservers at the registrar with the two Cloudflare gives you.
+   Cloudflare shows the zone as Active when it has taken effect.
+   *A tunnel hostname cannot exist on a zone Cloudflare doesn't host —
+   the DNS record points at `<UUID>.cfargotunnel.com`, which only
+   resolves inside Cloudflare.*
+
+2. **Authorise this machine.** `cloudflared tunnel login`, then pick the
+   zone in the browser. Writes `~/.cloudflared/cert.pem`.
+
+3. **Create the tunnel and install its credentials.**
+
+   ```bash
+   cloudflared tunnel create textile-erp        # prints a UUID
+   cp ~/.cloudflared/<UUID>.json docker/cloudflared/credentials.json
+   ```
+
+4. **Point the hostname at it.**
+
+   ```bash
+   cloudflared tunnel route dns textile-erp erp.example.com
+   ```
+
+5. **Wire it into the stack.** In `.env`:
+
+   ```
+   CLOUDFLARE_TUNNEL_ID=<the UUID from step 3>
+   COMPOSE_PROFILES=tunnel
+   ```
+
+   The service sits behind a compose profile so that a machine without
+   credentials starts the stack cleanly instead of crash-looping a
+   tunnel it cannot run. Setting `COMPOSE_PROFILES` in `.env` means
+   plain `docker compose up -d` includes it from then on.
+
+6. **Start it, and check every link:**
+
+   ```bash
+   docker compose up -d cloudflared
+   ./docker/tunnel-check.sh
+   ```
+
+7. **Repoint Meta, once.** Callback URL
+   `https://erp.example.com/webhooks/whatsapp`, verify token
+   from `WHATSAPP_VERIFY_TOKEN`. Then kill any leftover quick tunnel:
+   `pkill -f 'cloudflared tunnel --url'`.
+
+### Monitoring
+
+The compose healthcheck calls cloudflared's own `/ready`, which reports
+the number of **established edge connections** — not merely whether the
+process is alive. That distinction is the whole point: the dead tunnel
+found in July was a live process with zero connections. `docker compose
+ps` shows it as unhealthy, and `restart: unless-stopped` plus
+cloudflared's own reconnect loop covers the ordinary cases.
+

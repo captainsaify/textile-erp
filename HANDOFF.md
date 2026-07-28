@@ -85,9 +85,11 @@ exist for the remaining work:
 - [`docs/21_WebDashboard.md`](docs/21_WebDashboard.md) — dashboard
   forms, no-build stack, deployment on `example.com`.
 
-**Domain confirmed:** `example.com`. Pointing the Meta
-webhook at it would end the cloudflared quick-tunnel fragility (§5)
-permanently — worth doing regardless of the dashboard.
+**Domain confirmed:** `example.com`. The permanent webhook on
+`erp.example.com` is **built** (`docs/16_Deployment.md` §11)
+and awaits one manual step the code can't do: moving the zone's
+nameservers from GoDaddy to Cloudflare. `./docker/tunnel-check.sh`
+reports exactly how far along that is.
 
 **Deployment: built and verified running.** Colima provides the
 container runtime (`colima start`; Docker Desktop was avoided — it needs
@@ -368,6 +370,19 @@ the working transport** (`WHATSAPP_TRANSPORT=meta`). The bridge code is
 kept because the user wants WhatsApp *group* support eventually, which
 Meta doesn't offer. Don't delete it, don't try to revive it without
 checking upstream first.
+
+**Quick tunnels are gone; don't bring them back.** The bot used to be
+exposed with `cloudflared tunnel --url http://localhost:8000`. That
+hostname is random and dies with the process, and the resulting failure
+is invisible: Cloudflare answers 1016, Meta still shows the webhook
+subscribed, nothing is logged here because nothing arrives, and you find
+out when a partner says the bot stopped replying. It happened twice, and
+a *third* dead tunnel — live process, zero edge connections — was found
+still running while replacing it. It is now a **named tunnel** on
+`erp.example.com`: config in `docker/cloudflared/`, a
+compose service behind the `tunnel` profile, and
+`./docker/tunnel-check.sh` to tell you which link is broken.
+Full setup and rationale: `docs/16_Deployment.md` §11.
 
 **Meta webhook gotcha that cost hours:** a WABA can be subscribed to
 Meta's own `WA DevX Webhook Events 1P App` instead of your app, and

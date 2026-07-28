@@ -21,3 +21,8 @@ whatsapp-bridge/.wwebjs_cache/
 # TLS material for nginx -- real certs in production, self-signed
 # locally. Never in git either way.
 docker/certs/
+
+# Cloudflare Tunnel credentials -- written by `cloudflared tunnel
+# create`. This one file is the tunnel's identity: anyone holding it can
+# serve traffic on the hostname. The config.yml beside it is tracked.
+docker/cloudflared/credentials.json

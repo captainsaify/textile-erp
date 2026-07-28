@@ -1,0 +1,37 @@
+# Named Cloudflare Tunnel -- docs/16_Deployment.md §11.
+#
+# This replaces `cloudflared tunnel --url http://localhost:8000`. A quick
+# tunnel gets a random *.trycloudflare.com hostname that changes on every
+# restart and expires on its own; Meta's webhook then points at a dead
+# URL and the bot goes silent with no error anywhere (HANDOFF.md §5, seen
+# twice in July 2026). A named tunnel keeps one hostname forever, so the
+# callback URL is configured once.
+#
+# Which tunnel this is comes from CLOUDFLARE_TUNNEL_ID in .env, passed on
+# the command line by docker-compose.yml -- this file is tracked in git
+# and holds no secret. The secret is credentials.json beside it, written
+# by `cloudflared tunnel create` and gitignored.
+
+credentials-file: /etc/cloudflared/credentials.json
+
+# Cloudflare's edge terminates TLS for the public request; this hop is
+# inside the compose network, so nginx's self-signed certificate is not
+# something to verify -- and there is no path from outside to nginx that
+# skips the tunnel.
+originRequest:
+  noTLSVerify: true
+  connectTimeout: 10s
+  # Meta retries a webhook it believes failed, so a slow-but-succeeding
+  # request must not be cut off and redelivered as a duplicate. Matches
+  # proxy_read_timeout in nginx.conf.
+  httpHostHeader: erp.example.com
+
+ingress:
+  # Through nginx rather than straight to api:8000, so tunnelled traffic
+  # takes exactly the same path as any other public request: the webhook
+  # rate limit, the security headers and the access log all still apply.
+  - hostname: erp.example.com
+    service: https://nginx:443
+
+  # Anything arriving for another hostname is not ours to serve.
+  - service: http_status:404

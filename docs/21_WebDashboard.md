@@ -177,23 +177,25 @@ Everything needed already exists in `docker/nginx.conf`:
   plain HTTP so certificate renewal works
 - `/api/` and `/webhooks/` proxied to the app
 
-Three steps to go live:
+**Superseded, in the good way:** this section originally called for an
+`A` record and certbot. Neither is needed, because the host has no
+public IP to point an `A` record at — the stack sits behind a home
+connection. `erp.example.com` is served through a **named
+Cloudflare Tunnel**, built and documented in
+[16_Deployment.md §11](16_Deployment.md#tunnel). Cloudflare's edge
+presents the certificate, so there is no renewal to schedule.
 
-1. **DNS** — an `A` record for `erp.` pointing at the server.
-2. **Certificate** — certbot in webroot mode against the ACME path
-   already configured, writing to `docker/certs/`, which is gitignored.
-   Renewal is a cron job; the nginx container reloads on new certs.
-3. **A `frontend` service, or none.** Since there is no build step, the
-   simplest correct answer is **no service at all**: mount `frontend/`
-   into the nginx container as static root. The compose file's
-   illustrative frontend service in [16_Deployment.md](16_Deployment.md)
-   assumed a build; without one it is not needed.
+What that leaves for the dashboard itself is one decision:
 
-The webhook URL stays where it is. Moving it to this domain would end
-the cloudflared quick-tunnel fragility documented in
-[HANDOFF.md](../HANDOFF.md) — a stable public hostname means Meta's
-callback never needs repointing again. **That is arguably a bigger win
-than the dashboard itself**, and it comes free with step 1.
+**A `frontend` service, or none.** Since there is no build step, the
+simplest correct answer is **no service at all**: mount `frontend/`
+into the nginx container as static root. The compose file's
+illustrative frontend service in [16_Deployment.md](16_Deployment.md)
+assumed a build; without one it is not needed.
+
+The stable hostname was expected to be a side benefit of the dashboard;
+in the end it was worth doing on its own, and was done first. Meta's
+callback URL now never needs repointing again.
 
 ## 8. Security {#security}
 

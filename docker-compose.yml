@@ -41,6 +41,40 @@ services:
       api:
         condition: service_healthy
 
+  # The public entrance. `docker compose up -d` skips it until .env sets
+  # COMPOSE_PROFILES=tunnel, so the stack still starts cleanly on a
+  # machine that has no tunnel credentials (docs/16_Deployment.md §11).
+  cloudflared:
+    image: cloudflare/cloudflared:2026.7.3
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    command:
+      - tunnel
+      # the image is pinned above; self-updating would silently change
+      # the running binary out from under that pin
+      - --no-autoupdate
+      - --config
+      - /etc/cloudflared/config.yml
+      - --metrics
+      - 0.0.0.0:2000
+      - run
+      - ${CLOUDFLARE_TUNNEL_ID}
+    volumes:
+      - ./docker/cloudflared:/etc/cloudflared:ro
+    depends_on:
+      nginx:
+        condition: service_started
+    healthcheck:
+      # /ready reports the number of established edge connections, so
+      # this goes unhealthy when the tunnel is up but connected to
+      # nothing -- exactly the state a dead quick tunnel was in, and the
+      # state that used to be invisible until someone messaged the bot.
+      test: ["CMD", "cloudflared", "tunnel", "--metrics", "0.0.0.0:2000", "ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
   api:
     build:
       context: .
