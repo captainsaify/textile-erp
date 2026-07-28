@@ -267,6 +267,26 @@ class OcrService:
             return None
         return value if value > ZERO else None
 
+    @staticmethod
+    def _dominant_label(rows: list[ExtractedRow]) -> str:
+        """The brand the sheet is for.
+
+        The most common non-empty label rather than the first: one
+        misread cell should not rename the whole purchase. A sheet
+        genuinely mixing brands is out of scope -- the preview shows what
+        was picked and it can be corrected before confirming.
+        """
+        from collections import Counter
+
+        labels = Counter(
+            field.text.strip()
+            for row in rows
+            if (field := row.fields.get("label")) is not None and field.text.strip()
+        )
+        if not labels:
+            return ""
+        return labels.most_common(1)[0][0]
+
     @classmethod
     def _is_noise_row(cls, row: ExtractedRow) -> bool:
         """Real sheets bracket their items with a repeated header band and
@@ -440,13 +460,20 @@ class OcrService:
         if skipped:
             logger.info("ocr_noise_rows_skipped", count=skipped)
 
+        # The sheet's own LABEL column is the brand (docs/07_OCR.md §5b).
+        # It used to be discarded as noise, which left every product
+        # brandless -- and a code is only unique *within* a brand, so
+        # throwing the brand away is throwing away the thing that tells
+        # two identical codes apart.
+        sheet_label = self._dominant_label(sheet.extraction.rows)
+
         draft = Draft(
             supplier_id=supplier_id,
             supplier_name=supplier_name,
             invoice_no=invoice_no,
             invoice_date=invoice_date or datetime.date.today(),
             brand_id=brand_id,
-            brand_name=None,
+            brand_name=sheet_label or None,
             lines=lines,
             freight=ZERO,
             other_charges=ZERO,

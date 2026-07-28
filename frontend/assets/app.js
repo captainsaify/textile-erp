@@ -216,6 +216,7 @@
       ? stockRows.filter(
           (row) =>
             row.code.toLowerCase().includes(needle) ||
+            (row.brand || "").toLowerCase().includes(needle) ||
             (row.description || "").toLowerCase().includes(needle),
         )
       : stockRows;
@@ -224,6 +225,13 @@
       table(
         [
           { label: "Code", key: "code" },
+          {
+            // a code is unique only within a brand, so a stock list
+            // without this column can't tell two of them apart
+            label: "Brand",
+            render: (row) =>
+              row.brand ? text(row.brand) : `<span class="muted">not set</span>`,
+          },
           { label: "Description", key: "description" },
           { label: "On hand", numeric: true, render: (row) => text(row.qty_on_hand) },
           { label: "Avg cost", numeric: true, render: (row) => money(row.avg_cost) },
@@ -428,19 +436,128 @@
       );
     }
 
-    const audit = await optional("/audit?limit=40");
-    $("audit").replaceChildren(
-      table(
-        [
-          { label: "When", render: (row) => text(row.created_at || "").slice(0, 16) },
-          { label: "Action", key: "action" },
-          { label: "Entity", key: "entity_type" },
-          { label: "By", render: (row) => text(row.actor || row.actor_user_id || "") },
-          { label: "Channel", key: "channel" },
-        ],
-        rowsOf(audit),
+    await loadAudit();
+  }
+
+  /* The audit trail with the payload every mutation already writes.
+   * Twenty rows reading "product.created" answer nothing; the same rows
+   * naming the product, and expanding to the exact before/after, are a
+   * record of what happened. */
+  let auditRows = [];
+
+  const IDENTIFYING = ["code", "name", "invoice_no", "reference", "amount", "via", "description"];
+
+  function summarise(entry) {
+    const state = entry.after_state || entry.before_state || {};
+    // Data-driven rather than a branch per action: payload fields are
+    // named consistently across services, so a new action gets a
+    // readable summary without anyone editing this.
+    const keys = [
+      ...IDENTIFYING.filter((key) => state[key] !== undefined && state[key] !== null),
+      ...Object.keys(state).filter(
+        (key) => !IDENTIFYING.includes(key) && typeof state[key] !== "object",
       ),
+    ].slice(0, 3);
+    if (!keys.length) return `<span class="muted">no detail recorded</span>`;
+    return keys
+      .map((key) => {
+        const raw = state[key];
+        const shown = key === "amount" || key === "grand_total" ? Money.format(raw) : text(raw);
+        return `<b>${shown}</b>`;
+      })
+      .join(" · ");
+  }
+
+  function changeGrid(entry) {
+    const before = entry.before_state || {};
+    const after = entry.after_state || {};
+    const fields = [...new Set([...Object.keys(before), ...Object.keys(after)])];
+    if (!fields.length) {
+      return `<p class="muted">Nothing was recorded beyond the action itself.</p>`;
+    }
+
+    const show = (value) =>
+      value === undefined || value === null
+        ? "—"
+        : typeof value === "object"
+          ? JSON.stringify(value)
+          : text(value);
+
+    const rows = fields
+      .map((field) => {
+        const was = before[field];
+        const now = after[field];
+        const changed = JSON.stringify(was) !== JSON.stringify(now);
+        return `<div class="field">${field}</div>
+          <div class="${was !== undefined && changed ? "was" : "muted"}">${show(was)}</div>
+          <div class="${changed ? "changed" : ""}">${show(now)}</div>`;
+      })
+      .join("");
+
+    return `<div class="change-grid">
+        <div class="head">Field</div><div class="head">Before</div><div class="head">After</div>
+        ${rows}
+      </div>`;
+  }
+
+  function renderAudit() {
+    const action = $("audit-action").value;
+    const needle = $("audit-search").value.trim().toLowerCase();
+    const rows = auditRows.filter((entry) => {
+      if (action && entry.action !== action) return false;
+      if (!needle) return true;
+      return JSON.stringify(entry).toLowerCase().includes(needle);
+    });
+
+    const built = table(
+      [
+        { label: "When", render: (row) => text(row.created_at).slice(0, 16).replace("T", " ") },
+        { label: "Action", key: "action" },
+        { label: "What", render: summarise },
+        { label: "By", render: (row) => text(row.actor || "") },
+        { label: "Channel", key: "channel" },
+      ],
+      rows,
     );
+
+    built.querySelectorAll("tbody tr").forEach((tr, index) => {
+      const cell = tr.cells[2];
+      if (!cell) return;
+      cell.classList.add("summary");
+      tr.classList.add("clickable");
+      tr.addEventListener("click", () => {
+        const next = tr.nextElementSibling;
+        if (next && next.classList.contains("detail-row")) {
+          next.remove();
+          return;
+        }
+        const detail = tr.parentElement.insertRow(tr.rowIndex);
+        detail.className = "detail-row";
+        const td = detail.insertCell();
+        td.colSpan = 5;
+        td.innerHTML = changeGrid(rows[index]);
+      });
+    });
+
+    $("audit").replaceChildren(built);
+  }
+
+  async function loadAudit() {
+    const [entries, actions] = await Promise.all([
+      optional("/audit?limit=200"),
+      optional("/audit/actions"),
+    ]);
+    auditRows = rowsOf(entries);
+
+    const select = $("audit-action");
+    const chosen = select.value;
+    select.replaceChildren(new Option("All actions", ""));
+    rowsOf(actions).forEach((row) => {
+      select.append(new Option(`${row.action} (${row.count})`, row.action));
+    });
+    select.value = chosen;
+
+    renderAudit();
   }
 
   // ------------------------------------------------------ navigation
@@ -470,6 +587,8 @@
   $("login-form").addEventListener("submit", signIn);
   $("signout").addEventListener("click", signOut);
   $("stock-search").addEventListener("input", (event) => renderStock(event.target.value));
+  $("audit-action").addEventListener("change", renderAudit);
+  $("audit-search").addEventListener("input", renderAudit);
   document.querySelectorAll("#nav button").forEach((button) => {
     button.addEventListener("click", () => showPage(button.dataset.page));
   });

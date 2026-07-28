@@ -18,6 +18,7 @@ from sqlalchemy import select
 from backend.api.amounts import money_str, qty_str
 from backend.api.deps import CurrentUser, OwnerUser, Paging, Session
 from backend.models import (
+    Brand,
     Customer,
     Inventory,
     Product,
@@ -94,16 +95,21 @@ async def list_inventory(
             ]
         }
 
+    # The brand comes along because a code is only unique *within* a
+    # brand (`products_org_code_active_uq`). Two rows reading "VVP" with
+    # no brand beside them are indistinguishable in a stock list, which
+    # is the one place you most need to tell them apart.
     records = (
         await session.execute(
-            select(Product, Inventory)
+            select(Product, Inventory, Brand.name)
             .join(Inventory, Inventory.product_id == Product.id)
+            .outerjoin(Brand, Brand.id == Product.brand_id)
             .where(
                 Product.org_id == user.org_id,
                 Product.deleted_at.is_(None),
                 Product.is_active.is_(True),
             )
-            .order_by(Product.code)
+            .order_by(Brand.name.nulls_last(), Product.code)
         )
     ).all()
     totals = await repo.totals(user.org_id)
@@ -113,12 +119,13 @@ async def list_inventory(
         "items": [
             {
                 "code": product.code,
+                "brand": brand,
                 "description": product.description,
                 "qty_on_hand": qty_str(inv.qty_on_hand),
                 "avg_cost": money_str(inv.weighted_avg_cost),
                 "value": money_str(inv.qty_on_hand * inv.weighted_avg_cost),
             }
-            for product, inv in records
+            for product, inv, brand in records
         ],
     }
 

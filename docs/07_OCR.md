@@ -172,6 +172,22 @@ what a photo *is* before reading it: a mis-sent picture must not spend a
 vision call. Setting `ANTHROPIC_API_KEY` empty cleanly reverts to local
 OCR with no other change.
 
+**The LABEL column is the brand.** §5's template lists `label` among
+`ignore_columns`, and the vision prompt used to name it as noise ("a
+repeated label like FOLD or TOP"). That was wrong: the partners' sheets
+write the brand there, and a product code is unique only *within* a
+brand, so discarding it discards the one thing that tells two identical
+codes apart. It is now captured per row, and the draft's brand is the
+most common label on the sheet — most common rather than first, so a
+single misread cell can't rename a whole purchase.
+
+**Sales notes have their own schema** (`SALE_SCHEMA`,
+`read_sale_sheet`). A purchase sheet carries weights where a sales note
+carries a rate and a written line total; one prompt covering both is how
+a rate ends up in a weight column. The model is told never to compute a
+total — it copies what is written, and the qty × rate cross-check
+surfaces any disagreement instead of resolving it.
+
 **Confidence.** Vision does not return per-cell confidence the way
 PaddleOCR does, so §7's composite score is not computed for it. The
 cross-checks that catch real errors — qty × kg disagreeing with the

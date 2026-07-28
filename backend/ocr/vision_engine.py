@@ -77,8 +77,22 @@ SHEET_SCHEMA: dict[str, Any] = {
                             "Total weight (the T.KG column) as a number string; '' if absent."
                         ),
                     },
+                    "label": {
+                        "type": "string",
+                        "description": (
+                            "The LABEL / BRAND column -- the brand this item is sold under "
+                            "(e.g. TOP, FOLD). Often repeats down the sheet. '' if absent."
+                        ),
+                    },
                 },
-                "required": ["code", "description", "qty", "weight_per_unit", "total_weight"],
+                "required": [
+                    "code",
+                    "description",
+                    "qty",
+                    "weight_per_unit",
+                    "total_weight",
+                    "label",
+                ],
                 "additionalProperties": False,
             },
         },
@@ -108,8 +122,9 @@ row, a totals/grand-total row, or a running subtotal.
 digits, and punctuation such as hyphens. Do not expand abbreviations, \
 correct spelling, or tidy wording.
 - Do not map a value into the wrong column. Some sheets carry columns \
-with no header, or a repeated label like FOLD or TOP; those are not the \
-code and not the description.
+with no header. A column of repeating words like FOLD or TOP is the \
+LABEL/brand column -- put it in `label`, never in `code` or \
+`description`.
 - Numbers must be plain number strings with no units, thousands \
 separators, or currency symbols.
 - If a cell is genuinely unreadable, put '?' rather than guessing. A \
@@ -126,10 +141,12 @@ Columns you may see, under varying headers:
 - a code column (Code, Item Code, Design)
 - a per-unit weight column (KG, Wt, Weight)
 - a total weight column (T.KG, Total KG, Total Weight)
+- a label/brand column (Label, Brand, Mark) -- often the same word on \
+every row
 
-Ignore serial-number columns, label columns, and any column whose values \
-repeat identically down the sheet. Also capture the supplier, invoice \
-number and invoice date if they appear anywhere on the sheet."""
+Ignore serial-number columns and running totals. Also capture the \
+supplier, invoice number and invoice date if they appear anywhere on \
+the sheet."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -193,6 +210,93 @@ class VisionSheetReader:
             self._client = anthropic.Anthropic(api_key=self._api_key)
         return self._client
 
+    def read_sale_sheet(self, data: bytes, mime_type: str = "image/jpeg") -> VisionSaleSheet:
+        """A sales note, read with the same engine as a purchase sheet.
+
+        Separate schema and prompt, not a separate pipeline: a sales note
+        carries a rate and a line total where a purchase sheet carries
+        weights, and asking one prompt to cover both is how a rate ends
+        up in a weight column.
+        """
+        payload = self._call(data, mime_type, SALE_SCHEMA, SALE_SYSTEM_PROMPT, SALE_USER_PROMPT)
+        rows = [
+            VisionSaleRow(
+                code=str(row.get("code", "")).strip(),
+                description=str(row.get("description", "")).strip(),
+                qty=str(row.get("qty", "")).strip(),
+                rate=str(row.get("rate", "")).strip(),
+                line_total=str(row.get("line_total", "")).strip(),
+            )
+            for row in payload.get("rows", [])
+        ]
+        logger.info("vision_sale_sheet_read", rows=len(rows), model=self._model)
+        return VisionSaleSheet(
+            rows=rows,
+            customer_name=str(payload.get("customer_name", "")),
+            sale_date=str(payload.get("sale_date", "")),
+            declared_total=str(payload.get("declared_total", "")),
+            unreadable_note=str(payload.get("unreadable_note", "")),
+            model=self._model,
+        )
+
+    def _call(
+        self,
+        data: bytes,
+        mime_type: str,
+        schema: dict[str, Any],
+        system_prompt: str,
+        user_prompt: str,
+    ) -> dict[str, Any]:
+        """One request/response path for both sheet kinds."""
+        import json
+
+        if not self.available():
+            raise VisionUnavailableError("no ANTHROPIC_API_KEY configured")
+        block = self._content_block(data, mime_type)
+        try:
+            response = self._get_client().messages.create(
+                model=self._model,
+                max_tokens=16000,
+                system=system_prompt,
+                output_config={"format": {"type": "json_schema", "schema": schema}},
+                messages=[
+                    {"role": "user", "content": [block, {"type": "text", "text": user_prompt}]}
+                ],
+            )
+        except Exception as exc:  # noqa: BLE001 -- any failure falls back
+            raise VisionUnavailableError(str(exc)) from exc
+        if getattr(response, "stop_reason", None) == "refusal":
+            raise VisionUnavailableError("model declined to transcribe this image")
+        text = next((b.text for b in response.content if b.type == "text"), "")
+        if not text:
+            raise VisionUnavailableError("empty response")
+        try:
+            parsed: dict[str, Any] = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise VisionUnavailableError(f"unparseable response: {exc}") from exc
+        return parsed
+
+    @staticmethod
+    def _content_block(data: bytes, mime_type: str) -> dict[str, Any]:
+        if mime_type == "application/pdf":
+            return {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": base64.standard_b64encode(data).decode(),
+                },
+            }
+        image_bytes, media_type = downscale(data)
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": base64.standard_b64encode(image_bytes).decode(),
+            },
+        }
+
     def read_sheet(self, data: bytes, mime_type: str = "image/jpeg") -> VisionSheet:
         if not self.available():
             raise VisionUnavailableError("no ANTHROPIC_API_KEY configured")
@@ -254,6 +358,7 @@ class VisionSheetReader:
                         "total_weight_kg": _field(
                             "total_weight_kg", str(row.get("total_weight", ""))
                         ),
+                        "label": _field("label", str(row.get("label", ""))),
                     },
                 )
             )
@@ -274,3 +379,120 @@ class VisionSheetReader:
             unreadable_note=str(payload.get("unreadable_note", "")),
             model=self._model,
         )
+
+
+# --------------------------------------------------------------------
+# sales sheets
+# --------------------------------------------------------------------
+
+SALE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "rows": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": (
+                            "Item code exactly as written; '' if absent, "
+                            f"'{UNREADABLE}' if unreadable."
+                        ),
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Item description if present, else ''.",
+                    },
+                    "qty": {
+                        "type": "string",
+                        "description": (
+                            "Quantity sold as a plain number string -- the KG or Qty column."
+                        ),
+                    },
+                    "rate": {
+                        "type": "string",
+                        "description": (
+                            "Rate per unit as a plain number string. Strip any trailing "
+                            "'/-' or currency mark."
+                        ),
+                    },
+                    "line_total": {
+                        "type": "string",
+                        "description": (
+                            "The line's total **as written on the sheet**. Do not compute "
+                            "it; '' if the sheet doesn't show one."
+                        ),
+                    },
+                },
+                "required": ["code", "description", "qty", "rate", "line_total"],
+                "additionalProperties": False,
+            },
+        },
+        "customer_name": {
+            "type": "string",
+            "description": "The party this sale is to, if written anywhere, else ''.",
+        },
+        "sale_date": {"type": "string", "description": "Date as written (any format), else ''."},
+        "declared_total": {
+            "type": "string",
+            "description": "The sheet's own grand total as written, else ''.",
+        },
+        "unreadable_note": {
+            "type": "string",
+            "description": "Brief note if parts were unreadable, else ''.",
+        },
+    },
+    "required": ["rows", "customer_name", "sale_date", "declared_total", "unreadable_note"],
+    "additionalProperties": False,
+}
+
+SALE_SYSTEM_PROMPT = """\
+You transcribe handwritten and printed sales notes into structured data. \
+You are transcribing, not interpreting: copy what is written.
+
+Rules:
+- One entry per ITEM row. Never emit a header row or the grand-total row.
+- The page may be rotated, photographed at an angle, on ruled or squared \
+paper, and written by hand. Read it anyway.
+- Copy codes character for character, including case, digits and hyphens.
+- Numbers must be plain number strings: no units, no thousands \
+separators, no currency symbols, no trailing '/-'.
+- **Never compute a value.** Copy the line total the sheet shows; if it \
+shows none, return ''. If the arithmetic looks wrong, still copy what is \
+written -- a disagreement is something the user must see, not something \
+you resolve.
+- If a cell is genuinely unreadable, put '?' rather than guessing.
+- Preserve the order the rows appear in.
+"""
+
+SALE_USER_PROMPT = """\
+Transcribe every item row of this sales note.
+
+Columns you may see, under varying headers and in any order:
+- an item code column (Item Code, Code, Design)
+- a quantity column (KG, Qty, Pcs)
+- a rate column (Rate, KG Rate, Price) -- often written like '200/-'
+- a line total column (Total, Amount)
+
+Also capture the customer or party name, the date, and the sheet's own \
+grand total if written."""
+
+
+@dataclasses.dataclass(frozen=True)
+class VisionSaleRow:
+    code: str
+    description: str
+    qty: str
+    rate: str
+    line_total: str
+
+
+@dataclasses.dataclass(frozen=True)
+class VisionSaleSheet:
+    rows: list[VisionSaleRow]
+    customer_name: str
+    sale_date: str
+    declared_total: str
+    unreadable_note: str
+    model: str

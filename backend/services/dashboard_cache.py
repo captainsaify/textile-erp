@@ -46,6 +46,7 @@ logger = get_logger(__name__)
 
 TTL_SECONDS = 60
 
+
 def _version_key(org_id: uuid.UUID) -> str:
     return f"dashboard:ver:{org_id}"
 

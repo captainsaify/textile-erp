@@ -9,6 +9,7 @@ parks in the session and one reply resolves it: `confirm`, `override`
 
 from __future__ import annotations
 
+import asyncio
 import decimal
 import re
 
@@ -20,6 +21,7 @@ from backend.core.exceptions import (
     InsufficientStockError,
     ValidationError,
 )
+from backend.core.logging import get_logger
 from backend.core.security import role_at_least
 from backend.models.enums import SalePaymentType, UserRole
 from backend.services.sales_service import (
@@ -43,6 +45,11 @@ _ITEM = re.compile(r"^(?P<code>[A-Za-z0-9_-]+)\s+(?P<qty>[\d.]+)\s+(?P<rate>[\d.
 _CORRECTION = re.compile(
     r"^line\s+(?P<line>\d+)\s+(?P<field>qty|rate|code)\s+(?P<value>.+)$", re.IGNORECASE
 )
+logger = get_logger(__name__)
+
+ZERO = decimal.Decimal("0")
+TWO = decimal.Decimal("0.01")
+
 _PICK = re.compile(r"^[1-9]\d*$")
 
 CONFIRM_VOCAB = {"confirm", "yes", "ok", "save"}
@@ -373,3 +380,132 @@ async def _continue_after_resolution(draft: SaleDraft, ctx: RequestContext) -> C
             )
         )
     return await _try_record(draft, ctx)
+
+
+# --------------------------------------------------------------------
+# reading a sales note from a photo
+# --------------------------------------------------------------------
+
+
+async def read_stored_sale_sheet(attachment_id_text: str, ctx: RequestContext) -> CommandResult:
+    """A photographed sales note -> the same SaleDraft the typed `sale`
+    command produces (docs/20_ConversationalIntake.md §2).
+
+    Everything after the read is shared with the typed path: customer
+    resolution, stock checks, the below-cost warning and CONFIRM. This
+    only replaces the typing.
+    """
+    import uuid as uuid_module
+    from pathlib import Path
+
+    from backend.models import Attachment
+    from backend.ocr.vision_engine import VisionSheetReader, VisionUnavailableError
+
+    org_id = ctx.user.org_id
+    try:
+        attachment_id = uuid_module.UUID(attachment_id_text)
+    except ValueError:
+        return CommandResult(reply="That photo has expired — please send it again.")
+
+    async with ctx.session_factory() as session:
+        attachment = await session.get(Attachment, attachment_id)
+        if attachment is None or attachment.org_id != org_id:
+            return CommandResult(reply="That photo has expired — please send it again.")
+        file_path, mime_type = attachment.file_path, attachment.mime_type
+
+    reader = VisionSheetReader()
+    if not reader.available():
+        # There is no local fallback for sales notes: the grid-detection
+        # pipeline is built around the purchase column template. Say so
+        # rather than returning an empty draft.
+        return CommandResult(
+            reply="I can't read sheets right now — vision isn't configured.\n"
+            "Record it with:\n*sale Customer: <name>*\n*<CODE> <qty> <rate>*"
+        )
+    try:
+        data = Path(file_path).read_bytes()
+    except OSError:
+        return CommandResult(reply="I can't find that photo any more — please send it again.")
+
+    await ctx.say("📸 Reading your sales note, one moment…")
+    try:
+        sheet = await asyncio.to_thread(reader.read_sale_sheet, data, mime_type)
+    except VisionUnavailableError as exc:
+        logger.warning("vision_sale_read_failed", error=str(exc))
+        return CommandResult(
+            reply="❌ I couldn't read that one. Record it with:\n"
+            "*sale Customer: <name>*\n*<CODE> <qty> <rate>*"
+        )
+
+    lines: list[SaleDraftLine] = []
+    notes: list[str] = []
+    for index, row in enumerate(sheet.rows, start=1):
+        qty = _sheet_number(row.qty)
+        rate = _sheet_number(row.rate)
+        if not row.code or qty is None or rate is None:
+            notes.append(f"Line {index}: couldn't read this row fully — check it before confirming")
+            if qty is None or rate is None:
+                continue
+        lines.append(SaleDraftLine(code=row.code.upper(), qty=qty, rate=rate))
+
+        # The sheet's own total is checked against qty x rate and any
+        # disagreement is *surfaced*, never resolved. When two sources
+        # disagree and you can't tell which is wrong, showing it is the
+        # whole thesis of this system (CLAUDE.md).
+        stated = _sheet_number(row.line_total)
+        if stated is not None and (qty * rate).quantize(TWO) != stated.quantize(TWO):
+            notes.append(
+                f"Line {index} ({row.code}): the sheet says {fmt_money(stated)}, "
+                f"but {fmt_qty(qty)} x {fmt_money(rate)} is {fmt_money((qty * rate).quantize(TWO))}"
+                " — which is right?"
+            )
+
+    if not lines:
+        return CommandResult(
+            reply="❌ I couldn't find any item rows on that. Record it with:\n"
+            "*sale Customer: <name>*\n*<CODE> <qty> <rate>*"
+        )
+
+    draft = SaleDraft(
+        customer_id=None,
+        customer_name=sheet.customer_name.strip(),
+        payment_type=SalePaymentType.CREDIT,  # §2 default; changeable before CONFIRM
+        lines=lines,
+    )
+    draft.idempotency_key = idempotency_key(ctx.user.whatsapp_number or "", attachment_id_text)
+    draft, candidates = await _prepare(draft, ctx)
+
+    header = [f"📸 Read {len(lines)} item(s) from your sales note."]
+    if sheet.customer_name.strip():
+        header.append(f"Customer: {sheet.customer_name.strip()}")
+    if sheet.declared_total.strip():
+        header.append(f"Sheet total: {sheet.declared_total.strip()}")
+    header.extend(f"⚠️ {note}" for note in notes)
+    if sheet.unreadable_note.strip():
+        header.append(f"⚠️ {sheet.unreadable_note.strip()}")
+
+    sessions = SessionService(ctx.session_factory)
+    await sessions.set(org_id, ctx.user.id, AWAITING_SALE_CONFIRMATION, draft.to_context())
+
+    if draft.customer_id is None or draft.unresolved_codes:
+        body = _render_unresolved(draft, candidates)
+    else:
+        resolved = await _continue_after_resolution(draft, ctx)
+        body = resolved.reply
+    return CommandResult(reply="\n".join([*header, "", body]))
+
+
+def _sheet_number(raw: str) -> decimal.Decimal | None:
+    """A handwritten figure -> Decimal, or None when it isn't one.
+
+    Never a float: this becomes a rate and a quantity, and the whole
+    system is Decimal from the database up.
+    """
+    cleaned = re.sub(r"[^\d.]", "", (raw or "").replace(",", ""))
+    if not cleaned or cleaned == ".":
+        return None
+    try:
+        value = decimal.Decimal(cleaned)
+    except decimal.InvalidOperation:
+        return None
+    return value if value > ZERO else None

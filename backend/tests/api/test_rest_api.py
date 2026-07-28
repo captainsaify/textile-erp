@@ -21,7 +21,11 @@ from backend.core.security import hash_password
 from backend.main import create_app
 from backend.models import Organization, User
 from backend.models.enums import UserRole
-from backend.tests.conftest import SEEDED_ORG_ID, purge_business_rows
+from backend.tests.conftest import (
+    SEEDED_MAIN_WAREHOUSE_ID,
+    SEEDED_ORG_ID,
+    purge_business_rows,
+)
 
 ORG = uuid.UUID(SEEDED_ORG_ID)
 PASSWORD = "correct-horse-battery-staple"
@@ -580,3 +584,56 @@ async def test_a_purchase_without_a_scan_says_so_rather_than_404ing_the_page(
 
     scan = await client.get(f"/api/v1/purchases/{purchase_id}/scan", headers=_auth(token))
     assert scan.status_code == 404
+
+
+async def test_stock_carries_the_brand_because_codes_are_brand_scoped(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """`products_org_code_active_uq` makes a code unique only within a
+    brand. A stock list without the brand shows two identical codes and
+    no way to tell which is which."""
+    import decimal
+    import uuid as uuid_module
+
+    from backend.models import Brand, Inventory, Product
+    from backend.tests.conftest import SEEDED_KG_UNIT_ID, SEEDED_TEXTILE_TYPE_ID
+
+    suffix = uuid_module.uuid4().hex[:6]
+    code = f"VVP{suffix.upper()}"
+
+    async with session_factory() as session:
+        brand = Brand(org_id=ORG, name=f"Alpha{suffix}")
+        session.add(brand)
+        await session.flush()
+        for brand_id in (brand.id, None):
+            product = Product(
+                org_id=ORG,
+                product_type_id=uuid_module.UUID(SEEDED_TEXTILE_TYPE_ID),
+                code=code,
+                brand_id=brand_id,
+                description="Golden Velvet Pant",
+                unit_id=uuid_module.UUID(SEEDED_KG_UNIT_ID),
+                created_by=owner.id,
+            )
+            session.add(product)
+            await session.flush()
+            session.add(
+                Inventory(
+                    org_id=ORG,
+                    product_id=product.id,
+                    warehouse_id=uuid_module.UUID(SEEDED_MAIN_WAREHOUSE_ID),
+                    qty_on_hand=decimal.Decimal("10"),
+                    weighted_avg_cost=decimal.Decimal("150"),
+                )
+            )
+        await session.commit()
+
+    token = await _token(client, owner)
+    response = await client.get("/api/v1/inventory", headers=_auth(token))
+
+    assert response.status_code == 200, response.text
+    same_code = [row for row in response.json()["items"] if row["code"] == code]
+    assert len(same_code) == 2
+    # one carries the brand, the other records that it has none -- the
+    # two rows are distinguishable, which is the whole point
+    assert sorted(str(row["brand"]) for row in same_code) == [f"Alpha{suffix}", "None"]

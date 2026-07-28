@@ -71,13 +71,9 @@ async def handle_intent_reply(text: str, ctx: RequestContext, state: SessionStat
         return CommandResult(reply="No problem — I've left that photo alone.")
 
     if choice == "sale":
-        # Honest rather than half-built: reading a *sales* sheet needs its
-        # own column template and stock checks, which don't exist yet.
-        await sessions.set(ctx.user.org_id, ctx.user.id, IDLE, {})
-        return CommandResult(
-            reply="I can't read a sales sheet yet — only purchase sheets.\n"
-            "Record it with:\n*sale <customer> <CODE> <qty> <rate>*"
-        )
+        from backend.api.commands.sale_commands import read_stored_sale_sheet
+
+        return await read_stored_sale_sheet(attachment_id, ctx)
 
     if choice != "purchase":
         return ask_intent()

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Textile ERP</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=3" />
+    <link rel="stylesheet" href="/assets/styles.css?v=5" />
     <link
       rel="icon"
       href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>"
@@ -118,7 +118,14 @@
             <div id="reconciliations"></div>
           </div>
           <div class="card">
-            <h2>Recent activity</h2>
+            <div class="card-head">
+              <h2>Recent activity</h2>
+              <div class="filters">
+                <select id="audit-action"><option value="">All actions</option></select>
+                <input id="audit-search" type="search" placeholder="Search details" />
+              </div>
+            </div>
+            <p class="muted">Click a row to see exactly what changed.</p>
             <div id="audit" class="table-scroll"></div>
           </div>
         </section>
@@ -127,8 +134,8 @@
       <p id="banner" class="banner" role="status" hidden></p>
     </div>
 
-    <script src="/assets/money.js?v=3"></script>
-    <script src="/assets/charts.js?v=3"></script>
-    <script src="/assets/app.js?v=3"></script>
+    <script src="/assets/money.js?v=5"></script>
+    <script src="/assets/charts.js?v=5"></script>
+    <script src="/assets/app.js?v=5"></script>
   </body>
 </html>

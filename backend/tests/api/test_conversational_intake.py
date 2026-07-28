@@ -324,15 +324,20 @@ async def test_intent_neither_leaves_the_photo_alone(ctx: RequestContext) -> Non
     assert state == IDLE
 
 
-async def test_intent_sale_says_what_to_do_instead(ctx: RequestContext) -> None:
-    """Honest rather than half-built: a sales sheet has no reader yet, so
-    say so and give the command that does work."""
+async def test_intent_sale_now_reads_the_note_instead_of_refusing(
+    ctx: RequestContext,
+) -> None:
+    """Tapping "A sale" used to answer "I can't read a sales sheet yet".
+    That was a missing feature dressed as a capability limit -- the same
+    vision model reads a handwritten note fine. It now goes to the sales
+    reader, which is why an unknown attachment reports an expired photo
+    rather than a refusal to try.
+    """
     sessions = SessionService(ctx.session_factory)
     await sessions.set(ctx.user.org_id, ctx.user.id, AWAITING_INTENT, {"attachment_id": "x"})
     session_state = await sessions.get(ctx.user.org_id, ctx.user.id)
+
     result = await handle_intent_reply("intake sale", ctx, session_state)
 
-    assert "can't read a sales sheet yet" in result.reply
-    assert "sale <customer>" in result.reply
-    state, _ = await state_of(ctx)
-    assert state == IDLE
+    assert "can't read a sales sheet" not in result.reply
+    assert "expired" in result.reply

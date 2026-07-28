@@ -487,6 +487,68 @@ tr.clickable:hover td {
   overflow-x: auto;
 }
 
+/* ------------------------------------------------- audit detail */
+
+.filters {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.filters select,
+.filters input {
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 0.86rem;
+}
+
+td.summary {
+  white-space: normal;
+  color: var(--ink-muted);
+}
+
+td.summary b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+tr.detail-row > td {
+  background: color-mix(in oklab, var(--series-1) 6%, transparent);
+  white-space: normal;
+}
+
+.change-grid {
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) 1fr 1fr;
+  gap: 0.2rem 1rem;
+  font-size: 0.85rem;
+  align-items: baseline;
+}
+
+.change-grid .head {
+  color: var(--ink-muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.change-grid .field {
+  color: var(--ink-muted);
+}
+
+.change-grid .changed {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.change-grid .was {
+  color: var(--ink-muted);
+  text-decoration: line-through;
+}
+
 .banner {
   position: fixed;
   bottom: 1rem;
