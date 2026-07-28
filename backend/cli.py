@@ -84,10 +84,6 @@ def create_user(
     )
 
 
-if __name__ == "__main__":
-    cli()
-
-
 @cli.command("set-password")
 def set_password_command(
     email: Annotated[str, typer.Option(help="The user's email address")],
@@ -115,3 +111,10 @@ def set_password_command(
     except AuthError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from None
+
+
+# Must stay last: typer registers commands as the module executes, so an
+# entrypoint placed above a @cli.command() runs before that command
+# exists. `set-password` was unreachable this way.
+if __name__ == "__main__":
+    cli()
