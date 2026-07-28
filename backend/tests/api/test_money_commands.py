@@ -219,6 +219,41 @@ def test_indian_digit_grouping_is_accepted_because_we_print_it() -> None:
     assert parse_amount("₹1,23,456.78") == decimal.Decimal("123456.78")
 
 
+@pytest.mark.parametrize(
+    ("text", "amount", "party", "against"),
+    [
+        # the one that actually posted money: a bare invoice number after
+        # the method was read as the amount, so ₹40,00,000 became ₹1.00
+        # and "4000000" was absorbed into the supplier name -- reported
+        # back as success
+        ("create all products 4000000 cash 001", "4000000.00", "create all products", "001"),
+        ("Wagdia 40000 cash 001", "40000.00", "Wagdia", "001"),
+        # method and amount swapped: still unambiguous, so still accepted
+        ("Wagdia cash 40000", "40000.00", "Wagdia", None),
+        # a party whose name ends in a number keeps it
+        ("Wagdia 2 40000 cash", "40000.00", "Wagdia 2", None),
+    ],
+)
+def test_amount_is_never_taken_from_after_the_payment_method(
+    text: str, amount: str, party: str, against: str | None
+) -> None:
+    from backend.api.commands.settlement_commands import parse_settlement
+
+    command = parse_settlement(text, "paid")
+    assert command.amount == decimal.Decimal(amount)
+    assert command.party == party
+    assert command.against == against
+
+
+def test_unexplained_trailing_words_are_refused_rather_than_guessed() -> None:
+    """Two stray tokens after the method could be anything. Guessing here
+    is how ₹1.00 got posted; naming the problem is the alternative."""
+    from backend.api.commands.settlement_commands import parse_settlement
+
+    with pytest.raises(ValidationError, match="don't know what '001 002' means"):
+        parse_settlement("Wagdia 40000 cash 001 002", "paid")
+
+
 def test_amount_errors_name_the_problem_not_just_the_usage() -> None:
     from backend.api.commands.settlement_commands import parse_settlement
 

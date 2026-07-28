@@ -62,18 +62,41 @@ def parse_settlement(args: str, kind: str) -> SettlementCommand:
             tokens = tokens[:index]
             break
 
-    via: str | None = None
-    for index, token in enumerate(tokens):
-        if token.lower() in {"cash", "bank"}:
-            via = token.lower()
-            tokens = tokens[:index] + tokens[index + 1 :]
-            break
-    if via is None:
+    via_index = next(
+        (i for i, token in enumerate(tokens) if token.lower() in {"cash", "bank"}), None
+    )
+    if via_index is None:
         raise ValidationError(f"I need to know whether this was cash or bank.\n{usage}")
+    via = tokens[via_index].lower()
+    trailing = tokens[via_index + 1 :]
+    tokens = tokens[:via_index]
 
+    # The amount is looked for *before* the method, because canonical
+    # order is <name> <amount> <cash|bank>. Searching the whole line
+    # backwards instead read `paid Wagdia 40000 cash 001` as ₹1.00,
+    # absorbed the real 40000 into the supplier name, and reported
+    # success -- silent, and wrong in money.
     amount_index = next(
         (i for i in range(len(tokens) - 1, -1, -1) if looks_like_amount(tokens[i])), None
     )
+
+    if trailing:
+        if amount_index is None and len(trailing) == 1 and looks_like_amount(trailing[0]):
+            # `paid Wagdia cash 40000` -- method and amount swapped. There
+            # is no amount before the method, so this can only be one.
+            tokens = [*tokens, trailing[0]]
+            amount_index = len(tokens) - 1
+        elif against is None and len(trailing) == 1:
+            # `paid Wagdia 40000 cash 001` -- a bare invoice number with
+            # "against" left out.
+            against = trailing[0]
+        else:
+            extra = " ".join(trailing)
+            raise ValidationError(
+                f"I don't know what '{extra}' means after '{via}'.\n"
+                f"If it's an invoice, write 'against {trailing[0]}'.\n{usage}"
+            )
+
     if amount_index is None:
         raise ValidationError(f"I couldn't find an amount in that.\n{usage}")
     amount = parse_amount(tokens[amount_index])
