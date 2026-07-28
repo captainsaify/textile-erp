@@ -85,11 +85,13 @@ exist for the remaining work:
 - [`docs/21_WebDashboard.md`](docs/21_WebDashboard.md) — dashboard
   forms, no-build stack, deployment on `example.com`.
 
-**Domain confirmed:** `example.com`. The permanent webhook on
-`erp.example.com` is **built** (`docs/16_Deployment.md` §11)
-and awaits one manual step the code can't do: moving the zone's
-nameservers from GoDaddy to Cloudflare. `./docker/tunnel-check.sh`
-reports exactly how far along that is.
+**Permanent webhook is LIVE** (2026-07-28):
+`https://erp.example.com/webhooks/whatsapp`, served by named
+tunnel `textile-erp` (`2ca10f66-846b-4dae-ae65-cab81375407a`) running as
+a compose service. The zone is on Cloudflare, all eight checks in
+`./docker/tunnel-check.sh` pass, and quick tunnels are gone. Meta's
+callback URL never needs repointing again. Setup and reasoning:
+`docs/16_Deployment.md` §11.
 
 **Deployment: built and verified running.** Colima provides the
 container runtime (`colima start`; Docker Desktop was avoided — it needs
