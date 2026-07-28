@@ -525,30 +525,61 @@
    * record of what happened. */
   let auditRows = [];
 
+  //: fields that are money wherever they appear, so they format as money
+  const MONEY_FIELDS = new Set([
+    "amount",
+    "grand_total",
+    "line_total",
+    "rate",
+    "applied",
+    "advance",
+    "outstanding",
+    "balance",
+    "total",
+  ]);
+
   const IDENTIFYING = ["code", "name", "invoice_no", "reference", "amount", "via", "description"];
+
+  function fieldValue(key, value) {
+    if (value === undefined || value === null || value === "") return "—";
+    if (Array.isArray(value)) {
+      return value.map((item) => describe(item)).join("; ") || "—";
+    }
+    if (typeof value === "object") return describe(value);
+    return MONEY_FIELDS.has(key) ? Money.format(value) : text(value);
+  }
+
+  /* A nested object rendered as "applied ₹40,00,000.00, reference 001"
+   * rather than raw JSON -- the allocations array is the useful part of
+   * a payment and was unreadable as a blob. */
+  function describe(item) {
+    if (item === null || typeof item !== "object") return text(item);
+    return Object.entries(item)
+      .map(([key, value]) => `${key} ${fieldValue(key, value)}`)
+      .join(", ");
+  }
 
   function summarise(entry) {
     const state = entry.after_state || entry.before_state || {};
     // Data-driven rather than a branch per action: payload fields are
-    // named consistently across services, so a new action gets a
-    // readable summary without anyone editing this.
+    // named consistently across services, so a new action reads well
+    // without anyone editing this. Zero-valued fields are dropped --
+    // "advance 0.00" on every payment is noise, not information.
+    const meaningful = (key) => {
+      const value = state[key];
+      if (value === undefined || value === null || value === "") return false;
+      if (typeof value === "object") return false;
+      return !(MONEY_FIELDS.has(key) && Money.toPaise(value) === 0n);
+    };
     const keys = [
-      ...IDENTIFYING.filter((key) => state[key] !== undefined && state[key] !== null),
-      ...Object.keys(state).filter(
-        (key) => !IDENTIFYING.includes(key) && typeof state[key] !== "object",
-      ),
+      ...IDENTIFYING.filter(meaningful),
+      ...Object.keys(state).filter((key) => !IDENTIFYING.includes(key) && meaningful(key)),
     ].slice(0, 3);
     if (!keys.length) return `<span class="muted">no detail recorded</span>`;
-    return keys
-      .map((key) => {
-        const raw = state[key];
-        const shown = key === "amount" || key === "grand_total" ? Money.format(raw) : text(raw);
-        return `<b>${shown}</b>`;
-      })
-      .join(" · ");
+    return keys.map((key) => `<b>${fieldValue(key, state[key])}</b>`).join(" · ");
   }
 
-  function changeGrid(entry) {
+  function detailPanel(entry) {
     const before = entry.before_state || {};
     const after = entry.after_state || {};
     const fields = [...new Set([...Object.keys(before), ...Object.keys(after)])];
@@ -556,12 +587,19 @@
       return `<p class="muted">Nothing was recorded beyond the action itself.</p>`;
     }
 
-    const show = (value) =>
-      value === undefined || value === null
-        ? "—"
-        : typeof value === "object"
-          ? JSON.stringify(value)
-          : text(value);
+    // Something created has no "before". Showing a Before column full of
+    // em dashes says nothing; a diff is only a diff when both sides
+    // exist.
+    const isChange = Object.keys(before).length > 0;
+    if (!isChange) {
+      const rows = fields
+        .map(
+          (field) =>
+            `<div class="field">${field}</div><div>${fieldValue(field, after[field])}</div>`,
+        )
+        .join("");
+      return `<div class="record-grid">${rows}</div>`;
+    }
 
     const rows = fields
       .map((field) => {
@@ -569,8 +607,8 @@
         const now = after[field];
         const changed = JSON.stringify(was) !== JSON.stringify(now);
         return `<div class="field">${field}</div>
-          <div class="${was !== undefined && changed ? "was" : "muted"}">${show(was)}</div>
-          <div class="${changed ? "changed" : ""}">${show(now)}</div>`;
+          <div class="${changed ? "was" : "muted"}">${fieldValue(field, was)}</div>
+          <div class="${changed ? "changed" : ""}">${fieldValue(field, now)}</div>`;
       })
       .join("");
 
@@ -615,7 +653,7 @@
         detail.className = "detail-row";
         const td = detail.insertCell();
         td.colSpan = 5;
-        td.innerHTML = changeGrid(rows[index]);
+        td.innerHTML = detailPanel(rows[index]);
       });
     });
 

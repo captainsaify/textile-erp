@@ -520,6 +520,18 @@ tr.detail-row > td {
   white-space: normal;
 }
 
+.record-grid {
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) 1fr;
+  gap: 0.2rem 1rem;
+  font-size: 0.85rem;
+  align-items: baseline;
+}
+
+.record-grid .field {
+  color: var(--ink-muted);
+}
+
 .change-grid {
   display: grid;
   grid-template-columns: minmax(120px, max-content) 1fr 1fr;

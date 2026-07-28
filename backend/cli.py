@@ -197,7 +197,9 @@ def assign_brand(
                         action="product.brand_assigned",
                         entity_type="products",
                         entity_id=product.id,
-                        channel="cli",
+                        # audit_logs.channel is a closed set; a CLI change
+                        # is an operator acting on the system
+                        channel="system",
                         before_state={"code": product.code, "brand_id": before},
                         after_state={"code": product.code, "brand": brand},
                     )
