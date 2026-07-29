@@ -15,6 +15,7 @@ import decimal
 import re
 import uuid
 from pathlib import Path
+from typing import Any
 
 from backend.api.command_types import CommandResult, RequestContext
 from backend.api.commands.intake_commands import ask_intent, begin_slots, missing_slots
@@ -221,6 +222,51 @@ async def resolve_after_details(draft: Draft, ctx: RequestContext) -> Draft:
     return draft
 
 
+
+async def _cached_vision(
+    attachment_id: uuid.UUID, ctx: RequestContext
+) -> tuple[list[Any], dict[str, str]] | None:
+    """The rows a previous vision call already returned for this photo.
+
+    Cached on the attachment rather than in Redis: the photo and its
+    transcription belong together and should survive a restart, and the
+    column was already there holding a summary of the same read.
+    """
+    from backend.ocr.vision_engine import rows_from_json
+
+    async with ctx.session_factory() as session:
+        attachment = await session.get(Attachment, attachment_id)
+        payload = (attachment.ocr_result or {}) if attachment is not None else {}
+    rows = payload.get("vision_rows")
+    if not rows:
+        return None
+    try:
+        return rows_from_json(rows), dict(payload.get("vision_hints") or {})
+    except (KeyError, TypeError, ValueError) as exc:
+        # a malformed cache is a miss, never an error -- worst case we
+        # pay for the read again
+        logger.warning("vision_cache_unreadable", error=str(exc))
+        return None
+
+
+async def _cache_vision(attachment_id: uuid.UUID, vision: Any, ctx: RequestContext) -> None:
+    from backend.ocr.vision_engine import rows_to_json
+
+    async with ctx.session_factory() as session, session.begin():
+        attachment = await session.get(Attachment, attachment_id)
+        if attachment is None:
+            return
+        attachment.ocr_result = {
+            **(attachment.ocr_result or {}),
+            "vision_rows": rows_to_json(vision.rows),
+            "vision_hints": {
+                "supplier": vision.supplier_name,
+                "invoice": vision.invoice_no,
+                "date": vision.invoice_date,
+            },
+        }
+
+
 async def process_purchase_photo(
     data: bytes, mime_type: str, media_id: str | None, ctx: RequestContext
 ) -> CommandResult:
@@ -294,15 +340,41 @@ async def read_stored_sheet(attachment_id_text: str, ctx: RequestContext) -> Com
     invoice_hint = ""
     date_hint = ""
 
+    # A photo already read is never read again. Tapping "A purchase" a
+    # second time, or re-answering after a crash, used to bill a fresh
+    # vision call for a sheet whose rows were already known -- which is
+    # where an unexplained bill mostly comes from.
+    cached = await _cached_vision(attachment_id, ctx)
+    if cached is not None:
+        rows, hints = cached
+        sheet = ParsedSheet(
+            extraction=ExtractionResult(
+                columns=[],
+                rows=rows,
+                unmapped_headers=[],
+                grid_confidence=1.0,
+                engines=["claude-vision:cached"],
+            ),
+            deskew_angle=0.0,
+            cropped=False,
+            page_count=1,
+        )
+        engine_used = "vision-cached"
+        supplier_hint = hints.get("supplier", "")
+        invoice_hint = hints.get("invoice", "")
+        date_hint = hints.get("date", "")
+        logger.info("vision_cache_hit", attachment_id=str(attachment_id), rows=len(rows))
+
     # Vision first: it reads the table as a table, so an unnamed column or a
     # slightly angled photo isn't a silent field shift. Any failure -- no
     # key, refusal, transport -- falls through to the local pipeline.
-    if settings.ocr_use_vision:
+    if sheet is None and settings.ocr_use_vision:
         reader = VisionSheetReader()
         if reader.available():
             try:
                 vision = await asyncio.to_thread(reader.read_sheet, data, mime_type)
                 if vision.rows:
+                    await _cache_vision(attachment_id, vision, ctx)
                     sheet = ParsedSheet(
                         extraction=ExtractionResult(
                             columns=[],

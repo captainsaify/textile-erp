@@ -186,6 +186,61 @@ def downscale(data: bytes, max_edge: int = MAX_EDGE_PX) -> tuple[bytes, str]:
     return bytes(encoded), "image/jpeg"
 
 
+#: What a model costs per million tokens, for the log line. Approximate
+#: and only used to make spend visible -- billing is Anthropic's number,
+#: not this one.
+_PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
+    "claude-haiku-4-5": (1.0, 5.0),
+    "claude-sonnet-5": (3.0, 15.0),
+    "claude-opus-5": (5.0, 25.0),
+}
+
+
+def estimate_cost(model: str, input_tokens: int | None, output_tokens: int | None) -> float:
+    """Roughly what that call cost, in dollars.
+
+    Logged per read because a per-sheet price is the only way anyone
+    notices the bill drifting before the month ends.
+    """
+    prices = _PRICES_PER_MTOK.get(model)
+    if prices is None or input_tokens is None or output_tokens is None:
+        return 0.0
+    return round(input_tokens / 1e6 * prices[0] + output_tokens / 1e6 * prices[1], 5)
+
+
+def rows_to_json(rows: list[ExtractedRow]) -> list[dict[str, Any]]:
+    """Serialise an extraction so it can be cached on the attachment and
+    never paid for twice."""
+    return [
+        {
+            "row_index": row.row_index,
+            "fields": {
+                name: {"text": field.text, "confidence": field.confidence, "engine": field.engine}
+                for name, field in row.fields.items()
+            },
+        }
+        for row in rows
+    ]
+
+
+def rows_from_json(payload: list[Any]) -> list[ExtractedRow]:
+    return [
+        ExtractedRow(
+            row_index=int(entry["row_index"]),
+            fields={
+                name: ExtractedField(
+                    field=name,
+                    text=str(spec.get("text", "")),
+                    confidence=float(spec.get("confidence", 0.0)),
+                    engine=str(spec.get("engine", "cache")),
+                )
+                for name, spec in entry.get("fields", {}).items()
+            },
+        )
+        for entry in payload
+    ]
+
+
 def _field(name: str, value: str) -> ExtractedField:
     text = "" if value.strip() in {"", UNREADABLE} else value.strip()
     # an explicitly unreadable cell scores below the review threshold so it
@@ -367,12 +422,15 @@ class VisionSheetReader:
             )
 
         usage = getattr(response, "usage", None)
+        input_tokens = getattr(usage, "input_tokens", None)
+        output_tokens = getattr(usage, "output_tokens", None)
         logger.info(
             "vision_sheet_read",
             rows=len(rows),
             model=self._model,
-            input_tokens=getattr(usage, "input_tokens", None),
-            output_tokens=getattr(usage, "output_tokens", None),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            estimated_usd=estimate_cost(self._model, input_tokens, output_tokens),
         )
         return VisionSheet(
             rows=rows,
