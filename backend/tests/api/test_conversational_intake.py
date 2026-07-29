@@ -341,3 +341,28 @@ async def test_intent_sale_now_reads_the_note_instead_of_refusing(
 
     assert "can't read a sales sheet" not in result.reply
     assert "expired" in result.reply
+
+
+async def test_a_draft_carrying_a_brand_reaches_the_preview(ctx: RequestContext) -> None:
+    """The rate answer used to crash here and say nothing, so the wizard
+    sat on the same question while every valid number vanished.
+
+    `resolve_after_details` resolved the supplier -- autobeginning a
+    transaction -- and then opened `session.begin()` for the brand.
+    That branch only runs when a draft *has* a brand, which never
+    happened until the sheet's LABEL column started supplying one. It
+    was wrong from the day it was written and simply never executed.
+    """
+    draft = make_draft(rate="0", supplier="Wagdia", invoice="INV-1")
+    draft.brand_name = "TOP"
+
+    result = await begin_slots(draft, ["purchase_rate"], ctx)
+    assert "What rate per unit did you pay?" in (result.reply or "")
+
+    answered = await reply("200", ctx)
+
+    # it got past resolution rather than dying silently
+    assert "Purchase draft ready" in answered.reply
+    saved = await saved_draft(ctx)
+    assert saved.lines[0].rate == D("200")
+    assert saved.brand_id is not None, "the brand from the sheet was created and attached"

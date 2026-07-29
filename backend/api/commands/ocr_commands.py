@@ -186,16 +186,21 @@ async def resolve_after_details(draft: Draft, ctx: RequestContext) -> Draft:
     """Match the draft against the catalogue once supplier/brand are
     known. Shared by `details` and the slot machine so both produce an
     identically-resolved draft (docs/20 §10)."""
-    async with ctx.session_factory() as session:
+    # The transaction opens before the first read. Resolving the supplier
+    # autobegins one, so entering session.begin() afterwards raises
+    # "A transaction is already begun" (HANDOFF.md §5) -- and that inner
+    # begin() only ever runs when the draft carries a brand, which never
+    # happened until the sheet's LABEL column started supplying one. The
+    # branch was wrong the day it was written and simply never executed.
+    async with ctx.session_factory() as session, session.begin():
         service = PurchaseService(session)
         supplier = await service.resolve_supplier(ctx.user.org_id, draft.supplier_name)
         if supplier is not None:
             draft.supplier_id = supplier.id
             draft.supplier_name = supplier.name
         if draft.brand_name and draft.brand_id is None:
-            async with session.begin():
-                brand = await service.resolve_or_create_brand(ctx.user.org_id, draft.brand_name)
-                draft.brand_id = brand.id
+            brand = await service.resolve_or_create_brand(ctx.user.org_id, draft.brand_name)
+            draft.brand_id = brand.id
         # Re-resolved now, not only when unresolved: the brand arrives with
         # this command, and codes are only unique within a brand, so a
         # match made before the brand was known may point at the wrong
