@@ -135,6 +135,12 @@ def main_menu(role: UserRole) -> ListMenu:
     )
 
 
+async def _sheet_handler(args: str, ctx: RequestContext) -> CommandResult:
+    from backend.api.commands.draft_preview import handle_sheet
+
+    return await handle_sheet(args, ctx)
+
+
 async def _receive_handler(args: str, ctx: RequestContext) -> CommandResult:
     from backend.api.commands.receipt_commands import handle_receive
 
@@ -170,6 +176,16 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.STAFF,
         handler=handle_paid,
         help_text="Record money paid to a supplier (oldest invoice first).",
+    ),
+    "sheet": CommandSpec(
+        name="sheet",
+        syntax="sheet",
+        min_role=UserRole.STAFF,
+        handler=_sheet_handler,
+        help_text=(
+            "See the draft you're about to confirm as an Excel sheet. Nothing is saved; "
+            "CONFIRM and 'discard' still work afterwards."
+        ),
     ),
     "receive": CommandSpec(
         name="receive",

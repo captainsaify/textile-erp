@@ -25,7 +25,7 @@ from typing import Any
 
 from backend.api.amounts import looks_like_amount, parse_amount
 from backend.api.command_types import CommandResult, RequestContext
-from backend.api.formatting import fmt_date
+from backend.api.formatting import fmt_date, fmt_money
 from backend.api.interactive import (
     Buttons,
     Choice,
@@ -66,6 +66,10 @@ class CommandSlot:
     #: the value as it should appear in the assembled command.
     validate: Callable[[str], str] = lambda value: value.strip()
     example: str = ""
+    #: Runs after a valid answer is stored, and may rewrite `filled`.
+    #: Clearing a slot's own answer is what lets a wizard loop: a sale
+    #: collects one item, banks it, and asks for the next.
+    after: Callable[[dict[str, str]], None] | None = None
     #: Whether this slot is needed at all, given what is already filled.
     #: `export` asks which supplier only when the chosen report is about
     #: one -- a queue fixed up front cannot express that.
@@ -330,6 +334,65 @@ async def _field_menu(ctx: RequestContext, filled: dict[str, str]) -> Interactiv
     )
 
 
+async def _reference_menu(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
+    """Which record, offered as a list where one exists.
+
+    A bill has no code and no name, so asking "give its code or name,
+    e.g. TRP" -- the prompt a product needs -- was asking a product
+    question about a sale. Master records still type theirs; there can
+    be hundreds and no useful recency order.
+    """
+    entity = filled.get("entity", "")
+    rows: tuple[Choice, ...] = ()
+
+    if entity == "purchase":
+        from backend.repositories.purchase_repository import PurchaseRepository
+
+        async with ctx.session_factory() as session:
+            recent = await PurchaseRepository(session).recent_invoices(
+                ctx.user.org_id, limit=PARTY_ROWS
+            )
+        rows = tuple(
+            Choice(
+                id=f"slot {invoice_no}",
+                title=invoice_no[:24],
+                description=f"{supplier} · {fmt_date(day)}"[:72],
+            )
+            for invoice_no, supplier, day in recent
+        )
+    elif entity == "sale":
+        from backend.repositories.purchase_repository import SalesLookupRepository
+
+        async with ctx.session_factory() as session:
+            recent_sales = await SalesLookupRepository(session).recent(
+                ctx.user.org_id, limit=PARTY_ROWS
+            )
+        rows = tuple(
+            Choice(
+                id=f"slot {short_id}",
+                title=f"{customer[:14]} {fmt_date(day)}"[:24],
+                description=f"{fmt_money(total)} · ref {short_id}"[:72],
+            )
+            for short_id, customer, day, total in recent_sales
+        )
+
+    if not rows:
+        return None
+    return ListMenu(
+        body=f"Which {entity}?",
+        menu_label=f"Pick {entity}",
+        sections=(
+            Section(title="Recent", rows=rows),
+            Section(
+                title="Or",
+                rows=(
+                    Choice(id="slot other", title="Another one", description="You'll type the ref"),
+                ),
+            ),
+        ),
+    )
+
+
 async def _delete_confirm(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
     """Names the thing being deleted.
 
@@ -565,6 +628,54 @@ def _assemble_export(filled: dict[str, str]) -> str:
     return " ".join(parts)
 
 
+async def _more_items_buttons(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
+    counted = len(_items_of(filled)) + 1
+    return Buttons(
+        body=f"{counted} item(s) so far. Anything else?",
+        choices=(
+            Choice(id="slot add", title="Add another"),
+            Choice(id="slot done", title="That's all"),
+        ),
+    )
+
+
+def _more_items(value: str) -> str:
+    token = value.strip().lower()
+    if token in {"add", "another", "more", "yes"}:
+        return "add"
+    if token in {"done", "no", "that's all", "thats all", "finish"}:
+        return "done"
+    raise ValidationError("Tap 'Add another' or \"That's all\".")
+
+
+def _items_of(filled: dict[str, str]) -> list[str]:
+    banked = filled.get("items", "")
+    return [line for line in banked.split("\n") if line.strip()]
+
+
+def _bank_item(filled: dict[str, str]) -> None:
+    """Move the item just answered into the collected list.
+
+    When there is another to come, the per-item slots are cleared so the
+    queue asks for them again -- that is the loop. `filled` is the only
+    state a wizard has, so the loop lives in it rather than in a counter
+    somewhere else that could disagree.
+    """
+    item = f"{filled.get('code', '')} {filled.get('qty', '')} {filled.get('rate', '')}".strip()
+    if item:
+        filled["items"] = "\n".join([*_items_of(filled), item])
+    for key in ("code", "qty", "rate"):
+        filled.pop(key, None)
+    if filled.get("more") == "add":
+        filled.pop("more", None)
+
+
+def _assemble_sale(filled: dict[str, str]) -> str:
+    """The sale grammar: a header line, then one line per item."""
+    items = _items_of(filled)
+    return "\n".join([f"Customer: {filled['customer']}", *items])
+
+
 def _party_lookup_wizard(role: str, choices: ChoiceBuilder) -> CommandWizard:
     """`supplier` / `customer` with no name asks which one, rather than
     printing a usage line for a command whose only argument is a name
@@ -725,9 +836,15 @@ WIZARDS: dict[str, CommandWizard] = {
             CommandSlot(
                 name="rate", question="At what rate per unit?", validate=_amount, example="e.g. 150"
             ),
+            CommandSlot(
+                name="more",
+                question="Anything else on this sale?",
+                choices=_more_items_buttons,
+                validate=_more_items,
+                after=_bank_item,
+            ),
         ),
-        # the sale grammar is two lines: header, then one line per item
-        assemble=lambda f: f"Customer: {f['customer']}\n{f['code']} {f['qty']} {f['rate']}",
+        assemble=_assemble_sale,
     ),
     "export": CommandWizard(
         command="export",
@@ -840,6 +957,7 @@ WIZARDS: dict[str, CommandWizard] = {
             CommandSlot(
                 name="reference",
                 question="Which one? Give its code or name.",
+                choices=_reference_menu,
                 validate=_nonempty("Reference"),
                 example="e.g. TRP",
             ),
@@ -878,6 +996,7 @@ WIZARDS: dict[str, CommandWizard] = {
             CommandSlot(
                 name="reference",
                 question="Which one? Give its code or name.",
+                choices=_reference_menu,
                 validate=_nonempty("Reference"),
                 example="e.g. TRP",
             ),
@@ -937,11 +1056,13 @@ async def ask(
     interactive = await slot.choices(ctx, filled) if slot.choices is not None else None
     if interactive is None:
         return CommandResult(reply=body)
-    # The builder's own body wins. It knows things the static question
-    # can't -- "Delete product TRP?" rather than "Are you sure?" -- and
-    # overwriting it threw exactly that away.
-    detail = f"{interactive.body}\n{slot.example}".strip() if slot.example else interactive.body
-    return CommandResult(reply="", interactive=dataclasses.replace(interactive, body=detail))
+    # The builder's own body wins, and the static example is dropped:
+    # the builder knows things the slot can't ("Delete product TRP?"
+    # rather than "Are you sure?"), and an example written for the typed
+    # fallback is wrong here anyway -- "Which sale? e.g. TRP" was asking
+    # a product question about a bill. The rows demonstrate the format
+    # better than any example could.
+    return CommandResult(reply="", interactive=interactive)
 
 
 async def start(wizard: CommandWizard, args: str, ctx: RequestContext) -> CommandResult | None:
@@ -1000,6 +1121,8 @@ async def handle_reply(text: str, ctx: RequestContext, state: SessionState) -> C
         filled[current] = slot.validate(answer)
     except DomainError as exc:
         return await _reask(wizard, queue, ctx, prefix=exc.message, filled=filled)
+    if slot.after is not None:
+        slot.after(filled)
 
     queue = remaining(wizard, filled)
     if queue:

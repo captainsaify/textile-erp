@@ -58,6 +58,11 @@ class CommandResult:
     shareable: bool = False
     #: A file to share instead of the text, when there is one.
     share_file: str | None = None
+    #: A file to send to whoever asked, alongside the reply. Used by the
+    #: draft preview: checking 26 lines is a spreadsheet job, not a chat
+    #: message (docs/24_DraftPreview.md).
+    attachment: str | None = None
+    attachment_caption: str = ""
     #: Optional buttons/list menu accompanying `reply`
     #: (docs/19_InteractiveMessages.md). `reply` is always sent and is
     #: always sufficient on its own -- a transport that can't render

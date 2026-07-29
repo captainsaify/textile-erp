@@ -26,7 +26,11 @@ from backend.services.session_service import (
     IDLE,
     SessionService,
 )
-from backend.tests.conftest import SEEDED_ORG_ID, purge_business_rows
+from backend.tests.conftest import (
+    SEEDED_MAIN_WAREHOUSE_ID,
+    SEEDED_ORG_ID,
+    purge_business_rows,
+)
 
 D = decimal.Decimal
 ORG = uuid.UUID(SEEDED_ORG_ID)
@@ -586,3 +590,58 @@ async def test_editing_a_bill_never_asks_which_field(ctx: RequestContext) -> Non
         "undo",
         "purchase INV-001",
     )
+
+
+async def test_a_sale_is_picked_from_recent_ones_not_typed_as_a_product_code(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Tapping Sale asked "Which one? Give its code or name. e.g. TRP" --
+    a product question, about a sale. A bill has neither a code nor a
+    name, so it is picked from what recently happened."""
+    import datetime
+    import decimal
+    import uuid as uuid_module
+
+    from backend.models import Customer, SalesHeader
+    from backend.models.enums import SalePaymentType
+
+    suffix = uuid_module.uuid4().hex[:5]
+    async with session_factory() as session:
+        customer = Customer(org_id=ORG, name=f"Ravi {suffix}", created_by=ctx.user.id)
+        session.add(customer)
+        await session.flush()
+        session.add(
+            SalesHeader(
+                org_id=ORG,
+                customer_id=customer.id,
+                warehouse_id=uuid_module.UUID(SEEDED_MAIN_WAREHOUSE_ID),
+                sale_date=datetime.date.today(),
+                payment_type=SalePaymentType.CREDIT,
+                grand_total=decimal.Decimal("11100.00"),
+                status="confirmed",
+                created_by=ctx.user.id,
+            )
+        )
+        await session.commit()
+
+    question = await wizards.ask(wizards.WIZARDS["delete"], "reference", ctx, {"entity": "sale"})
+
+    assert isinstance(question.interactive, ListMenu)
+    assert "Which sale?" in question.interactive.body
+    rows = [row for section in question.interactive.sections for row in section.rows]
+    # the sale is recognisable by who and when, and carries its ref
+    assert any(f"Ravi {suffix}"[:14] in row.title for row in rows)
+    assert any("11,100" in row.description for row in rows)
+    # and "e.g. TRP" is nowhere near it
+    assert "TRP" not in question.interactive.body
+
+
+async def test_a_product_is_still_typed_because_a_list_would_not_help(
+    ctx: RequestContext,
+) -> None:
+    """There can be hundreds of products and no useful recency order, so
+    that one keeps the typed prompt."""
+    question = await wizards.ask(wizards.WIZARDS["delete"], "reference", ctx, {"entity": "product"})
+
+    assert question.interactive is None
+    assert "code or name" in question.reply

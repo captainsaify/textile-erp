@@ -265,8 +265,12 @@ def preview_result(draft: Draft) -> CommandResult:
     else:
         body = f"Save this purchase? {fmt_money(draft.grand_total)} to {draft.supplier_name}."
         choices = (
+            # Three is the button cap (docs/19 §2). "Fix a line" loses
+            # its button rather than the sheet, because the reply text
+            # already spells out how to fix one and nothing spells out
+            # that a sheet is available.
             Choice(id="confirm", title="Confirm"),
-            Choice(id="fix", title="Fix a line"),
+            Choice(id="sheet", title="See as sheet"),
             Choice(id="discard", title="Discard"),
         )
     return CommandResult(reply=reply, interactive=Buttons(body=body, choices=choices))

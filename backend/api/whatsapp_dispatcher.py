@@ -175,6 +175,8 @@ class WhatsAppDispatcher:
         user is being asked to check."""
         if result.reply.strip():
             await self._client.send_text(to_number, result.reply)
+        if result.attachment:
+            await self._send_attachment(to_number, result)
         if result.interactive is None:
             return
         sender = getattr(self._client, "send_interactive", None)
@@ -184,6 +186,23 @@ class WhatsAppDispatcher:
             return
         if not await sender(to_number, result.interactive):
             await self._client.send_text(to_number, as_text(result.interactive))
+
+    async def _send_attachment(self, to_number: str, result: CommandResult) -> None:
+        """Best-effort: a spreadsheet that fails to send must not lose
+        the draft it was previewing. The text reply already went out."""
+        from pathlib import Path
+
+        sender = getattr(self._client, "send_document", None)
+        path = Path(result.attachment or "")
+        if sender is None or not path.exists():
+            await self._client.send_text(
+                to_number, "⚠️ I couldn't attach the sheet — the draft is still waiting."
+            )
+            return
+        if not await sender(to_number, path, filename=path.name, caption=result.attachment_caption):
+            await self._client.send_text(
+                to_number, "⚠️ I couldn't attach the sheet — the draft is still waiting."
+            )
 
     async def _notify(self, result: CommandResult) -> None:
         """Fan out to third parties (the dual-approval request in

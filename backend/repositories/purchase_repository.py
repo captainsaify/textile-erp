@@ -4,6 +4,7 @@ shape this follows."""
 from __future__ import annotations
 
 import datetime
+import decimal
 import uuid
 
 from sqlalchemy import func, select
@@ -71,3 +72,42 @@ class PurchaseRepository:
             .options(selectinload(PurchaseHeader.lines))
         )
         return list((await self._session.execute(stmt)).scalars())
+
+
+class SalesLookupRepository:
+    """Recent sales, for picking one rather than remembering a uuid.
+
+    A sale has no invoice number of its own -- the partners don't write
+    one -- so it is identified by the short id every other surface
+    already quotes, shown beside the date, customer and amount that make
+    it recognisable.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def recent(
+        self, org_id: uuid.UUID, *, limit: int = 9
+    ) -> list[tuple[str, str, datetime.date, decimal.Decimal]]:
+        from backend.models import Customer, SalesHeader
+
+        stmt = (
+            select(
+                SalesHeader.id,
+                Customer.name,
+                SalesHeader.sale_date,
+                SalesHeader.grand_total,
+            )
+            .join(Customer, Customer.id == SalesHeader.customer_id)
+            .where(
+                SalesHeader.org_id == org_id,
+                SalesHeader.deleted_at.is_(None),
+                SalesHeader.status == "confirmed",
+            )
+            .order_by(SalesHeader.sale_date.desc(), SalesHeader.created_at.desc())
+            .limit(limit)
+        )
+        return [
+            (str(row[0])[:8], row[1], row[2], row[3])
+            for row in (await self._session.execute(stmt)).all()
+        ]
