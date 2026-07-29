@@ -67,6 +67,52 @@ class AuditRepository:
                 return candidate
         return None
 
+    async def recent_payments(
+        self, org_id: uuid.UUID, *, limit: int = 9
+    ) -> list[tuple[str, bool, str, str, datetime.date]]:
+        """Recent settlements that haven't been reversed, for picking one.
+
+        Read from audit_logs rather than the ledger because the audit row
+        is what carries the *allocations* -- which bills the money was
+        applied to -- and reversing without those would leave bills
+        marked settled.
+        """
+        from backend.models import Customer, Supplier
+
+        stmt = (
+            select(AuditLog)
+            .where(
+                AuditLog.org_id == org_id,
+                AuditLog.action.in_(["payment.paid", "payment.received"]),
+            )
+            .order_by(AuditLog.created_at.desc())
+            .limit(limit * 3)
+        )
+        found: list[tuple[str, bool, str, str, datetime.date]] = []
+        for entry in (await self._session.execute(stmt)).scalars():
+            state = entry.after_state or {}
+            if state.get("reversed"):
+                continue
+            paid = entry.action == "payment.paid"
+            if paid:
+                supplier = await self._session.get(Supplier, entry.entity_id)
+                party_name = supplier.name if supplier else "(unknown)"
+            else:
+                customer = await self._session.get(Customer, entry.entity_id)
+                party_name = customer.name if customer else "(unknown)"
+            found.append(
+                (
+                    str(entry.id)[:8],
+                    paid,
+                    str(state.get("amount", "")),
+                    party_name,
+                    entry.created_at.date(),
+                )
+            )
+            if len(found) >= limit:
+                break
+        return found
+
     async def find_action(
         self, org_id: uuid.UUID, entity_type: str, entity_id: uuid.UUID
     ) -> AuditLog | None:

@@ -124,6 +124,10 @@ async def handle_undo(args: str, ctx: RequestContext) -> CommandResult:
         from backend.api.commands.expense_reversal import handle_undo_expense
 
         return await handle_undo_expense(tokens[1] if len(tokens) > 1 else "", ctx)
+    if tokens and tokens[0].lower() == "payment":
+        from backend.api.commands.payment_reversal import handle_undo_payment
+
+        return await handle_undo_payment(tokens[1] if len(tokens) > 1 else "", ctx)
 
     text = args.strip()
     entity: str | None = None

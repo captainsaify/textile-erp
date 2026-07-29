@@ -66,6 +66,10 @@ class CommandSlot:
     #: the value as it should appear in the assembled command.
     validate: Callable[[str], str] = lambda value: value.strip()
     example: str = ""
+    #: Overrides `question`/`example` once earlier answers are known.
+    #: "Give its code or name, e.g. TRP" is right for a product and
+    #: wrong for everything else the same slot serves.
+    question_of: Callable[[dict[str, str]], tuple[str, str]] | None = None
     #: Runs after a valid answer is stored, and may rewrite `filled`.
     #: Clearing a slot's own answer is what lets a wizard loop: a sale
     #: collects one item, banks it, and asks for the next.
@@ -134,7 +138,7 @@ def _affirmative(value: str) -> str:
 #: A confirmed bill is never edited or deleted in place -- stock and the
 #: books were already derived from it. These route to `undo`, which
 #: posts a compensating reversal (docs/04_Purchases.md §8).
-REVERSIBLE_ENTITIES = {"purchase", "sale", "expense"}
+REVERSIBLE_ENTITIES = {"purchase", "sale", "expense", "payment"}
 
 
 def _entity_kind(value: str) -> str:
@@ -142,7 +146,7 @@ def _entity_kind(value: str) -> str:
     if token not in {"product", "supplier", "customer", "brand", *REVERSIBLE_ENTITIES}:
         raise ValidationError(
             f"I can't change a '{value.strip()}'. Pick product, supplier, customer, "
-            "brand, purchase, sale or expense."
+            "brand, purchase, sale, expense or payment."
         )
     return token
 
@@ -303,6 +307,11 @@ async def _entity_menu(ctx: RequestContext, filled: dict[str, str]) -> Interacti
                         title="Expense",
                         description="Reversed; money goes back",
                     ),
+                    Choice(
+                        id="slot payment",
+                        title="Payment",
+                        description="Paid or received; bills reopen",
+                    ),
                 ),
             ),
         ),
@@ -337,6 +346,19 @@ async def _field_menu(ctx: RequestContext, filled: dict[str, str]) -> Interactiv
             ),
         ),
     )
+
+
+def _reference_wording(filled: dict[str, str]) -> tuple[str, str]:
+    """What to ask when there is no list to offer.
+
+    A bill or an expense has neither a code nor a name, so the product
+    wording -- "give its code or name, e.g. TRP" -- was asking the wrong
+    question wherever the picker came back empty.
+    """
+    entity = filled.get("entity", "")
+    if entity in REVERSIBLE_ENTITIES:
+        return (f"Which {entity}? Give its reference.", "e.g. ec196ee8")
+    return ("Which one? Give its code or name.", "e.g. TRP")
 
 
 async def _reference_menu(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
@@ -395,6 +417,22 @@ async def _reference_menu(ctx: RequestContext, filled: dict[str, str]) -> Intera
                 description=f"{fmt_money(amount)} · ref {short_id}"[:72],
             )
             for short_id, category, day, amount in recent_expenses
+        )
+
+    elif entity == "payment":
+        from backend.repositories.audit_repository import AuditRepository
+
+        async with ctx.session_factory() as session:
+            recent_payments = await AuditRepository(session).recent_payments(
+                ctx.user.org_id, limit=PARTY_ROWS
+            )
+        rows = tuple(
+            Choice(
+                id=f"slot {short_id}",
+                title=f"{'Paid' if paid else 'Recvd'} {amount}"[:24],
+                description=f"{party} · {fmt_date(day)} · ref {short_id}"[:72],
+            )
+            for short_id, paid, amount, party, day in recent_payments
         )
 
     if not rows:
@@ -978,6 +1016,7 @@ WIZARDS: dict[str, CommandWizard] = {
             CommandSlot(
                 name="reference",
                 question="Which one? Give its code or name.",
+                question_of=_reference_wording,
                 choices=_reference_menu,
                 validate=_nonempty("Reference"),
                 example="e.g. TRP",
@@ -1017,6 +1056,7 @@ WIZARDS: dict[str, CommandWizard] = {
             CommandSlot(
                 name="reference",
                 question="Which one? Give its code or name.",
+                question_of=_reference_wording,
                 choices=_reference_menu,
                 validate=_nonempty("Reference"),
                 example="e.g. TRP",
@@ -1073,7 +1113,10 @@ async def ask(
     """
     filled = filled or {}
     slot = next(s for s in wizard.slots if s.name == slot_name)
-    body = f"{slot.question}\n{slot.example}".strip()
+    question, example = (
+        slot.question_of(filled) if slot.question_of is not None else (slot.question, slot.example)
+    )
+    body = f"{question}\n{example}".strip()
     interactive = await slot.choices(ctx, filled) if slot.choices is not None else None
     if interactive is None:
         return CommandResult(reply=body)
