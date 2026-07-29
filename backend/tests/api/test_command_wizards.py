@@ -527,3 +527,62 @@ async def test_stopping_works_at_any_point_in_the_wizard(ctx: RequestContext) ->
     assert "no expense was recorded" in result.reply
     state, _ = await state_of(ctx)
     assert state == IDLE
+
+
+# --------------------------------------------------------------------
+# deleting a bill: routed, not refused
+# --------------------------------------------------------------------
+
+
+async def test_the_delete_menu_admits_that_bills_exist(ctx: RequestContext) -> None:
+    """Offering only the four master records left someone wanting to
+    remove a wrong bill staring at a menu that didn't mention bills,
+    with nothing saying why."""
+    await begin("delete", "", ctx)
+    question = await wizards.ask(wizards.WIZARDS["delete"], "entity", ctx, {})
+
+    assert isinstance(question.interactive, ListMenu)
+    offered = [row.id for section in question.interactive.sections for row in section.rows]
+    assert "slot purchase" in offered
+    assert "slot sale" in offered
+    # and it says what will actually happen to them
+    titles = [section.title for section in question.interactive.sections]
+    assert any("reversed" in title.lower() for title in titles)
+
+
+async def test_deleting_a_bill_says_reverse_not_delete(ctx: RequestContext) -> None:
+    await begin("delete", "purchase INV-001", ctx)
+    _, context = await state_of(ctx)
+    question = await wizards.ask(wizards.WIZARDS["delete"], "confirm", ctx, dict(context["filled"]))
+
+    assert isinstance(question.interactive, Buttons)
+    assert "Reverse purchase INV-001?" in question.interactive.body
+    assert [c.title for c in question.interactive.choices] == ["Yes, reverse", "Keep it"]
+    assert "compensating entry" in question.interactive.footer
+
+
+def test_a_bill_reroutes_to_undo_rather_than_dead_ending() -> None:
+    """`delete purchase X` used to explain that it couldn't, and stop.
+    Now it does the thing the person wanted."""
+    delete = wizards.WIZARDS["delete"]
+
+    assert delete.reroute({"entity": "purchase", "reference": "INV-1"}) == (
+        "undo",
+        "purchase INV-1",
+    )
+    assert delete.reroute({"entity": "sale", "reference": "abc123"}) == ("undo", "sale abc123")
+    # a master record is still a real delete
+    assert delete.reroute({"entity": "product", "reference": "TRP"}) is None
+
+
+async def test_editing_a_bill_never_asks_which_field(ctx: RequestContext) -> None:
+    """A bill isn't edited field-by-field -- stock and the books were
+    derived from it, so it is reversed and re-entered. With nothing left
+    to ask, the wizard doesn't start at all."""
+    started = await begin("edit", "purchase INV-001", ctx)
+
+    assert started is None, "no field/value questions remain, so it ran"
+    assert wizards.WIZARDS["edit"].reroute({"entity": "purchase", "reference": "INV-001"}) == (
+        "undo",
+        "purchase INV-001",
+    )

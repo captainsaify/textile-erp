@@ -29,9 +29,7 @@ def parse_receive(args: str) -> tuple[str, str, decimal.Decimal]:
     try:
         pieces = decimal.Decimal(raw.replace(",", ""))
     except decimal.InvalidOperation:
-        raise ValidationError(
-            f"'{raw}' isn't a number of bales I can read. {USAGE}"
-        ) from None
+        raise ValidationError(f"'{raw}' isn't a number of bales I can read. {USAGE}") from None
     return invoice_no, code, pieces
 
 
@@ -42,8 +40,7 @@ def render(result: CorrectionResult) -> str:
         f"{fmt_qty(result.old_pieces)} → {fmt_qty(result.new_pieces)} bales "
         f"× {fmt_qty(result.weight_per_piece)} = {fmt_qty(result.new_qty)} "
         f"(was {fmt_qty(result.old_qty)})",
-        f"Invoice total: {fmt_money(result.old_grand_total)} → "
-        f"{fmt_money(result.new_grand_total)}",
+        f"Invoice total: {fmt_money(result.old_grand_total)} → {fmt_money(result.new_grand_total)}",
         f"Still owed to {result.supplier_name}: {fmt_money(result.payable_after)}",
         f"Stock now {fmt_qty(result.resulting_qty_on_hand)} "
         f"@ {fmt_money(result.resulting_avg_cost)} avg",

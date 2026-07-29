@@ -81,6 +81,10 @@ class CommandWizard:
     #: What the user already typed, mapped onto slots, so `paid wagdia`
     #: asks only for the amount and the method.
     prefill: Callable[[str], dict[str, str]] = lambda args: {}
+    #: Lets a finished wizard hand off to a *different* command. Deleting
+    #: a bill is really `undo`, and routing there is what turns "you
+    #: can't do that here" into the thing the person wanted.
+    reroute: Callable[[dict[str, str]], tuple[str, str] | None] = lambda filled: None
 
 
 # --------------------------------------------------------------------
@@ -123,11 +127,18 @@ def _affirmative(value: str) -> str:
     return token
 
 
+#: A confirmed bill is never edited or deleted in place -- stock and the
+#: books were already derived from it. These route to `undo`, which
+#: posts a compensating reversal (docs/04_Purchases.md §8).
+REVERSIBLE_ENTITIES = {"purchase", "sale"}
+
+
 def _entity_kind(value: str) -> str:
     token = value.strip().lower().rstrip("s")
-    if token not in {"product", "supplier", "customer", "brand"}:
+    if token not in {"product", "supplier", "customer", "brand", *REVERSIBLE_ENTITIES}:
         raise ValidationError(
-            f"I can't change a '{value.strip()}'. Pick product, supplier, customer or brand."
+            f"I can't change a '{value.strip()}'. Pick product, supplier, customer, "
+            "brand, purchase or sale."
         )
     return token
 
@@ -266,6 +277,25 @@ async def _entity_menu(ctx: RequestContext, filled: dict[str, str]) -> Interacti
                     Choice(id="slot brand", title="Brand", description="Name"),
                 ),
             ),
+            # Offering only the four master records left someone wanting
+            # to remove a wrong bill staring at a menu that didn't
+            # mention bills, with nothing explaining why. These rows are
+            # here to say what happens instead, and then do it.
+            Section(
+                title="Bills — reversed",
+                rows=(
+                    Choice(
+                        id="slot purchase",
+                        title="Purchase",
+                        description="Reversed with a compensating entry",
+                    ),
+                    Choice(
+                        id="slot sale",
+                        title="Sale",
+                        description="Reversed; stock goes back",
+                    ),
+                ),
+            ),
         ),
     )
 
@@ -307,7 +337,17 @@ async def _delete_confirm(ctx: RequestContext, filled: dict[str, str]) -> Intera
     from nothing to gone -- so the last of those taps has to state what
     it is about to do, not just say "confirm?".
     """
-    what = f"{filled.get('entity', 'record')} {filled.get('reference', '')}".strip()
+    entity = filled.get("entity", "record")
+    what = f"{entity} {filled.get('reference', '')}".strip()
+    if entity in REVERSIBLE_ENTITIES:
+        return Buttons(
+            body=f"Reverse {what}?",
+            choices=(
+                Choice(id="slot delete", title="Yes, reverse"),
+                Choice(id="slot cancel", title="Keep it"),
+            ),
+            footer="Stock and the books are put back by a compensating entry.",
+        )
     return Buttons(
         body=f"Delete {what}?",
         choices=(
@@ -808,15 +848,23 @@ WIZARDS: dict[str, CommandWizard] = {
                 question="Which field?",
                 choices=_field_menu,
                 validate=_nonempty("Field"),
+                # a bill isn't edited field-by-field; it is reversed
+                applies=lambda f: f.get("entity") not in REVERSIBLE_ENTITIES,
             ),
             CommandSlot(
                 name="value",
                 question="What should it be?",
                 validate=_nonempty("Value"),
+                applies=lambda f: f.get("entity") not in REVERSIBLE_ENTITIES,
             ),
         ),
         assemble=lambda f: f"{f['entity']} {f['reference']} {f['field']} {f['value']}",
         prefill=_prefill_entity,
+        reroute=lambda f: (
+            ("undo", f"{f['entity']} {f['reference']}")
+            if f.get("entity") in REVERSIBLE_ENTITIES
+            else None
+        ),
     ),
     "delete": CommandWizard(
         command="delete",
@@ -844,6 +892,11 @@ WIZARDS: dict[str, CommandWizard] = {
         # command
         assemble=lambda f: f"{f['entity']} {f['reference']}",
         prefill=_prefill_entity,
+        reroute=lambda f: (
+            ("undo", f"{f['entity']} {f['reference']}")
+            if f.get("entity") in REVERSIBLE_ENTITIES
+            else None
+        ),
     ),
 }
 
@@ -958,6 +1011,10 @@ async def handle_reply(text: str, ctx: RequestContext, state: SessionState) -> C
     from backend.api.whatsapp_commands import COMMAND_REGISTRY
 
     await sessions.set(ctx.user.org_id, ctx.user.id, IDLE, {})
+    rerouted = wizard.reroute(filled)
+    if rerouted is not None:
+        command, args = rerouted
+        return await COMMAND_REGISTRY[command].handler(args, ctx)
     return await COMMAND_REGISTRY[wizard.command].handler(wizard.assemble(filled), ctx)
 
 

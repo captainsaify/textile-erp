@@ -65,6 +65,7 @@ def _retype(movement: object, movement_type: str) -> None:
     """
     movement.movement_type = movement_type  # type: ignore[attr-defined]
 
+
 ZERO = decimal.Decimal("0")
 TWO = decimal.Decimal("0.01")
 THREE = decimal.Decimal("0.001")
@@ -274,9 +275,7 @@ class ReceiptCorrectionService:
             raise NotFoundError("purchase", invoice_no)
         return row[0], row[1]
 
-    async def _find_line(
-        self, header: PurchaseHeader, code: str
-    ) -> tuple[PurchaseLine, Product]:
+    async def _find_line(self, header: PurchaseHeader, code: str) -> tuple[PurchaseLine, Product]:
         row = (
             await self._session.execute(
                 select(PurchaseLine, Product)
