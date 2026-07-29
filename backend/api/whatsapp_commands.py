@@ -135,6 +135,12 @@ def main_menu(role: UserRole) -> ListMenu:
     )
 
 
+async def _receive_handler(args: str, ctx: RequestContext) -> CommandResult:
+    from backend.api.commands.receipt_commands import handle_receive
+
+    return await handle_receive(args, ctx)
+
+
 COMMAND_REGISTRY: dict[str, CommandSpec] = {
     "purchase": CommandSpec(
         name="purchase",
@@ -164,6 +170,16 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.STAFF,
         handler=handle_paid,
         help_text="Record money paid to a supplier (oldest invoice first).",
+    ),
+    "receive": CommandSpec(
+        name="receive",
+        syntax="receive <invoice> <CODE> <bales received>",
+        min_role=UserRole.STAFF,
+        handler=_receive_handler,
+        help_text=(
+            "Correct what actually arrived. `receive 001 35A 9` means the invoice said "
+            "10 bales but 9 turned up: the bill, the payable and the stock all follow."
+        ),
     ),
     "return": CommandSpec(
         name="return",
