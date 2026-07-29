@@ -38,6 +38,9 @@ AWAITING_SLOT = "awaiting_slot"
 AWAITING_COMMAND_SLOT = "awaiting_command_slot"
 #: docs/22_GroupBroadcast.md §4 -- "share this with the group?"
 AWAITING_SHARE_CHOICE = "awaiting_share_choice"
+#: docs/25_PaymentReversals.md -- undoing a bill that has money sitting
+#: on it asks what to do with the money first
+AWAITING_UNDO_PAYMENT_CHOICE = "awaiting_undo_payment_choice"
 
 
 @dataclasses.dataclass(frozen=True)

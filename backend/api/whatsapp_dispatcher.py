@@ -271,6 +271,9 @@ class WhatsAppDispatcher:
         from backend.api.commands import wizards
         from backend.api.commands.intake_commands import handle_intent_reply, handle_slot_reply
         from backend.api.commands.share_commands import handle_share_reply
+        from backend.api.commands.undo_payment_choice import (
+            handle_choice as handle_undo_payment_choice,
+        )
         from backend.services.session_service import (
             AWAITING_COMMAND_SLOT,
             AWAITING_INTENT,
@@ -280,6 +283,7 @@ class WhatsAppDispatcher:
             AWAITING_SETTLEMENT_CONFIRMATION,
             AWAITING_SHARE_CHOICE,
             AWAITING_SLOT,
+            AWAITING_UNDO_PAYMENT_CHOICE,
             IDLE,
             SessionService,
         )
@@ -300,6 +304,8 @@ class WhatsAppDispatcher:
             return await wizards.handle_reply(text, context, session_state)
         if session_state.state == AWAITING_SHARE_CHOICE and spec is None:
             return await handle_share_reply(text, context, session_state)
+        if session_state.state == AWAITING_UNDO_PAYMENT_CHOICE and spec is None:
+            return await handle_undo_payment_choice(text, context, session_state)
 
         if spec is None:
             # not a command: an active session interprets it as a reply in

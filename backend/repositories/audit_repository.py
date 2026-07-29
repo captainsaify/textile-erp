@@ -9,6 +9,7 @@ records *who* did *what* across every aggregate.
 from __future__ import annotations
 
 import datetime
+import decimal
 import uuid
 
 from sqlalchemy import select
@@ -111,6 +112,42 @@ class AuditRepository:
             )
             if len(found) >= limit:
                 break
+        return found
+
+    async def payments_against(
+        self, org_id: uuid.UUID, reference: str
+    ) -> list[tuple[str, str, decimal.Decimal]]:
+        """Unreversed settlements that were applied to this bill.
+
+        Matched on the allocation references the settlement recorded --
+        the audit row is the only place that says which bills a payment
+        was split across, so it is the only way to know a bill has money
+        sitting on it that would be orphaned by undoing it.
+
+        Returns (payment ref, via, applied).
+        """
+        stmt = (
+            select(AuditLog)
+            .where(
+                AuditLog.org_id == org_id,
+                AuditLog.action.in_(["payment.paid", "payment.received"]),
+            )
+            .order_by(AuditLog.created_at.desc())
+        )
+        found: list[tuple[str, str, decimal.Decimal]] = []
+        for entry in (await self._session.execute(stmt)).scalars():
+            state = entry.after_state or {}
+            if state.get("reversed"):
+                continue
+            for allocation in state.get("allocations") or []:
+                if str(allocation.get("reference", "")).lower() == reference.lower():
+                    found.append(
+                        (
+                            str(entry.id)[:8],
+                            str(state.get("via", "")),
+                            decimal.Decimal(str(allocation.get("applied", "0"))),
+                        )
+                    )
         return found
 
     async def find_action(

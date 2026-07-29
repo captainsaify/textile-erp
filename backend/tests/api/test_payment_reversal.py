@@ -206,3 +206,80 @@ def test_a_bill_reference_asks_for_a_reference_not_a_product_code() -> None:
     question, example = _reference_wording({"entity": "product"})
     assert "code or name" in question
     assert "TRP" in example
+
+
+# --------------------------------------------------------------------
+# undoing a bill that still has money on it
+# --------------------------------------------------------------------
+
+
+async def test_undoing_a_paid_bill_asks_what_to_do_with_the_money(
+    session_factory: async_sessionmaker[AsyncSession], staff_user: User
+) -> None:
+    """Both silent answers are wrong: reversing the payment takes back
+    money that really was sent, and leaving it orphans a receipt against
+    a bill that no longer exists."""
+    from backend.api.command_types import RequestContext
+    from backend.api.commands.correction_commands import handle_undo
+    from backend.api.interactive import Buttons
+    from backend.services.session_service import (
+        AWAITING_UNDO_PAYMENT_CHOICE,
+        SessionService,
+    )
+
+    supplier, invoice = await _bill(session_factory, staff_user, total="10000")
+    await _pay(session_factory, staff_user, supplier, "4000")
+    ctx = RequestContext(user=staff_user, session_factory=session_factory)
+
+    result = await handle_undo(f"purchase {invoice}", ctx)
+
+    assert isinstance(result.interactive, Buttons)
+    assert "4,000" in result.reply
+    assert [c.title for c in result.interactive.choices] == [
+        "Reverse both",
+        "Keep the money",
+        "Cancel",
+    ]
+    state = await SessionService(session_factory).get(ORG, staff_user.id)
+    assert state.state == AWAITING_UNDO_PAYMENT_CHOICE
+    assert state.context["reference"] == invoice
+
+
+async def test_cancelling_that_question_changes_nothing(
+    session_factory: async_sessionmaker[AsyncSession], staff_user: User
+) -> None:
+    from backend.api.command_types import RequestContext
+    from backend.api.commands import undo_payment_choice
+    from backend.api.commands.correction_commands import handle_undo
+    from backend.services.session_service import IDLE, SessionService
+
+    supplier, invoice = await _bill(session_factory, staff_user, total="10000")
+    await _pay(session_factory, staff_user, supplier, "4000")
+    ctx = RequestContext(user=staff_user, session_factory=session_factory)
+    await handle_undo(f"purchase {invoice}", ctx)
+
+    state = await SessionService(session_factory).get(ORG, staff_user.id)
+    result = await undo_payment_choice.handle_choice("undo cancel", ctx, state)
+
+    assert "Left everything as it was" in result.reply
+    assert (await SessionService(session_factory).get(ORG, staff_user.id)).state == IDLE
+    async with session_factory() as session:
+        paid = (
+            await session.execute(sa.text("SELECT amount_paid FROM purchase_headers"))
+        ).scalar_one()
+        assert paid == D("4000.00"), "the payment is untouched"
+
+
+async def test_an_unpaid_bill_is_undone_without_the_question(
+    session_factory: async_sessionmaker[AsyncSession], staff_user: User
+) -> None:
+    """The question only exists because money is involved."""
+    from backend.api.command_types import RequestContext
+    from backend.api.commands.correction_commands import handle_undo
+
+    _, invoice = await _bill(session_factory, staff_user, total="10000")
+    ctx = RequestContext(user=staff_user, session_factory=session_factory)
+
+    result = await handle_undo(f"purchase {invoice}", ctx)
+
+    assert result.interactive is None

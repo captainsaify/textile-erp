@@ -138,6 +138,25 @@ async def handle_undo(args: str, ctx: RequestContext) -> CommandResult:
             return CommandResult(reply=UNDO_USAGE)
         entity, reference = parts[0].lower(), parts[1].strip()
 
+    if entity in {"purchase", "sale"} and reference:
+        from backend.api.commands import undo_payment_choice
+        from backend.repositories.audit_repository import AuditRepository
+
+        async with ctx.session_factory() as session:
+            applied = await AuditRepository(session).payments_against(ctx.user.org_id, reference)
+        if applied:
+            # Neither silent answer is right: reversing the payment takes
+            # back money that really was sent, and leaving it orphans a
+            # receipt against a bill that no longer exists.
+            await undo_payment_choice.remember(entity, reference, applied, ctx)
+            return undo_payment_choice.offer(entity, reference, applied)
+
+    return await run_undo(entity, reference, ctx)
+
+
+async def run_undo(
+    entity: str | None, reference: str | None, ctx: RequestContext
+) -> CommandResult:
     try:
         async with ctx.session_factory() as session:
             result = await UndoService(session).undo(
