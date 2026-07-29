@@ -34,7 +34,10 @@ logger = get_logger(__name__)
 
 # Opus-tier high-resolution vision tops out here; larger images are
 # downscaled server-side anyway, so do it locally to bound token cost.
-MAX_EDGE_PX = 2576
+#: Anthropic's guidance is that images above ~1568px on the long edge
+#: cost more without reading better. At 2576 a sheet was billing roughly
+#: 6,600 image tokens; at 1568 it is about 2,500, for the same rows.
+MAX_EDGE_PX = 1568
 VISION_CONFIDENCE = 0.97  # what the model returns is not cell-scored
 UNREADABLE = "?"
 

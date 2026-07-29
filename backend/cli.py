@@ -222,6 +222,49 @@ def assign_brand(
         )
 
 
+@cli.command("ocr-compare")
+def ocr_compare(
+    image: Annotated[str, typer.Option("--image", help="Path to a sheet photo")],
+    models: Annotated[
+        str, typer.Option("--models", help="Comma-separated model ids")
+    ] = "claude-haiku-4-5,claude-opus-5",
+) -> None:
+    """Read one sheet with several models and print what each returned.
+
+    Cost is the reason this exists. A cheaper model is only cheaper if it
+    still reads *your* sheets, and that is a question about your
+    handwriting and your columns -- not something to settle from a
+    pricing table. Run it once on a real photo, compare the rows, then
+    set VISION_MODEL.
+
+    Each run bills a real API call, so this costs a few paise to answer
+    properly.
+    """
+    import time
+    from pathlib import Path
+
+    from backend.ocr.vision_engine import VisionSheetReader, VisionUnavailableError
+
+    data = Path(image).read_bytes()
+    for model in [m.strip() for m in models.split(",") if m.strip()]:
+        reader = VisionSheetReader(model=model)
+        started = time.monotonic()
+        try:
+            sheet = reader.read_sheet(data)
+        except VisionUnavailableError as exc:
+            typer.secho(f"{model}: unavailable — {exc}", fg=typer.colors.RED)
+            continue
+        elapsed = time.monotonic() - started
+        typer.secho(f"\n{model} — {len(sheet.rows)} rows in {elapsed:.1f}s", bold=True)
+        typer.echo(f"  supplier={sheet.supplier_name!r} invoice={sheet.invoice_no!r}")
+        for index, row in enumerate(sheet.rows[:5], start=1):
+            fields = {name: field.text for name, field in row.fields.items()}
+            typer.echo(f"  {index}. {fields}")
+        if len(sheet.rows) > 5:
+            typer.echo(f"  ... {len(sheet.rows) - 5} more")
+        if sheet.unreadable_note:
+            typer.secho(f"  note: {sheet.unreadable_note}", fg=typer.colors.YELLOW)
+
 # Must stay last: typer registers commands as the module executes, so an
 # entrypoint placed above a @cli.command() runs before that command
 # exists. `set-password` was unreachable this way.

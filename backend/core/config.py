@@ -61,7 +61,12 @@ class Settings(BaseSettings):
     # Local OCR's accuracy is bounded by grid detection on a photo; a
     # vision model reads the table as a table. Needs anthropic_api_key.
     ocr_use_vision: bool = True
-    vision_model: str = "claude-opus-5"
+    #: Transcribing a table is a reading task, not a reasoning one, and
+    #: it was defaulting to the most expensive model available. Haiku is
+    #: roughly a fifth the price per sheet. Override with VISION_MODEL if
+    #: a hard-to-read sheet needs more; `ocr compare` puts the two side
+    #: by side on a real photo before you decide.
+    vision_model: str = "claude-haiku-4-5"
 
     @property
     def is_local(self) -> bool:

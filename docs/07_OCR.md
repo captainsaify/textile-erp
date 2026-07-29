@@ -166,7 +166,20 @@ pipeline.
 anywhere here would violate the money/quantity rule before the value
 ever reached the draft.
 
-**Cost and latency.** Roughly $0.05 and ~18s per sheet. That cost is why
+**Cost and latency.** The model is configurable (`VISION_MODEL`) and
+defaults to `claude-haiku-4-5`, because transcribing a table is a
+reading task rather than a reasoning one. It defaulted to `claude-opus-5`
+for the first weeks and cost roughly $0.06 a sheet; Haiku is about a
+fifth of that. Images are also downscaled to 1568px on the long edge --
+above that, per Anthropic's guidance, a photo bills more without reading
+better.
+
+`python -m backend.cli ocr-compare --image <photo>` reads one sheet with
+several models and prints what each returned. A cheaper model is only
+cheaper if it still reads *your* sheets, and that is a question about
+your handwriting and your columns, not one to settle from a price list.
+
+Roughly ~18s per sheet. That cost is why
 [20_ConversationalIntake.md §2](20_ConversationalIntake.md#flow) asks
 what a photo *is* before reading it: a mis-sent picture must not spend a
 vision call. Setting `ANTHROPIC_API_KEY` empty cleanly reverts to local
