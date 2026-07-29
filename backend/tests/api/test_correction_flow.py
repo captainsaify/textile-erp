@@ -743,7 +743,11 @@ async def test_undo_sale_returns_stock_and_cancels_the_sale(
         await AuditService(session).record(
             ORG,
             ctx.user.id,
-            action="sale.confirmed",
+            # what sales_service actually writes. This fixture said
+            # "sale.confirmed" and so did the undo registry, so the test
+            # passed while every real sale -- recorded as "sale.created"
+            # -- was unundoable.
+            action="sale.created",
             entity_type="sales_headers",
             entity_id=sale.id,
             after_state={"grand_total": "2000"},

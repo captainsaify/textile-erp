@@ -16,9 +16,7 @@ from backend.services.money_service import MoneyService
 
 async def handle_undo_expense(reference: str, ctx: RequestContext) -> CommandResult:
     if not reference.strip():
-        return CommandResult(
-            reply="Which expense? Use its reference — 'expenses' lists them."
-        )
+        return CommandResult(reply="Which expense? Use its reference — 'expenses' lists them.")
     try:
         async with ctx.session_factory() as session:
             result = await MoneyService(session).reverse_expense(
@@ -29,9 +27,7 @@ async def handle_undo_expense(reference: str, ctx: RequestContext) -> CommandRes
     except DomainError as exc:
         return CommandResult(reply=exc.message)
 
-    where = (
-        "the partner's capital" if result.paid_by_partner else f"{result.via} balance"
-    )
+    where = "the partner's capital" if result.paid_by_partner else f"{result.via} balance"
     return CommandResult(
         reply=(
             f"↩️ Expense reversed — {result.category} {fmt_money(result.amount)}.\n"

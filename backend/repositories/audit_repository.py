@@ -20,9 +20,14 @@ from backend.models import AuditLog
 #: Anything absent is refused by name rather than silently skipped --
 #: quietly undoing an *older* action than the one the user meant would
 #: be worse than saying no.
+#: Action name -> the table it acts on. These are matched against what
+#: services actually write, so a rename on either side breaks `undo`
+#: silently -- `sale.confirmed` was listed here while sales_service has
+#: always written `sale.created`, which meant no sale was ever undoable.
+#: test_undo_actions_exist keeps the two honest.
 UNDOABLE_ACTIONS: dict[str, str] = {
     "purchase.confirmed": "purchase_headers",
-    "sale.confirmed": "sales_headers",
+    "sale.created": "sales_headers",
     "expense.created": "expenses",
     "income.created": "income",
     "capital.contribution": "partner_capital",

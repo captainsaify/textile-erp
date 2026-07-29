@@ -219,7 +219,7 @@ class UndoService:
             today = await business_today(self._session, org_id)
             handlers = {
                 "purchase.confirmed": self._undo_purchase,
-                "sale.confirmed": self._undo_sale,
+                "sale.created": self._undo_sale,
                 "expense.created": self._undo_expense,
                 "income.created": self._undo_income,
                 "capital.contribution": self._undo_capital,

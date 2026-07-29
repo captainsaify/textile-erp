@@ -295,9 +295,7 @@ class MoneyService:
                     created_by=actor.id,
                 )
                 balance_after = ledger_row.resulting_balance
-                debit_account = (
-                    AccountCode.CASH if expense.paid_via == "cash" else AccountCode.BANK
-                )
+                debit_account = AccountCode.CASH if expense.paid_via == "cash" else AccountCode.BANK
             else:
                 capital_row = await self._capital.append(
                     org_id,
