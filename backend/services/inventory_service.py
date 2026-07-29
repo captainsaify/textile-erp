@@ -198,6 +198,61 @@ class InventoryService:
         await self._session.flush()
         return movement
 
+    async def restate_cost(
+        self,
+        org_id: uuid.UUID,
+        *,
+        product_id: uuid.UUID,
+        warehouse_id: uuid.UUID,
+        value_delta: decimal.Decimal,
+        source_id: uuid.UUID,
+        created_by: uuid.UUID,
+        reason: str,
+    ) -> tuple[InventoryMovement, decimal.Decimal]:
+        """Change what the stock on hand *cost*, without moving any of it.
+
+        Used when a bill's rate is corrected after the goods arrived: the
+        quantity is right, the price was not. `qty_delta` is zero, so
+        `qty_on_hand` still equals the signed sum of movements and the
+        nightly reconciliation is untouched -- only the value moves.
+
+        Returns (movement, new average). The average cannot go negative:
+        a correction large enough to do that means something else is
+        wrong, and inventing a negative cost basis would poison every
+        later sale silently.
+        """
+        inventory = await self._locked_row(org_id, product_id, warehouse_id)
+        old_qty = inventory.qty_on_hand
+        old_avg = inventory.weighted_avg_cost
+
+        if old_qty <= ZERO:
+            # nothing left to revalue; the cost of what was sold is
+            # already in COGS and restating that is a different job
+            new_avg = old_avg
+        else:
+            new_avg = max(ZERO, ((old_qty * old_avg + value_delta) / old_qty)).quantize(FOUR_PLACES)
+
+        movement = InventoryMovement(
+            org_id=org_id,
+            product_id=product_id,
+            warehouse_id=warehouse_id,
+            movement_type=MovementType.ADJUSTMENT_INCREASE
+            if value_delta >= ZERO
+            else MovementType.ADJUSTMENT_DECREASE,
+            qty_delta=ZERO,
+            unit_cost=new_avg,
+            resulting_qty_on_hand=old_qty,
+            resulting_avg_cost=new_avg,
+            source_type="purchase_line",
+            source_id=source_id,
+            reason=reason,
+            created_by=created_by,
+        )
+        self._session.add(movement)
+        inventory.weighted_avg_cost = new_avg
+        await self._session.flush()
+        return movement, new_avg
+
     async def record_purchase_return_movement(
         self,
         org_id: uuid.UUID,

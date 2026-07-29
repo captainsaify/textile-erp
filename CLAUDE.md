@@ -148,7 +148,7 @@ Every business table: UUID PK, `org_id` FK, `created_at`, `updated_at`,
 Full syntax/examples/errors/permissions for every command:
 [`docs/08_WhatsApp.md`](docs/08_WhatsApp.md).
 
-`purchase` · `receive` · `sale` · `return` · `expense` · `income` · `capital` ·
+`purchase` · `receive` · `rate` · `sale` · `return` · `expense` · `income` · `capital` ·
 `withdraw` · `received` · `paid` · `dashboard` · `summary` · `stock` ·
 `stock CODE` · `supplier NAME` · `customer NAME` · `ledger` · `profit` ·
 `cash` · `bank` · `search` · `edit` · `undo` · `delete` · `export` ·
@@ -198,6 +198,7 @@ trigger, threshold, and message copy in the linked doc.
 | [docs/21_WebDashboard.md](docs/21_WebDashboard.md) | Read-heavy dashboard, chart forms, deployment on the domain |
 | [docs/22_GroupBroadcast.md](docs/22_GroupBroadcast.md) | Posting to the partners' group via an outbound-only relay |
 | [docs/23_ReceiptCorrections.md](docs/23_ReceiptCorrections.md) | When fewer bales arrive than were billed |
+| [docs/26_RateChanges.md](docs/26_RateChanges.md) | Correcting the price on a confirmed bill |
 
 ## Coding Standards (summary — full detail in [`docs/17_CodingStandards.md`](docs/17_CodingStandards.md))
 

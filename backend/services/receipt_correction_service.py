@@ -300,3 +300,181 @@ class ReceiptCorrectionService:
                 )
             ).scalars()
         )
+
+
+@dataclasses.dataclass(frozen=True)
+class RateChange:
+    invoice_no: str
+    supplier_name: str
+    codes: list[str]
+    old_rate: decimal.Decimal | None
+    new_rate: decimal.Decimal
+    old_grand_total: decimal.Decimal
+    new_grand_total: decimal.Decimal
+    payable_after: decimal.Decimal
+    now_overpaid: bool
+    #: Codes whose stock is partly or wholly sold. Their COGS was already
+    #: booked at the old cost and is not restated here.
+    partly_sold: list[str]
+
+
+class RateChangeService:
+    """Correct the rate on a confirmed bill -- docs/26_RateChanges.md.
+
+    The quantity was right and the price was not, which is a different
+    correction from a short delivery: nothing moves, but what the stock
+    *cost* changes, and so does the bill and the payable.
+
+    What it will not do is restate goods already sold. Their cost went
+    into COGS when they were sold; reaching back through every later sale
+    to re-derive margin is a different operation with a different blast
+    radius, and doing it silently would rewrite profit figures the
+    partners have already seen. Those codes are named in the reply.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._inventory = InventoryService(session)
+        self._journal = JournalService(session)
+        self._audit = AuditService(session)
+
+    async def change(
+        self,
+        actor: User,
+        *,
+        invoice_no: str,
+        new_rate: decimal.Decimal,
+        codes: list[str] | None = None,
+        whatsapp_message_id: str | None = None,
+    ) -> RateChange:
+        from backend.models import Inventory
+
+        if new_rate <= ZERO:
+            raise ValidationError("A rate has to be more than zero.")
+
+        org_id = actor.org_id
+        helper = ReceiptCorrectionService(self._session)
+        header, supplier = await helper._find_invoice(org_id, invoice_no)
+        lines = await helper._all_lines(header)
+
+        wanted = {code.upper() for code in codes} if codes else None
+        targets: list[tuple[PurchaseLine, Product]] = []
+        for line in lines:
+            product = await self._session.get(Product, line.product_id)
+            if product is None:
+                continue
+            if wanted is None or product.code.upper() in wanted:
+                targets.append((line, product))
+
+        if not targets:
+            raise NotFoundError(f"those codes on {invoice_no}", ", ".join(codes or []))
+        if wanted is not None:
+            missing = wanted - {product.code.upper() for _, product in targets}
+            if missing:
+                raise NotFoundError(f"on invoice {invoice_no}", ", ".join(sorted(missing)))
+
+        old_rate = targets[0][0].rate if len({line.rate for line, _ in targets}) == 1 else None
+        old_grand_total = header.grand_total
+        old_landed = {line.id: (line.landed_cost_per_unit or ZERO) for line, _ in targets}
+
+        for line, _ in targets:
+            line.rate = new_rate
+            line.line_total = (line.qty * new_rate).quantize(TWO)
+
+        # freight splits by weight, which hasn't moved; other charges
+        # split by line value, which has
+        freight_shares = allocate(header.freight, [row.qty for row in lines])
+        other_shares = allocate(header.other_charges, [row.line_total for row in lines])
+        for index, row in enumerate(lines):
+            row.freight_allocated = freight_shares[index]
+            row.landed_cost_per_unit = (
+                (row.line_total + freight_shares[index] + other_shares[index]) / row.qty
+            ).quantize(FOUR)
+
+        header.subtotal = sum((row.line_total for row in lines), ZERO).quantize(TWO)
+        header.grand_total = (header.subtotal + header.freight + header.other_charges).quantize(TWO)
+
+        partly_sold: list[str] = []
+        for line, product in targets:
+            delta = (line.landed_cost_per_unit or ZERO) - old_landed[line.id]
+            if delta == ZERO:
+                continue
+            stock = (
+                await self._session.execute(
+                    select(Inventory).where(
+                        Inventory.org_id == org_id,
+                        Inventory.product_id == line.product_id,
+                        Inventory.warehouse_id == header.warehouse_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            on_hand = stock.qty_on_hand if stock is not None else ZERO
+            if on_hand < line.qty:
+                partly_sold.append(product.code)
+            if on_hand <= ZERO:
+                continue
+            await self._inventory.restate_cost(
+                org_id,
+                product_id=line.product_id,
+                warehouse_id=header.warehouse_id,
+                value_delta=(delta * min(on_hand, line.qty)).quantize(TWO),
+                source_id=line.id,
+                created_by=actor.id,
+                reason=f"rate corrected on {invoice_no}",
+            )
+
+        value_delta = (header.grand_total - old_grand_total).quantize(TWO)
+        if value_delta != ZERO:
+            magnitude = abs(value_delta)
+            if value_delta < ZERO:
+                debits = [(AccountCode.ACCOUNTS_PAYABLE, magnitude)]
+                credits = [(AccountCode.INVENTORY, magnitude)]
+            else:
+                debits = [(AccountCode.INVENTORY, magnitude)]
+                credits = [(AccountCode.ACCOUNTS_PAYABLE, magnitude)]
+            await self._journal.post(
+                org_id,
+                entry_date=header.invoice_date,
+                description=f"rate correction {invoice_no}",
+                source_type="purchase_header",
+                source_id=header.id,
+                created_by=actor.id,
+                debits=debits,
+                credits=credits,
+            )
+
+        changed_codes = [product.code for _, product in targets]
+        await self._audit.record(
+            org_id,
+            actor.id,
+            action="purchase.rate_corrected",
+            entity_type="purchase_headers",
+            entity_id=header.id,
+            whatsapp_message_id=whatsapp_message_id,
+            before_state={
+                "invoice_no": invoice_no,
+                "codes": ", ".join(changed_codes),
+                "rate": str(old_rate) if old_rate is not None else "mixed",
+                "grand_total": str(old_grand_total),
+            },
+            after_state={
+                "invoice_no": invoice_no,
+                "codes": ", ".join(changed_codes),
+                "rate": str(new_rate),
+                "grand_total": str(header.grand_total),
+            },
+        )
+        await self._session.flush()
+
+        return RateChange(
+            invoice_no=invoice_no,
+            supplier_name=supplier.name,
+            codes=changed_codes,
+            old_rate=old_rate,
+            new_rate=new_rate,
+            old_grand_total=old_grand_total,
+            new_grand_total=header.grand_total,
+            payable_after=(header.grand_total - header.amount_paid).quantize(TWO),
+            now_overpaid=header.amount_paid > header.grand_total,
+            partly_sold=partly_sold,
+        )

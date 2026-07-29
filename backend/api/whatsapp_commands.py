@@ -141,6 +141,12 @@ async def _sheet_handler(args: str, ctx: RequestContext) -> CommandResult:
     return await handle_sheet(args, ctx)
 
 
+async def _rate_handler(args: str, ctx: RequestContext) -> CommandResult:
+    from backend.api.commands.rate_commands import handle_rate
+
+    return await handle_rate(args, ctx)
+
+
 async def _receive_handler(args: str, ctx: RequestContext) -> CommandResult:
     from backend.api.commands.receipt_commands import handle_receive
 
@@ -185,6 +191,17 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         help_text=(
             "See the draft you're about to confirm as an Excel sheet. Nothing is saved; "
             "CONFIRM and 'discard' still work afterwards."
+        ),
+    ),
+    "rate": CommandSpec(
+        name="rate",
+        syntax="rate <invoice> <new rate> [CODE ...]",
+        min_role=UserRole.STAFF,
+        handler=_rate_handler,
+        help_text=(
+            "Correct the price on a confirmed bill. `rate 001 145` changes every line; "
+            "`rate 001 145 35A 22D` changes only those. The bill, the payable and the "
+            "cost of stock still on hand all follow."
         ),
     ),
     "receive": CommandSpec(

@@ -154,9 +154,7 @@ async def handle_undo(args: str, ctx: RequestContext) -> CommandResult:
     return await run_undo(entity, reference, ctx)
 
 
-async def run_undo(
-    entity: str | None, reference: str | None, ctx: RequestContext
-) -> CommandResult:
+async def run_undo(entity: str | None, reference: str | None, ctx: RequestContext) -> CommandResult:
     try:
         async with ctx.session_factory() as session:
             result = await UndoService(session).undo(
