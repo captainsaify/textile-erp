@@ -117,6 +117,14 @@ def render_undo(result: UndoResult) -> str:
 
 
 async def handle_undo(args: str, ctx: RequestContext) -> CommandResult:
+    # An expense isn't a stock transaction, so it reverses through the
+    # money service rather than the undo service's inventory path.
+    tokens = args.split(maxsplit=1)
+    if tokens and tokens[0].lower() == "expense":
+        from backend.api.commands.expense_reversal import handle_undo_expense
+
+        return await handle_undo_expense(tokens[1] if len(tokens) > 1 else "", ctx)
+
     text = args.strip()
     entity: str | None = None
     reference: str | None = None

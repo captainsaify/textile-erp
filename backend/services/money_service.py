@@ -8,9 +8,12 @@ simplified ledger + journal + audit, all-or-nothing.
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import decimal
 import difflib
+import uuid
 
+from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.exceptions import NotFoundError, ValidationError
@@ -52,6 +55,15 @@ def _similar(category: str, existing: list[str]) -> str | None:
     others = [c for c in existing if c != category]
     matches = difflib.get_close_matches(category, others, n=1, cutoff=0.75)
     return matches[0] if matches else None
+
+
+@dataclasses.dataclass(frozen=True)
+class ExpenseReversal:
+    category: str
+    amount: decimal.Decimal
+    via: str
+    paid_by_partner: bool
+    balance_after: decimal.Decimal
 
 
 class MoneyService:
@@ -246,3 +258,138 @@ class MoneyService:
             paid_by_partner=None,
             similar_category=_similar(category, existing_categories),
         )
+
+    async def reverse_expense(
+        self,
+        actor: User,
+        *,
+        reference: str,
+        whatsapp_message_id: str | None = None,
+    ) -> ExpenseReversal:
+        """Undo an expense with compensating entries, never a deletion.
+
+        The money already moved through the ledger and the books, so what
+        goes back is the exact inverse of what went out -- including the
+        partner-capital case, where the business cash was never touched
+        and it was an implicit contribution instead. Reversing that as a
+        cash refund would invent money the business never held.
+
+        The row is soft-deleted so it stops counting toward P&L while
+        remaining visible in history (CLAUDE.md rule 3).
+        """
+        async with self._session.begin():
+            org_id = actor.org_id
+            expense = await self._find_expense(org_id, reference)
+            today = await business_today(self._session, org_id)
+
+            if expense.paid_by_partner_id is None:
+                ledger_row = await self._ledgers.append(
+                    org_id,
+                    expense.paid_via,
+                    entry_type=LedgerEntryType.EXPENSE,
+                    amount=expense.amount,
+                    source_type="expense_reversal",
+                    source_id=expense.id,
+                    entry_date=today,
+                    notes=f"reversed: {expense.category}",
+                    created_by=actor.id,
+                )
+                balance_after = ledger_row.resulting_balance
+                debit_account = (
+                    AccountCode.CASH if expense.paid_via == "cash" else AccountCode.BANK
+                )
+            else:
+                capital_row = await self._capital.append(
+                    org_id,
+                    expense.paid_by_partner_id,
+                    entry_type=CapitalEntryType.WITHDRAWAL,
+                    amount=expense.amount,
+                    settled_via=expense.paid_via,
+                    entry_date=today,
+                    notes=f"reversed expense: {expense.category}",
+                    created_by=actor.id,
+                )
+                balance_after = capital_row.resulting_balance
+                debit_account = AccountCode.PARTNER_CAPITAL
+
+            credit_account = (
+                AccountCode.FREIGHT_EXPENSE
+                if expense.category == "freight"
+                else AccountCode.OPERATING_EXPENSES
+            )
+            await self._journal.post(
+                org_id,
+                entry_date=today,
+                description=f"reversed expense: {expense.category}",
+                source_type="expense_reversal",
+                source_id=expense.id,
+                created_by=actor.id,
+                debits=[(debit_account, expense.amount)],
+                credits=[(credit_account, expense.amount)],
+            )
+
+            expense.deleted_at = datetime.datetime.now(datetime.UTC)
+            await self._audit.record(
+                org_id,
+                actor.id,
+                action="expense.reversed",
+                entity_type="expenses",
+                entity_id=expense.id,
+                whatsapp_message_id=whatsapp_message_id,
+                before_state={
+                    "category": expense.category,
+                    "amount": str(expense.amount),
+                    "via": expense.paid_via,
+                },
+                after_state={"reversed": True},
+            )
+            return ExpenseReversal(
+                category=expense.category,
+                amount=expense.amount,
+                via=expense.paid_via,
+                paid_by_partner=expense.paid_by_partner_id is not None,
+                balance_after=balance_after,
+            )
+
+    async def _find_expense(self, org_id: uuid.UUID, reference: str) -> Expense:
+        """By short id, or by category when it is unambiguous.
+
+        An ambiguous category is refused rather than resolved to "the
+        latest" -- guessing which expense someone meant is how the wrong
+        one gets reversed.
+        """
+        from sqlalchemy import String, cast, select
+
+        rows = list(
+            (
+                await self._session.execute(
+                    select(Expense).where(
+                        Expense.org_id == org_id,
+                        Expense.deleted_at.is_(None),
+                        cast(Expense.id, String).like(f"{reference.lower()}%"),
+                    )
+                )
+            ).scalars()
+        )
+        if len(rows) == 1:
+            return rows[0]
+
+        by_category = list(
+            (
+                await self._session.execute(
+                    select(Expense).where(
+                        Expense.org_id == org_id,
+                        Expense.deleted_at.is_(None),
+                        func.lower(Expense.category) == reference.lower(),
+                    )
+                )
+            ).scalars()
+        )
+        if len(by_category) == 1:
+            return by_category[0]
+        if len(by_category) > 1:
+            raise ValidationError(
+                f"There are {len(by_category)} '{reference}' expenses. Use its reference "
+                "instead — 'expenses' lists them."
+            )
+        raise NotFoundError("expense", reference)

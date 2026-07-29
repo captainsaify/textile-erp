@@ -300,6 +300,23 @@ class ExpenseRepository:
         await self._session.flush()
         return expense
 
+    async def recent(
+        self, org_id: uuid.UUID, *, limit: int = 9
+    ) -> list[tuple[str, str, datetime.date, decimal.Decimal]]:
+        """Recent expenses, for picking one rather than remembering a
+        uuid. An expense has no invoice number, so it is identified by
+        the short id shown beside what and when."""
+        stmt = (
+            select(Expense.id, Expense.category, Expense.expense_date, Expense.amount)
+            .where(Expense.org_id == org_id, Expense.deleted_at.is_(None))
+            .order_by(Expense.expense_date.desc(), Expense.created_at.desc())
+            .limit(limit)
+        )
+        return [
+            (str(row[0])[:8], row[1], row[2], row[3])
+            for row in (await self._session.execute(stmt)).all()
+        ]
+
     async def distinct_categories(self, org_id: uuid.UUID) -> list[str]:
         stmt = (
             select(Expense.category)

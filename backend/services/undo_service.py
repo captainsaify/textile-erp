@@ -18,7 +18,7 @@ import datetime
 import decimal
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import String, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.exceptions import NotFoundError, ValidationError
@@ -140,9 +140,30 @@ class UndoService:
         if entity == "sale":
             from backend.repositories.party_repository import CustomerRepository
 
+            # A sale's own short ref first. It is what `ledger`, `search`
+            # and the delete picker all quote, and it names *one* sale --
+            # where a customer name resolves to "their latest", which is
+            # a guess at which sale you meant.
+            by_ref = (
+                (
+                    await self._session.execute(
+                        select(SalesHeader).where(
+                            SalesHeader.org_id == org_id,
+                            SalesHeader.deleted_at.is_(None),
+                            SalesHeader.status == "confirmed",
+                            cast(SalesHeader.id, String).like(f"{reference.lower()}%"),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if by_ref is not None:
+                return by_ref.id
+
             customers = await CustomerRepository(self._session).search(org_id, reference, limit=1)
             if not customers:
-                raise NotFoundError("customer", reference)
+                raise NotFoundError("sale", reference)
             sale = (
                 (
                     await self._session.execute(
@@ -163,7 +184,10 @@ class UndoService:
             if sale is None:
                 raise NotFoundError("recent sale", reference)
             return sale.id
-        raise ValidationError(f"'{entity}' can't be undone. Try: undo purchase <invoice-no>.")
+        raise ValidationError(
+            f"'{entity}' can't be undone. Try: undo purchase <invoice-no>, "
+            "undo sale <ref>, or undo expense <ref>."
+        )
 
     def _check_permission(self, actor: User, entry: AuditLog) -> None:
         """Owner for confirmed transactions; staff only for their own

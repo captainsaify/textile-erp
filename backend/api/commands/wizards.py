@@ -134,7 +134,7 @@ def _affirmative(value: str) -> str:
 #: A confirmed bill is never edited or deleted in place -- stock and the
 #: books were already derived from it. These route to `undo`, which
 #: posts a compensating reversal (docs/04_Purchases.md §8).
-REVERSIBLE_ENTITIES = {"purchase", "sale"}
+REVERSIBLE_ENTITIES = {"purchase", "sale", "expense"}
 
 
 def _entity_kind(value: str) -> str:
@@ -142,7 +142,7 @@ def _entity_kind(value: str) -> str:
     if token not in {"product", "supplier", "customer", "brand", *REVERSIBLE_ENTITIES}:
         raise ValidationError(
             f"I can't change a '{value.strip()}'. Pick product, supplier, customer, "
-            "brand, purchase or sale."
+            "brand, purchase, sale or expense."
         )
     return token
 
@@ -298,6 +298,11 @@ async def _entity_menu(ctx: RequestContext, filled: dict[str, str]) -> Interacti
                         title="Sale",
                         description="Reversed; stock goes back",
                     ),
+                    Choice(
+                        id="slot expense",
+                        title="Expense",
+                        description="Reversed; money goes back",
+                    ),
                 ),
             ),
         ),
@@ -374,6 +379,22 @@ async def _reference_menu(ctx: RequestContext, filled: dict[str, str]) -> Intera
                 description=f"{fmt_money(total)} · ref {short_id}"[:72],
             )
             for short_id, customer, day, total in recent_sales
+        )
+
+    elif entity == "expense":
+        from backend.repositories.accounting_repository import ExpenseRepository
+
+        async with ctx.session_factory() as session:
+            recent_expenses = await ExpenseRepository(session).recent(
+                ctx.user.org_id, limit=PARTY_ROWS
+            )
+        rows = tuple(
+            Choice(
+                id=f"slot {short_id}",
+                title=f"{category[:14]} {fmt_date(day)}"[:24],
+                description=f"{fmt_money(amount)} · ref {short_id}"[:72],
+            )
+            for short_id, category, day, amount in recent_expenses
         )
 
     if not rows:
