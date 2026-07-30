@@ -118,16 +118,22 @@ def comparable(draft: Draft) -> tuple[object, ...]:
 def test_gap_analysis_lists_only_what_is_missing() -> None:
     assert missing_slots(make_draft(), date_known=False) == list(SLOT_ORDER)
     assert missing_slots(make_draft(supplier="Wagdia"), date_known=False) == [
+        # brand is always asked unless the sheet's LABEL column gave it:
+        # a code is unique only within a brand
+        "brand",
         "invoice_no",
         "invoice_date",
         "purchase_rate",
     ]
-    assert missing_slots(make_draft(rate="150", supplier="W", invoice="I-1")) == []
+    branded = make_draft(rate="150", supplier="W", invoice="I-1")
+    branded.brand_name = "TOP"
+    assert missing_slots(branded) == []
 
 
 async def test_nothing_missing_skips_straight_to_the_preview(ctx: RequestContext) -> None:
     """The wizard must not invent questions (§12)."""
     draft = make_draft(rate="150", supplier="Wagdia", invoice="INV-1")
+    draft.brand_name = "TOP"
     result = await begin_slots(draft, missing_slots(draft), ctx)
 
     assert "Purchase draft ready" in result.reply
@@ -138,8 +144,8 @@ async def test_nothing_missing_skips_straight_to_the_preview(ctx: RequestContext
 
 async def test_summary_says_how_many_questions_are_coming(ctx: RequestContext) -> None:
     result = await start(ctx)
-    assert "4 question(s)" in result.reply
-    assert "supplier, invoice number, invoice date, rate" in result.reply
+    assert "5 question(s)" in result.reply
+    assert "supplier, brand, invoice number, invoice date, rate" in result.reply
     assert "Which supplier is this from?" in result.reply
 
 
@@ -151,6 +157,7 @@ async def test_summary_says_how_many_questions_are_coming(ctx: RequestContext) -
 async def test_tapped_and_typed_answers_produce_the_same_draft(ctx: RequestContext) -> None:
     await start(ctx)
     await reply("Wagdia Textiles", ctx)
+    await reply("TOP", ctx)
     await reply("INV-77", ctx)
     await reply("26-07-2026", ctx)
     await reply("150", ctx)
@@ -161,6 +168,7 @@ async def test_tapped_and_typed_answers_produce_the_same_draft(ctx: RequestConte
     # what the transport delivers when a row or button is tapped: the
     # choice id, prefixed -- see WhatsAppDispatcher._from_meta
     await reply("slot Wagdia Textiles", ctx)
+    await reply("TOP", ctx)
     await reply("INV-77", ctx)
     await reply("slot other", ctx)
     await reply("26-07-2026", ctx)
@@ -176,6 +184,7 @@ async def test_today_button_and_typed_date_agree(ctx: RequestContext) -> None:
     today = datetime.date.today()
     await start(ctx)
     await reply("Wagdia", ctx)
+    await reply("TOP", ctx)
     await reply("INV-1", ctx)
     await reply("slot today", ctx)
     await reply("150", ctx)
@@ -184,6 +193,7 @@ async def test_today_button_and_typed_date_agree(ctx: RequestContext) -> None:
     await SessionService(ctx.session_factory).set(ctx.user.org_id, ctx.user.id, IDLE, {})
     await start(ctx)
     await reply("Wagdia", ctx)
+    await reply("TOP", ctx)
     await reply("INV-1", ctx)
     await reply(today.strftime("%d-%m-%Y"), ctx)
     await reply("150", ctx)
@@ -197,6 +207,7 @@ async def test_one_shot_details_equals_answering_every_slot(ctx: RequestContext)
     answers -- if those diverge, one of them is wrong (§12)."""
     await start(ctx)
     await reply("Shree Textiles", ctx)
+    await reply("TOP", ctx)
     await reply("INV-9", ctx)
     await reply("24-07-2026", ctx)
     await reply("150", ctx)
@@ -205,7 +216,9 @@ async def test_one_shot_details_equals_answering_every_slot(ctx: RequestContext)
     await SessionService(ctx.session_factory).set(ctx.user.org_id, ctx.user.id, IDLE, {})
     await start(ctx)
     result = await reply(
-        "details Supplier: Shree Textiles Invoice: INV-9 Date: 24-07-2026 Rate: 150", ctx
+        # the documented order: Supplier, Invoice, Date, Rate, then Brand
+        "details Supplier: Shree Textiles Invoice: INV-9 Date: 24-07-2026 Rate: 150 Brand: TOP",
+        ctx,
     )
 
     assert "Purchase draft ready" in result.reply
@@ -222,6 +235,7 @@ async def test_wrong_type_of_answer_re_asks_naming_the_expectation(ctx: RequestC
     *kind* of input -- 'cash' where a rate belongs (§12)."""
     await start(ctx)
     await reply("Wagdia", ctx)
+    await reply("TOP", ctx)
     await reply("INV-1", ctx)
     await reply("26-07-2026", ctx)
     result = await reply("cash", ctx)
@@ -236,6 +250,7 @@ async def test_wrong_type_of_answer_re_asks_naming_the_expectation(ctx: RequestC
 async def test_unreadable_date_re_asks_with_the_format(ctx: RequestContext) -> None:
     await start(ctx)
     await reply("Wagdia", ctx)
+    await reply("TOP", ctx)
     await reply("INV-1", ctx)
     result = await reply("last tuesday", ctx)
 
@@ -250,6 +265,7 @@ async def test_amount_with_indian_grouping_is_accepted(ctx: RequestContext) -> N
     failure (docs/20 §1)."""
     await start(ctx)
     await reply("Wagdia", ctx)
+    await reply("TOP", ctx)
     await reply("INV-1", ctx)
     await reply("26-07-2026", ctx)
     await reply("₹1,50,000", ctx)
@@ -274,6 +290,7 @@ async def test_back_clears_the_previous_answer_and_re_asks_it(ctx: RequestContex
     assert context["filled"] == {}
 
     await reply("Shree Textiles", ctx)
+    await reply("TOP", ctx)
     await reply("INV-1", ctx)
     await reply("26-07-2026", ctx)
     await reply("150", ctx)

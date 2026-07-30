@@ -268,6 +268,21 @@ class OcrService:
         return value if value > ZERO else None
 
     @staticmethod
+    def _sheet_rate(row: ExtractedRow) -> decimal.Decimal:
+        """The rate the sheet printed, or zero to mean "ask me"."""
+        field = row.fields.get("rate")
+        if field is None or not field.text.strip():
+            return ZERO
+        cleaned = re.sub(r"[^\d.]", "", field.text.replace(",", ""))
+        if not cleaned or cleaned == ".":
+            return ZERO
+        try:
+            value = decimal.Decimal(cleaned)
+        except decimal.InvalidOperation:
+            return ZERO
+        return value if value > ZERO else ZERO
+
+    @staticmethod
     def _dominant_label(rows: list[ExtractedRow]) -> str:
         """The brand the sheet is for.
 
@@ -448,7 +463,12 @@ class OcrService:
                 DraftLine(
                     code=code.upper(),
                     qty=qty,
-                    rate=ZERO,  # rate is a required_manual_field -- not on the sheet
+                    # The sheet's own rate when it states one. This was
+                    # hard-coded to zero with a note that rate is never on
+                    # the sheet -- true of the first sheet this was built
+                    # against, and wrong the moment a bill arrived with a
+                    # Unit Price column. A zero here means the wizard asks.
+                    rate=self._sheet_rate(row),
                     product_id=product_id,
                     resolved_code=code.upper() if product_id else None,
                     unit_code=unit_code,

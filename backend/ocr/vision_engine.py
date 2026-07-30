@@ -87,6 +87,15 @@ SHEET_SCHEMA: dict[str, Any] = {
                             "(e.g. TOP, FOLD). Often repeats down the sheet. '' if absent."
                         ),
                     },
+                    "rate": {
+                        "type": "string",
+                        "description": (
+                            "Rate or unit price per kg if the sheet shows one (Rate, "
+                            "Unit Price, Price). A line written as '22 x 80 x 75' means "
+                            "22 bales x 80 kg at rate 75 -- the last factor is the rate. "
+                            "'' if the sheet doesn't state one."
+                        ),
+                    },
                 },
                 "required": [
                     "code",
@@ -95,6 +104,7 @@ SHEET_SCHEMA: dict[str, Any] = {
                     "weight_per_unit",
                     "total_weight",
                     "label",
+                    "rate",
                 ],
                 "additionalProperties": False,
             },
@@ -146,6 +156,11 @@ Columns you may see, under varying headers:
 - a total weight column (T.KG, Total KG, Total Weight)
 - a label/brand column (Label, Brand, Mark) -- often the same word on \
 every row
+- a rate / unit price column, if the sheet has one
+
+Some sheets write a line as "22 x 80 x 75 = 132000": that is bales x \
+kg-per-bale x rate. Put 22 in qty, 80 in the per-unit weight, 75 in \
+rate, and 1760 (22 x 80) in the total weight.
 
 Ignore serial-number columns and running totals. Also capture the \
 supplier, invoice number and invoice date if they appear anywhere on \
@@ -417,6 +432,7 @@ class VisionSheetReader:
                             "total_weight_kg", str(row.get("total_weight", ""))
                         ),
                         "label": _field("label", str(row.get("label", ""))),
+                        "rate": _field("rate", str(row.get("rate", ""))),
                     },
                 )
             )

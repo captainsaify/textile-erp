@@ -130,6 +130,11 @@ def _apply_invoice_date(draft: Draft, value: str) -> None:
         ) from None
 
 
+def _apply_brand(draft: Draft, value: str) -> None:
+    draft.brand_name = value.strip()
+    draft.brand_id = None  # re-resolved against the catalogue later
+
+
 def _apply_rate(draft: Draft, value: str) -> None:
     rate = parse_amount(value, field="Rate")
     for line in draft.lines:
@@ -138,6 +143,12 @@ def _apply_rate(draft: Draft, value: str) -> None:
 
 
 SLOTS: dict[str, SlotSpec] = {
+    "brand": SlotSpec(
+        name="brand",
+        question="Which brand is this stock under?",
+        apply=_apply_brand,
+        example="e.g. TOP",
+    ),
     "supplier": SlotSpec(
         name="supplier",
         question="Which supplier is this from?",
@@ -166,7 +177,7 @@ SLOTS: dict[str, SlotSpec] = {
 
 #: Asked in this order -- who, then which invoice, then when, then how
 #: much. It follows how the question would be asked out loud.
-SLOT_ORDER = ("supplier", "invoice_no", "invoice_date", "purchase_rate")
+SLOT_ORDER = ("supplier", "brand", "invoice_no", "invoice_date", "purchase_rate")
 
 
 def missing_slots(draft: Draft, *, date_known: bool = True) -> list[str]:
@@ -180,6 +191,12 @@ def missing_slots(draft: Draft, *, date_known: bool = True) -> list[str]:
     missing: list[str] = []
     if not draft.supplier_name.strip():
         missing.append("supplier")
+    # Always asked unless the sheet's own LABEL column supplied it. A
+    # product code is unique only *within* a brand, so a brandless
+    # purchase makes every later code ambiguous -- and most bills, like
+    # this one, simply have no brand column to read.
+    if not (draft.brand_name or "").strip():
+        missing.append("brand")
     if not draft.invoice_no.strip():
         missing.append("invoice_no")
     if not date_known:
@@ -198,6 +215,7 @@ def summarise_gaps(draft: Draft, queue: list[str]) -> str:
         return lines[0]
     labels = {
         "supplier": "supplier",
+        "brand": "brand",
         "invoice_no": "invoice number",
         "invoice_date": "invoice date",
         "purchase_rate": "rate",
@@ -234,6 +252,45 @@ async def ask_slot(slot_name: str, ctx: RequestContext, *, draft: Draft) -> Comm
                                 Choice(
                                     id="slot new",
                                     title="Someone new",
+                                    description="You'll type the name",
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+
+    if slot_name == "brand":
+        from sqlalchemy import select
+
+        from backend.models import Brand
+
+        async with ctx.session_factory() as session:
+            found = list(
+                (
+                    await session.execute(
+                        select(Brand)
+                        .where(Brand.org_id == ctx.user.org_id, Brand.deleted_at.is_(None))
+                        .order_by(Brand.name)
+                        .limit(SUPPLIER_ROWS)
+                    )
+                ).scalars()
+            )
+        rows = tuple(Choice(id=f"slot {b.name}", title=b.name[:24]) for b in found)
+        if rows:
+            return CommandResult(
+                reply="",
+                interactive=ListMenu(
+                    body=body,
+                    menu_label="Pick brand",
+                    sections=(
+                        Section(title="In use", rows=rows),
+                        Section(
+                            title="Or",
+                            rows=(
+                                Choice(
+                                    id="slot new",
+                                    title="A new brand",
                                     description="You'll type the name",
                                 ),
                             ),
