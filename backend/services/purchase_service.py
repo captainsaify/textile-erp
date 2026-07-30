@@ -114,6 +114,12 @@ class Draft:
     #: point back at it -- that link is what lets duplicate-photo
     #: detection tell "already entered" from "tried and abandoned"
     source_attachment_id: uuid.UUID | None = None
+    #: Codes on this sheet that already exist under a *different* brand.
+    #: Not an error -- a code is unique only within a brand, so the same
+    #: code under two brands is two products by design. It is surfaced
+    #: because the likeliest cause is the brand being answered wrong, and
+    #: confirming creates a second product that then diverges silently.
+    brand_collisions: list[str] = dataclasses.field(default_factory=list)
 
     @property
     def subtotal(self) -> decimal.Decimal:
@@ -135,6 +141,7 @@ class Draft:
             "invoice_date": self.invoice_date.isoformat(),
             "brand_id": str(self.brand_id) if self.brand_id else None,
             "brand_name": self.brand_name,
+            "brand_collisions": list(self.brand_collisions),
             "lines": [
                 {
                     "code": line.code,
@@ -170,6 +177,7 @@ class Draft:
             invoice_date=datetime.date.fromisoformat(context["invoice_date"]),
             brand_id=uuid.UUID(context["brand_id"]) if context["brand_id"] else None,
             brand_name=context["brand_name"],
+            brand_collisions=list(context.get("brand_collisions") or []),
             lines=[
                 DraftLine(
                     code=line["code"],

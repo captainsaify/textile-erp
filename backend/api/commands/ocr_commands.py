@@ -219,7 +219,36 @@ async def resolve_after_details(draft: Draft, ctx: RequestContext) -> Draft:
                 # under this brand rather than silently reusing another's
                 line.product_id = None
                 line.resolved_code = None
+
+        # Codes that already exist under a *different* brand. Legal by
+        # design -- a code is unique only within a brand -- but the
+        # likeliest cause is the brand having been answered wrong, and
+        # confirming quietly creates a second product that then diverges
+        # from the first. So it is surfaced before CONFIRM, not after.
+        draft.brand_collisions = await _collisions(draft, ctx)
     return draft
+
+
+async def _collisions(draft: Draft, ctx: RequestContext) -> list[str]:
+    from backend.repositories.product_repository import ProductRepository
+
+    collisions: list[str] = []
+    async with ctx.session_factory() as session:
+        products = ProductRepository(session)
+        for line in draft.lines:
+            if line.product_id is not None or not line.code:
+                continue
+            elsewhere = [
+                other
+                for other in await products.list_by_code(ctx.user.org_id, line.code)
+                if other.brand_id != draft.brand_id
+            ]
+            if elsewhere:
+                other_brands = sorted(
+                    {(p.brand.name if p.brand else "no brand") for p in elsewhere}
+                )
+                collisions.append(f"{line.code} (already under {', '.join(other_brands)})")
+    return collisions
 
 
 async def _cached_vision(

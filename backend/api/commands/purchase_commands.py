@@ -244,7 +244,26 @@ def preview_result(draft: Draft) -> CommandResult:
     """
     reply = render_preview(draft)
     choices: tuple[Choice, ...]
-    if draft.unresolved_codes:
+    # Asked before "these aren't in your catalogue": a collided code is
+    # always also an unresolved one, and "are these really different
+    # products?" is the sharper question. Getting the bulk-create prompt
+    # first would have someone create six duplicates in one tap.
+    if draft.brand_collisions:
+        listed = "\n".join(f"• {entry}" for entry in draft.brand_collisions)
+        under = draft.brand_name or "no brand"
+        reply = (
+            f"{reply}\n\n⚠️ {len(draft.brand_collisions)} code(s) already exist under "
+            f"another brand:\n{listed}\n"
+            f"Under *{under}* these become separate products. That's right if they really "
+            "are different items — say so, or fix the brand."
+        )
+        body = f"Same codes, different brand ({under}). Separate products?"
+        choices = (
+            Choice(id="create all products", title="Yes, separate"),
+            Choice(id="fix brand", title="Fix the brand"),
+            Choice(id="discard", title="Discard"),
+        )
+    elif draft.unresolved_codes:
         count = len(draft.unresolved_codes)
         bulk = f"Create all {count}" if count < 100000 else "Create all"
         body = f"{count} item(s) aren't in your catalogue yet."
@@ -357,6 +376,17 @@ async def handle_purchase_session_reply(
     if is_abandon(lowered):
         await sessions.clear(ctx.user.org_id, ctx.user.id)
         return CommandResult(reply="Draft discarded.")
+
+    if lowered in {"fix brand", "fix the brand"}:
+        # Back to the brand question with the draft intact. Re-answering
+        # re-resolves every code against the corrected brand, which is
+        # the whole point -- a wrong brand silently duplicates products.
+        from backend.api.commands.intake_commands import begin_slots
+
+        draft.brand_name = None
+        draft.brand_id = None
+        draft.brand_collisions = []
+        return await begin_slots(draft, ["brand"], ctx)
 
     if lowered == "create supplier":
         if draft.supplier_id is not None:
