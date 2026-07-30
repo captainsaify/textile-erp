@@ -34,6 +34,18 @@ from backend.services.session_service import (
     SessionState,
 )
 
+#: Rows that mean "none of these, I'll type it". They are answers to the
+#: question of *how* to answer, never answers to the question itself.
+_ESCAPE_TO_TYPING = frozenset({"new", "other", "custom", "someone new", "someone else"})
+
+#: What to ask once someone has chosen to type it. Per slot, because
+#: "What's their name?" is wrong for a date.
+TYPED_PROMPTS = {
+    "supplier": "What's their name?",
+    "brand": "What's the brand called?",
+    "invoice_date": "Which date? Use DD-MM-YYYY.",
+}
+
 #: How many recent suppliers to offer before falling back to typing.
 #: One row is reserved for "Someone new", and a list caps at 10.
 SUPPLIER_ROWS = 9
@@ -393,10 +405,12 @@ async def handle_slot_reply(text: str, ctx: RequestContext, state: SessionState)
         return await _finish(draft, ctx)
 
     current = queue[0]
-    if current == "supplier" and lowered == "new":
-        return await _reask(queue, draft, ctx, prefix="What's their name?")
-    if current == "invoice_date" and lowered == "other":
-        return await _reask(queue, draft, ctx, prefix="Which date? Use DD-MM-YYYY.")
+    # "Someone new" / "A new brand" / "Another date" are escape hatches on
+    # every picker, not just the supplier's. Wired for one slot only, the
+    # word "new" was stored as the brand's *name* and the wizard moved on
+    # -- so tapping "A new brand" silently created a brand called "new".
+    if lowered in _ESCAPE_TO_TYPING and current in TYPED_PROMPTS:
+        return await _ask_typed(queue, draft, ctx, prompt=TYPED_PROMPTS[current])
 
     try:
         SLOTS[current].apply(draft, answer)
@@ -447,3 +461,16 @@ async def _reask(
 ) -> CommandResult:
     question = await ask_slot(queue[0], ctx, draft=draft)
     return dataclasses.replace(question, reply=f"{prefix}\n{question.reply}".strip())
+
+
+async def _ask_typed(
+    queue: list[str], draft: Draft, ctx: RequestContext, *, prompt: str
+) -> CommandResult:
+    """Ask for a typed answer, with no picker attached.
+
+    Re-sending the list someone just declined is what produced two
+    messages -- "What's their name?" followed by the supplier picker
+    again -- and left it ambiguous which one was being answered.
+    """
+    spec = SLOTS[queue[0]]
+    return CommandResult(reply=f"{prompt}\n{spec.example}".strip())

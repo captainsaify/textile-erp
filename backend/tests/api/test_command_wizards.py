@@ -356,7 +356,11 @@ async def test_someone_else_prompts_for_typing_rather_than_answering_itself(
     await begin("paid", "", ctx)
     result = await answer("slot new", ctx)
 
-    assert "type it" in result.reply.lower()
+    # the question is repeated as plain text, and the list is *not* sent
+    # again -- offering the one just declined leaves it ambiguous which
+    # message is being answered
+    assert "Which supplier?" in result.reply
+    assert result.interactive is None
     _, context = await state_of(ctx)
     assert context["filled"] == {}
     assert context["queue"][0] == "party"

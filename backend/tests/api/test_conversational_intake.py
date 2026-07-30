@@ -383,3 +383,43 @@ async def test_a_draft_carrying_a_brand_reaches_the_preview(ctx: RequestContext)
     saved = await saved_draft(ctx)
     assert saved.lines[0].rate == D("200")
     assert saved.brand_id is not None, "the brand from the sheet was created and attached"
+
+
+async def test_a_new_brand_is_asked_for_rather_than_named_new(ctx: RequestContext) -> None:
+    """Tapping "A new brand" stored the literal word "new" as the brand
+    and moved on to the invoice number. The escape hatch was wired for
+    the supplier slot only, so every other picker took the row id as the
+    answer."""
+    draft = make_draft(rate="150", supplier="Wagdia", invoice="")
+    await begin_slots(draft, missing_slots(draft, date_known=True), ctx)
+
+    _, context = await state_of(ctx)
+    assert context["queue"][0] == "brand"
+
+    result = await reply("slot new", ctx)
+
+    assert "What's the brand called?" in result.reply
+    # the list just declined is not sent again
+    assert result.interactive is None
+    _, context = await state_of(ctx)
+    assert context["queue"][0] == "brand", "still waiting on the brand"
+    assert "brand" not in context["filled"]
+
+    named = await reply("Hadfa", ctx)
+
+    assert "invoice" in named.reply.lower(), "only now does it move on"
+    _, context = await state_of(ctx)
+    assert context["filled"]["brand"] == "Hadfa"
+
+
+@pytest.mark.parametrize("escape", ["slot new", "new", "someone new", "other"])
+async def test_every_way_of_declining_a_list_asks_for_typing(
+    escape: str, ctx: RequestContext
+) -> None:
+    await start(ctx)
+    result = await reply(escape, ctx)
+
+    assert "What's their name?" in result.reply
+    assert result.interactive is None
+    _, context = await state_of(ctx)
+    assert context["queue"][0] == "supplier"

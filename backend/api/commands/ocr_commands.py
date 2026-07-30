@@ -222,7 +222,6 @@ async def resolve_after_details(draft: Draft, ctx: RequestContext) -> Draft:
     return draft
 
 
-
 async def _cached_vision(
     attachment_id: uuid.UUID, ctx: RequestContext
 ) -> tuple[list[Any], dict[str, str]] | None:

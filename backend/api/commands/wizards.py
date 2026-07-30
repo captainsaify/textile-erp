@@ -1176,9 +1176,18 @@ async def handle_reply(text: str, ctx: RequestContext, state: SessionState) -> C
         return await _reask(wizard, queue, ctx, prefix="Going back.", filled=filled)
 
     current = queue[0]
-    if lowered in {"new", "other", "custom"}:
-        # "Someone else" / "Custom range": the row can't answer itself
-        return await _reask(wizard, queue, ctx, prefix="Go ahead and type it.", filled=filled)
+    if lowered in {"new", "other", "custom", "someone else", "another one"}:
+        # "Someone else" / "Custom range" / "Another one" answer *how* to
+        # answer, never the question itself. The picker is deliberately
+        # not re-sent: offering again the list someone just declined
+        # leaves it ambiguous which message is being answered.
+        slot = next(s for s in wizard.slots if s.name == current)
+        question, example = (
+            slot.question_of(filled)
+            if slot.question_of is not None
+            else (slot.question, slot.example)
+        )
+        return CommandResult(reply=f"{question}\n{example}".strip())
 
     slot = next(s for s in wizard.slots if s.name == current)
     try:

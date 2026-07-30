@@ -265,6 +265,7 @@ def ocr_compare(
         if sheet.unreadable_note:
             typer.secho(f"  note: {sheet.unreadable_note}", fg=typer.colors.YELLOW)
 
+
 # Must stay last: typer registers commands as the module executes, so an
 # entrypoint placed above a @cli.command() runs before that command
 # exists. `set-password` was unreachable this way.
