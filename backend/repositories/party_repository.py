@@ -78,19 +78,29 @@ class StatementEntry:
 
 async def _payment_entries(
     session: AsyncSession, org_id: uuid.UUID, source_type: str, party_id: uuid.UUID
-) -> list[tuple[datetime.date, decimal.Decimal, datetime.datetime]]:
+) -> list[tuple[datetime.date, decimal.Decimal, datetime.datetime, bool]]:
     """Payments can be posted via cash or bank -- docs/06_Accounting.md
-    §9 -- so both partitioned ledgers are checked."""
+    §9 -- so both partitioned ledgers are checked.
+
+    Reversals come too. They land under their own source_type, naming
+    the same party, and leaving them out while still counting the
+    payment they undid is what made a supplier owed 37,55,350 read as
+    fully settled. The flag says which is which, so a statement can
+    label the row rather than showing an unexplained credit.
+    """
     from backend.models import BankLedger, CashLedger
 
-    rows: list[tuple[datetime.date, decimal.Decimal, datetime.datetime]] = []
+    rows: list[tuple[datetime.date, decimal.Decimal, datetime.datetime, bool]] = []
     for model in (CashLedger, BankLedger):
-        stmt = select(model.entry_date, model.amount, model.created_at).where(
+        stmt = select(model.entry_date, model.amount, model.created_at, model.source_type).where(
             model.org_id == org_id,
-            model.source_type == source_type,
+            model.source_type.in_([source_type, "payment_reversal"]),
             model.source_id == party_id,
         )
-        rows.extend(tuple(row) for row in (await session.execute(stmt)).all())
+        rows.extend(
+            (row[0], row[1], row[2], row[3] == "payment_reversal")
+            for row in (await session.execute(stmt)).all()
+        )
     return rows
 
 
@@ -314,12 +324,15 @@ class SupplierRepository:
             )
         # a payment's effect on cash (negative, per SettlementService) is
         # the same sign as its effect on what's owed -- reused directly.
-        for entry_date, amount, created_at in await _payment_entries(
+        for entry_date, amount, created_at, is_reversal in await _payment_entries(
             self._session, org_id, "supplier_payment", supplier_id
         ):
             entries.append(
                 StatementEntry(
-                    date=entry_date, created_at=created_at, description="payment", amount=amount
+                    date=entry_date,
+                    created_at=created_at,
+                    description="payment reversed" if is_reversal else "payment",
+                    amount=amount,
                 )
             )
         entries.sort(key=lambda e: (e.date, e.created_at))
@@ -518,12 +531,15 @@ class CustomerRepository:
             )
         # a payment's effect on cash (positive, per SettlementService) is
         # the *opposite* sign of its effect on what's owed -- negated.
-        for entry_date, amount, created_at in await _payment_entries(
+        for entry_date, amount, created_at, is_reversal in await _payment_entries(
             self._session, org_id, "customer_payment", customer_id
         ):
             entries.append(
                 StatementEntry(
-                    date=entry_date, created_at=created_at, description="payment", amount=-amount
+                    date=entry_date,
+                    created_at=created_at,
+                    description="receipt reversed" if is_reversal else "receipt",
+                    amount=-amount,
                 )
             )
         entries.sort(key=lambda e: (e.date, e.created_at))

@@ -413,3 +413,55 @@ async def test_an_untouched_payment_is_still_counted(
     async with session_factory() as session:
         entries = await LedgerRepository(session).recent_entries(ORG, "cash", limit=50)
     assert LedgerRepository.cancelled_ids(entries) == set()
+
+
+async def test_the_exported_statement_and_the_payable_agree(
+    owner_user: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """`export statement` used to carry its own copy of the same three
+    queries, which is how it kept counting reversed payments long after
+    the copy next door stopped. A statement whose closing balance
+    disagrees with the payable it explains is worse than no statement --
+    and the ledger export's summary tab, which reads the payable
+    directly, made the disagreement visible in one file."""
+    import datetime
+
+    from openpyxl import load_workbook
+
+    from backend.repositories.party_repository import SupplierRepository
+    from backend.services.report_service import ReportService
+    from backend.services.settlement_service import PaymentReversalService
+
+    supplier, _ = await _bill(session_factory, owner_user, total="10000")
+    reference = await _pay(session_factory, owner_user, supplier, "4000")
+    async with session_factory() as session:
+        await PaymentReversalService(session).reverse(owner_user, reference=reference)
+        supplier_id = (
+            await session.execute(sa.select(Supplier.id).where(Supplier.name == supplier))
+        ).scalar_one()
+
+    async with session_factory() as session:
+        payable = await SupplierRepository(session).outstanding(ORG, supplier_id)
+    async with session_factory() as session, session.begin():
+        job = await ReportService(session).enqueue(
+            owner_user,
+            report_type="statement",
+            start=datetime.date.today() - datetime.timedelta(days=30),
+            end=datetime.date.today() + datetime.timedelta(days=1),
+            filters={"supplier_id": str(supplier_id)},
+        )
+        job_id = job.id
+    async with session_factory() as session:
+        built = await ReportService(session).generate(job_id)
+
+    assert payable == D("10000")
+    assert built.file_path is not None
+    cells = [
+        cell.value
+        for row in load_workbook(built.file_path).worksheets[0].iter_rows()
+        for cell in row
+    ]
+    # the reversal is on the statement, named, and the closing balance
+    # is the payable
+    assert any(isinstance(value, str) and "Reversal" in value for value in cells)
+    assert D(str(cells[-1])) == payable

@@ -447,91 +447,32 @@ class ReportService:
         separately and merged by time -- which is also the only way the
         balance column can be right.
         """
-        from backend.models import BankLedger, CashLedger, Customer, SalesHeader
+        from backend.models import Customer
 
         supplier_id = job.filters.get("supplier_id")
         customer_id = job.filters.get("customer_id")
         role = "supplier" if supplier_id else "customer"
         party_id = uuid.UUID(str(supplier_id or customer_id))
-        entries: list[StatementEntry] = []
 
-        party_name = "(unknown)"
         if role == "supplier":
             supplier = await self._session.get(Supplier, party_id)
             party_name = supplier.name if supplier else "(unknown)"
-            bills = (
-                await self._session.execute(
-                    select(PurchaseHeader).where(
-                        PurchaseHeader.org_id == job.org_id,
-                        PurchaseHeader.supplier_id == party_id,
-                        PurchaseHeader.deleted_at.is_(None),
-                        PurchaseHeader.status == "confirmed",
-                        PurchaseHeader.invoice_date >= job.period_start,
-                        PurchaseHeader.invoice_date <= job.period_end,
-                    )
-                )
-            ).scalars()
-            entries += [
-                StatementEntry(
-                    at=self._moment(bill.invoice_date, bill.created_at),
-                    kind="Purchase",
-                    reference=bill.invoice_no,
-                    debit=bill.grand_total,
-                )
-                for bill in bills
-            ]
-            source_type, payment_label = "supplier_payment", "Payment"
         else:
             customer = await self._session.get(Customer, party_id)
             party_name = customer.name if customer else "(unknown)"
-            sales = (
-                await self._session.execute(
-                    select(SalesHeader).where(
-                        SalesHeader.org_id == job.org_id,
-                        SalesHeader.customer_id == party_id,
-                        SalesHeader.deleted_at.is_(None),
-                        SalesHeader.sale_date >= job.period_start,
-                        SalesHeader.sale_date <= job.period_end,
-                    )
-                )
-            ).scalars()
-            entries += [
-                StatementEntry(
-                    at=self._moment(sale.sale_date, sale.created_at),
-                    kind="Sale",
-                    # a sale has no invoice number of its own; its id
-                    # is what `undo`/`search` already quote back
-                    reference=str(sale.id)[:8],
-                    debit=sale.grand_total,
-                )
-                for sale in sales
-            ]
-            source_type, payment_label = "customer_payment", "Receipt"
 
-        for ledger in (CashLedger, BankLedger):
-            rows = (
-                await self._session.execute(
-                    select(ledger).where(
-                        ledger.org_id == job.org_id,
-                        ledger.source_type == source_type,
-                        ledger.source_id == party_id,
-                        ledger.entry_date >= job.period_start,
-                        ledger.entry_date <= job.period_end,
-                    )
-                )
-            ).scalars()
-            via = "cash" if ledger is CashLedger else "bank"
-            entries += [
-                StatementEntry(
-                    at=self._moment(row.entry_date, row.created_at),
-                    kind=f"{payment_label} ({via})",
-                    reference=row.notes or "",
-                    # ledger rows store money leaving as negative; a
-                    # statement reads better with the sign in the column
-                    credit=abs(row.amount),
-                )
-                for row in rows
-            ]
+        # The one implementation, shared with the ledger export's
+        # per-party tabs. This method used to carry a second copy of the
+        # same three queries -- which is how it kept counting reversed
+        # payments long after the copy next door stopped: Noor Traders's
+        # statement showed 1,40,85,350 paid against 89,20,350 purchased.
+        entries = await self.party_entries(
+            job.org_id,
+            role=role,
+            party_id=party_id,
+            start=job.period_start,
+            end=job.period_end,
+        )
 
         workbook = build_statement(
             entries,
