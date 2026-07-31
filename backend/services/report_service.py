@@ -48,6 +48,7 @@ from backend.reports.excel.styling import (
     write_row,
 )
 from backend.repositories.accounting_repository import business_today
+from backend.repositories.party_repository import OPEN_SALE_STATUSES
 
 logger = get_logger(__name__)
 ZERO = decimal.Decimal("0")
@@ -381,6 +382,10 @@ class ReportService:
                 SalesHeader.org_id == org_id,
                 SalesHeader.customer_id == party_id,
                 SalesHeader.deleted_at.is_(None),
+                # a cancelled sale was reversed; leaving it in as a debit
+                # would make the statement's closing balance disagree
+                # with the receivable it is supposed to explain
+                SalesHeader.status.in_(OPEN_SALE_STATUSES),
             )
             if start is not None:
                 sale_stmt = sale_stmt.where(SalesHeader.sale_date >= start)

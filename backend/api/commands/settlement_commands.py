@@ -11,6 +11,7 @@ import decimal
 
 from backend.api.amounts import looks_like_amount, parse_amount
 from backend.api.command_types import CommandResult, RequestContext
+from backend.api.commands.documents import attach_document
 from backend.api.formatting import fmt_money
 from backend.api.interactive import is_abandon
 from backend.core.dates import split_date
@@ -135,6 +136,8 @@ def render_settlement(result: SettlementResult, kind: str) -> str:
         lines.append(f"Advance recorded: {fmt_money(result.advance)}")
     lines.append(f"{result.party_name}'s {owes} now {fmt_money(result.outstanding_after)}")
     lines.append(f"{result.via.capitalize()} balance now {fmt_money(result.ledger_balance)}")
+    if result.reference:
+        lines.append(f"Ref: {result.reference}")
     return "\n".join(lines)
 
 
@@ -186,7 +189,12 @@ async def _run(
     except DomainError as exc:
         return CommandResult(reply=exc.message)
     await sessions.clear(ctx.user.org_id, ctx.user.id)
-    return CommandResult(reply=render_settlement(result, kind))
+    return await attach_document(
+        CommandResult(reply=render_settlement(result, kind)),
+        ctx,
+        kind="payment",
+        reference=result.reference,
+    )
 
 
 async def handle_received(args: str, ctx: RequestContext) -> CommandResult:

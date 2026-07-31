@@ -373,3 +373,43 @@ async def test_a_reversed_payment_cancels_itself_out_of_the_party_ledger(
     # both rows are still there -- nothing is deleted -- and they net off
     assert len(entries) == 3
     assert sum((e.debit - e.credit for e in entries), D("0")) == D("10000")
+
+
+async def test_a_reversal_and_its_original_are_kept_but_not_counted(
+    owner_user: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Both halves stay in the ledger -- nothing is deleted -- but
+    neither is money that moved, and counting them made a month of
+    ~1cr of payments read as 2.3cr."""
+    from backend.repositories.accounting_repository import LedgerRepository
+    from backend.services.settlement_service import PaymentReversalService
+
+    supplier, _ = await _bill(session_factory, owner_user, total="10000")
+    reference = await _pay(session_factory, owner_user, supplier, "4000")
+    async with session_factory() as session:
+        await PaymentReversalService(session).reverse(owner_user, reference=reference)
+
+    async with session_factory() as session:
+        entries = await LedgerRepository(session).recent_entries(ORG, "cash", limit=50)
+    cancelled = LedgerRepository.cancelled_ids(entries)
+
+    # both rows are there
+    assert len(entries) == 2
+    # and both are excluded, so the pair contributes nothing either way
+    assert len(cancelled) == 2
+    counted = [entry for entry in entries if entry.id not in cancelled]
+    assert counted == []
+
+
+async def test_an_untouched_payment_is_still_counted(
+    owner_user: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The exclusion has to be narrow, or a real payment disappears."""
+    from backend.repositories.accounting_repository import LedgerRepository
+
+    supplier, _ = await _bill(session_factory, owner_user, total="10000")
+    await _pay(session_factory, owner_user, supplier, "4000")
+
+    async with session_factory() as session:
+        entries = await LedgerRepository(session).recent_entries(ORG, "cash", limit=50)
+    assert LedgerRepository.cancelled_ids(entries) == set()

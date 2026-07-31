@@ -11,6 +11,7 @@ from __future__ import annotations
 import decimal
 
 from backend.api.command_types import CommandResult, RequestContext
+from backend.api.commands.documents import attach_document
 from backend.api.formatting import fmt_money, fmt_qty
 from backend.core.exceptions import DomainError, ValidationError
 from backend.services.receipt_correction_service import CorrectionResult, ReceiptCorrectionService
@@ -80,4 +81,12 @@ async def handle_receive(args: str, ctx: RequestContext) -> CommandResult:
             )
     except DomainError as exc:
         return CommandResult(reply=exc.message)
-    return CommandResult(reply=render(result))
+    # The bill changed, so its sheet did too -- sent with the change
+    # rather than left for someone to ask for, since a corrected bill
+    # whose old copy is still circulating is the problem this solves.
+    return await attach_document(
+        CommandResult(reply=render(result)),
+        ctx,
+        kind="purchase",
+        reference=str(result.header_id),
+    )

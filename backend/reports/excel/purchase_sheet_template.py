@@ -96,6 +96,14 @@ class PurchaseBill:
     invoice_no: str
     invoice_date: datetime.date | None
     rows: list[PurchaseSheetRow]
+    #: Extra caption lines under the heading -- freight, the payment
+    #: that settled it, whatever the document is about.
+    notes: list[str] = dataclasses.field(default_factory=list)
+    #: Every change made to this bill since it was confirmed, as
+    #: "when · who · what". A corrected sheet that does not say it was
+    #: corrected is worse than no sheet: two copies in circulation and
+    #: nothing on either saying which is current.
+    history: list[str] = dataclasses.field(default_factory=list)
 
     def caption(self) -> str:
         date = self.invoice_date.strftime("%d-%m-%Y") if self.invoice_date else "date not recorded"
@@ -162,6 +170,17 @@ def _write_bill(sheet: Worksheet, bill: PurchaseBill) -> None:
         attribute = COLUMNS[index - 1][1]
         totals[index - 1] = float(sum((getattr(row, attribute) or ZERO for row in bill.rows), ZERO))
     write_row(sheet, total_row, totals, formats=formats, bold=True)
+
+    cursor = total_row + 2
+    for note in bill.notes:
+        write_row(sheet, cursor, [note, *[""] * (len(COLUMNS) - 1)])
+        cursor += 1
+    if bill.history:
+        cursor += 1
+        write_row(sheet, cursor, ["CHANGES", *[""] * (len(COLUMNS) - 1)], bold=True)
+        for entry in bill.history:
+            cursor += 1
+            write_row(sheet, cursor, [entry, *[""] * (len(COLUMNS) - 1)])
 
     autosize(sheet, headers)
     sheet.freeze_panes = "A3"

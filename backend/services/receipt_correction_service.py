@@ -74,6 +74,9 @@ FOUR = decimal.Decimal("0.0001")
 
 @dataclasses.dataclass(frozen=True)
 class CorrectionResult:
+    #: The bill that changed, so the caller can send back its corrected
+    #: document rather than describing the change alone.
+    header_id: uuid.UUID
     invoice_no: str
     supplier_name: str
     code: str
@@ -238,6 +241,7 @@ class ReceiptCorrectionService:
         await self._session.flush()
 
         return CorrectionResult(
+            header_id=header.id,
             invoice_no=invoice_no,
             supplier_name=supplier.name,
             code=product.code,
@@ -304,6 +308,8 @@ class ReceiptCorrectionService:
 
 @dataclasses.dataclass(frozen=True)
 class RateChange:
+    #: The bill that changed -- see CorrectionResult.header_id.
+    header_id: uuid.UUID
     invoice_no: str
     supplier_name: str
     codes: list[str]
@@ -467,6 +473,7 @@ class RateChangeService:
         await self._session.flush()
 
         return RateChange(
+            header_id=header.id,
             invoice_no=invoice_no,
             supplier_name=supplier.name,
             codes=changed_codes,

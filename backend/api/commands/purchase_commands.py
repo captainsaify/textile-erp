@@ -15,6 +15,7 @@ import decimal
 import re
 
 from backend.api.command_types import CommandResult, RequestContext
+from backend.api.commands.documents import attach_document
 from backend.api.formatting import fmt_date, fmt_money, fmt_qty
 from backend.api.interactive import Buttons, Choice, is_abandon
 from backend.core.exceptions import (
@@ -613,4 +614,9 @@ async def handle_purchase_session_reply(
         return CommandResult(reply=exc.message)
 
     await sessions.clear(ctx.user.org_id, ctx.user.id)
-    return CommandResult(reply=render_confirmed(confirmed))
+    return await attach_document(
+        CommandResult(reply=render_confirmed(confirmed)),
+        ctx,
+        kind="purchase",
+        reference=str(confirmed.header_id),
+    )

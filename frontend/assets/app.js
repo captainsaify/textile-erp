@@ -565,11 +565,23 @@
           String(row.type || "").toLowerCase().includes(needle)),
     );
 
-    const inflow = Money.sum(rows.filter((r) => !Money.isNegative(r.amount)).map((r) => r.amount));
-    const outflow = Money.sum(rows.filter((r) => Money.isNegative(r.amount)).map((r) => r.amount));
+    // A reversal and the entry it reversed both stay in the list --
+    // nothing is deleted -- but neither is money that moved, and
+    // counting them made a month of 1cr look like 2.3cr.
+    const counted = rows.filter((row) => !row.cancelled);
+    const inflow = Money.sum(
+      counted.filter((r) => !Money.isNegative(r.amount)).map((r) => r.amount),
+    );
+    const outflow = Money.sum(
+      counted.filter((r) => Money.isNegative(r.amount)).map((r) => r.amount),
+    );
+    const undone = rows.length - counted.length;
     $("ledger-totals").innerHTML = [
-      kpi("Money in", Money.format(inflow), `${rows.length} entries shown`),
+      kpi("Money in", Money.format(inflow), `${counted.length} entries counted`),
       kpi("Money out", Money.format(outflow), "for this filter", { negative: true }),
+      ...(undone
+        ? [kpi("Cancelled", String(undone), "reversed entries, not counted")]
+        : []),
     ].join("");
 
     $("ledger-table").replaceChildren(
@@ -582,7 +594,13 @@
           // the running balance is per account, so it is meaningless
           // beside a row from the other one -- hence the filter above
           { label: "Balance", numeric: true, render: (row) => money(row.resulting_balance) },
-          { label: "Notes", render: (row) => text(row.notes || "") },
+          {
+            label: "Notes",
+            render: (row) =>
+              row.cancelled
+                ? `<span class="muted">${text(row.notes || "")} · reversed</span>`
+                : text(row.notes || ""),
+          },
         ],
         rows,
       ),

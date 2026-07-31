@@ -24,7 +24,11 @@ from backend.repositories.accounting_repository import (
     business_today,
     entry_day,
 )
-from backend.repositories.party_repository import CustomerRepository, SupplierRepository
+from backend.repositories.party_repository import (
+    OPEN_SALE_STATUSES,
+    CustomerRepository,
+    SupplierRepository,
+)
 from backend.services.audit_service import AuditService
 from backend.services.journal_service import JournalService
 
@@ -48,6 +52,10 @@ class SettlementResult:
     advance: decimal.Decimal
     outstanding_after: decimal.Decimal
     ledger_balance: decimal.Decimal
+    #: The audit entry this settlement wrote, short form. It is the
+    #: payment's only handle -- `undo payment` already takes it, and the
+    #: receipt document is built from it.
+    reference: str = ""
 
 
 def _validate_amount(amount: decimal.Decimal) -> decimal.Decimal:
@@ -103,6 +111,10 @@ class SettlementService:
                     SalesHeader.org_id == org_id,
                     SalesHeader.customer_id == customer.id,
                     SalesHeader.deleted_at.is_(None),
+                    # a cancelled sale is not an open bill; allocating a
+                    # payment to one would settle something that no
+                    # longer exists
+                    SalesHeader.status.in_(OPEN_SALE_STATUSES),
                     SalesHeader.grand_total > SalesHeader.amount_paid,
                 )
                 .order_by(SalesHeader.sale_date, SalesHeader.created_at)
@@ -147,7 +159,7 @@ class SettlementService:
                 debits=[(AccountCode.CASH if via == "cash" else AccountCode.BANK, amount)],
                 credits=[(AccountCode.ACCOUNTS_RECEIVABLE, amount)],
             )
-            await self._audit.record(
+            entry = await self._audit.record(
                 org_id,
                 actor.id,
                 action="payment.received",
@@ -167,6 +179,7 @@ class SettlementService:
             outstanding_after = await self._customers.outstanding(org_id, customer.id)
 
         return SettlementResult(
+            reference=str(entry.id)[:8],
             party_name=customer.name,
             amount=amount,
             via=via,
@@ -243,7 +256,7 @@ class SettlementService:
                 debits=[(AccountCode.ACCOUNTS_PAYABLE, amount)],
                 credits=[(AccountCode.CASH if via == "cash" else AccountCode.BANK, amount)],
             )
-            await self._audit.record(
+            entry = await self._audit.record(
                 org_id,
                 actor.id,
                 action="payment.paid",
@@ -269,6 +282,7 @@ class SettlementService:
             )
 
         return SettlementResult(
+            reference=str(entry.id)[:8],
             party_name=supplier.name,
             amount=amount,
             via=via,
@@ -542,6 +556,7 @@ class PaymentReversalService:
                         SalesHeader.org_id == org_id,
                         SalesHeader.customer_id == entry.entity_id,
                         SalesHeader.deleted_at.is_(None),
+                        SalesHeader.status.in_(OPEN_SALE_STATUSES),
                     )
                 )
             ).scalar_one()

@@ -57,6 +57,13 @@ class PartyStats:
     this_month_total: decimal.Decimal
 
 
+#: A sale still owes money only while it stands. A cancelled one was
+#: reversed with a compensating entry, so counting its unpaid balance
+#: shows a receivable nobody owes -- which is how a cancelled ₹15,000
+#: test sale stayed on the receivables page after being undone.
+OPEN_SALE_STATUSES = ("confirmed", "partially_returned", "returned")
+
+
 @dataclasses.dataclass(frozen=True)
 class StatementEntry:
     """One line of a `ledger supplier/customer NAME` statement -- signed
@@ -353,7 +360,7 @@ class CustomerRepository:
                     SalesHeader.org_id == org_id,
                     SalesHeader.customer_id == customer_id,
                     SalesHeader.deleted_at.is_(None),
-                    SalesHeader.status.in_(["confirmed", "partially_returned", "returned"]),
+                    SalesHeader.status.in_(OPEN_SALE_STATUSES),
                 )
             )
         ).scalar_one()
@@ -384,6 +391,7 @@ class CustomerRepository:
                 and_(
                     SalesHeader.customer_id == Customer.id,
                     SalesHeader.deleted_at.is_(None),
+                    SalesHeader.status.in_(OPEN_SALE_STATUSES),
                     SalesHeader.grand_total > SalesHeader.amount_paid,
                 ),
                 isouter=True,
@@ -495,7 +503,7 @@ class CustomerRepository:
                     SalesHeader.org_id == org_id,
                     SalesHeader.customer_id == customer_id,
                     SalesHeader.deleted_at.is_(None),
-                    SalesHeader.status.in_(["confirmed", "partially_returned", "returned"]),
+                    SalesHeader.status.in_(OPEN_SALE_STATUSES),
                 )
             )
         ).all()

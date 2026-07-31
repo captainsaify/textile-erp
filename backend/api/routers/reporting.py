@@ -118,6 +118,11 @@ async def ledger(
         raise HTTPException(status_code=404, detail="no such ledger")
     repo = LedgerRepository(session)
     entries = await repo.recent_entries(user.org_id, ledger, limit=paging.limit)
+    # A reversal and the entry it reversed are both real rows and both
+    # belong in the list -- nothing is ever deleted. They do not belong
+    # in "money in" and "money out", where between them they claimed
+    # twice an amount that never moved.
+    cancelled = LedgerRepository.cancelled_ids(entries)
     return {
         "balance": money_str(await repo.balance(user.org_id, ledger)),
         "entries": [
@@ -127,6 +132,7 @@ async def ledger(
                 "amount": money_str(entry.amount),
                 "resulting_balance": money_str(entry.resulting_balance),
                 "notes": entry.notes,
+                "cancelled": entry.id in cancelled,
             }
             for entry in entries
         ],

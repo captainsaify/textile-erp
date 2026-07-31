@@ -50,6 +50,7 @@ from backend.tests.conftest import (
 )
 
 D = decimal.Decimal
+ZERO_D = D("0")
 ORG = uuid.UUID(SEEDED_ORG_ID)
 WAREHOUSE = uuid.UUID(SEEDED_MAIN_WAREHOUSE_ID)
 
@@ -865,3 +866,49 @@ async def test_undo_sale_returns_stock_and_cancels_the_sale(
             await session.execute(sa.select(SalesHeader.status).where(SalesHeader.id == sale_id))
         ).scalar_one()
     assert status == "cancelled"
+
+
+async def test_a_cancelled_sale_stops_being_a_receivable(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A ₹15,000 test sale, undone, still sat on the receivables page --
+    the aging query filtered soft deletes but not cancellations, so it
+    showed money nobody owed."""
+    from backend.repositories.party_repository import CustomerRepository
+
+    async with session_factory() as session, session.begin():
+        master = await _master(session, ctx.user, qty="100")
+        customer = (
+            await session.execute(sa.select(Customer).where(Customer.name == master.customer_name))
+        ).scalar_one()
+        session.add(
+            SalesHeader(
+                org_id=ORG,
+                customer_id=customer.id,
+                warehouse_id=WAREHOUSE,
+                sale_date=datetime.date.today(),
+                payment_type=SalePaymentType.CREDIT,
+                subtotal=D("15000"),
+                grand_total=D("15000"),
+                amount_paid=D("0"),
+                status="confirmed",
+                created_by=ctx.user.id,
+            )
+        )
+    async with session_factory() as session:
+        assert await CustomerRepository(session).outstanding(ORG, customer.id) == D("15000")
+        listed = await CustomerRepository(session).outstanding_parties(ORG)
+    assert any(row.name == master.customer_name for row in listed)
+
+    async with session_factory() as session, session.begin():
+        sale = (
+            await session.execute(
+                sa.select(SalesHeader).where(SalesHeader.customer_id == customer.id)
+            )
+        ).scalar_one()
+        sale.status = "cancelled"
+
+    async with session_factory() as session:
+        assert await CustomerRepository(session).outstanding(ORG, customer.id) == ZERO_D
+        listed = await CustomerRepository(session).outstanding_parties(ORG)
+    assert all(row.outstanding == ZERO_D for row in listed if row.name == master.customer_name)

@@ -235,6 +235,10 @@ class ConfirmedLine:
 
 @dataclasses.dataclass(frozen=True)
 class ConfirmedPurchase:
+    #: The saved header. Carried so the confirmation can attach the
+    #: bill's document, which is built from the row rather than from
+    #: this snapshot -- one source for what the sheet says.
+    header_id: uuid.UUID
     supplier_name: str
     invoice_no: str
     invoice_date: datetime.date
@@ -578,6 +582,7 @@ class PurchaseService:
             )
 
         return ConfirmedPurchase(
+            header_id=header.id,
             supplier_name=draft.supplier_name,
             invoice_no=draft.invoice_no,
             invoice_date=draft.invoice_date,

@@ -185,6 +185,8 @@ class ConfirmedSaleLine:
 
 @dataclasses.dataclass(frozen=True)
 class ConfirmedSale:
+    #: The saved header, so the confirmation can attach its document.
+    sale_id: uuid.UUID
     customer_name: str
     payment_type: SalePaymentType
     lines: list[ConfirmedSaleLine]
@@ -508,6 +510,7 @@ class SalesService:
             )
 
         return ConfirmedSale(
+            sale_id=header.id,
             customer_name=draft.customer_name,
             payment_type=draft.payment_type,
             lines=confirmed_lines,

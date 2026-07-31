@@ -46,8 +46,55 @@ async def handle_sheet(args: str, ctx: RequestContext) -> CommandResult:
         return _purchase_sheet(state.context)
     if state.state == AWAITING_SALE_CONFIRMATION:
         return _sale_sheet(state.context)
+    # No draft, but almost always a bill: `sheet` right after CONFIRM
+    # used to answer "there's no draft waiting", which is true and
+    # useless -- the thing being asked for exists, it is just saved now.
+    return await _last_document(ctx)
+
+
+async def _last_document(ctx: RequestContext) -> CommandResult:
+    """The most recent purchase or sale, as its current sheet."""
+    from sqlalchemy import select
+
+    from backend.models import PurchaseHeader, SalesHeader
+    from backend.services.document_service import DocumentService
+
+    async with ctx.session_factory() as session:
+        purchase = (
+            await session.execute(
+                select(PurchaseHeader.id, PurchaseHeader.created_at)
+                .where(
+                    PurchaseHeader.org_id == ctx.user.org_id, PurchaseHeader.deleted_at.is_(None)
+                )
+                .order_by(PurchaseHeader.created_at.desc())
+                .limit(1)
+            )
+        ).first()
+        sale = (
+            await session.execute(
+                select(SalesHeader.id, SalesHeader.created_at)
+                .where(SalesHeader.org_id == ctx.user.org_id, SalesHeader.deleted_at.is_(None))
+                .order_by(SalesHeader.created_at.desc())
+                .limit(1)
+            )
+        ).first()
+
+        if purchase is None and sale is None:
+            return CommandResult(
+                reply="There's no draft waiting, and nothing saved yet. "
+                "Send a photo of a sheet, or use 'purchase' or 'sale'."
+            )
+        service = DocumentService(session)
+        if purchase is None or (sale is not None and sale[1] > purchase[1]):
+            assert sale is not None
+            document = await service.sale(ctx.user.org_id, sale[0])
+        else:
+            document = await service.purchase(ctx.user.org_id, purchase[0])
+
     return CommandResult(
-        reply="There's no draft waiting. Send a photo of a sheet, or use 'purchase' or 'sale'."
+        reply=f"{document.summary}\nThis is the current version, including any corrections.",
+        attachment=str(document.path),
+        attachment_caption=document.caption,
     )
 
 

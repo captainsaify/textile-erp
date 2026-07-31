@@ -14,6 +14,7 @@ import decimal
 import re
 
 from backend.api.command_types import CommandResult, RequestContext
+from backend.api.commands.documents import attach_document
 from backend.api.formatting import fmt_money, fmt_qty
 from backend.api.interactive import (
     MAX_BUTTONS,
@@ -287,7 +288,9 @@ async def _try_record(
     except DomainError as exc:
         return CommandResult(reply=exc.message)
     await sessions.clear(ctx.user.org_id, ctx.user.id)
-    return CommandResult(reply=render_sale(sale))
+    return await attach_document(
+        CommandResult(reply=render_sale(sale)), ctx, kind="sale", reference=str(sale.sale_id)
+    )
 
 
 async def _prepare(draft: SaleDraft, ctx: RequestContext) -> tuple[SaleDraft, list[str]]:

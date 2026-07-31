@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime
 import decimal
 import uuid
+from collections.abc import Sequence
 from typing import cast
 
 from sqlalchemy import Text, func, select, text
@@ -31,6 +32,14 @@ LedgerModel = type[CashLedger] | type[BankLedger]
 _LEDGERS: dict[str, LedgerModel] = {"cash": CashLedger, "bank": BankLedger}
 
 
+#: Source types that exist only to cancel an earlier entry.
+REVERSAL_SUFFIXES = ("_reversal", "_undo")
+
+
+def _is_reversal(source_type: str | None) -> bool:
+    return bool(source_type) and source_type.endswith(REVERSAL_SUFFIXES)  # type: ignore[union-attr]
+
+
 class LedgerRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -51,6 +60,39 @@ class LedgerRepository:
         )
         value = (await self._session.execute(stmt)).scalar_one_or_none()
         return value if value is not None else decimal.Decimal("0")
+
+    @staticmethod
+    def cancelled_ids(entries: Sequence[CashLedger | BankLedger]) -> set[uuid.UUID]:
+        """Which of these rows are a reversal, or the row one reversed.
+
+        Reversals are compensating entries -- nothing is ever deleted --
+        so the ledger correctly holds both halves of an undone payment.
+        That is right for the audit trail and wrong for "money out this
+        month", where a reversed 29,20,030 and its 29,20,030 refund
+        between them claimed 58,40,060 of movement that never happened.
+
+        Pairing is by source_id and amount rather than a stored link:
+        a reversal always names the same entity as the entry it undoes
+        and always carries exactly the opposite amount, and where two
+        identical entries make the pairing ambiguous, either choice
+        removes the same two numbers.
+        """
+        by_key: dict[tuple[uuid.UUID | None, decimal.Decimal], list[CashLedger | BankLedger]] = {}
+        for entry in entries:
+            if _is_reversal(entry.source_type):
+                continue
+            by_key.setdefault((entry.source_id, entry.amount), []).append(entry)
+
+        cancelled: set[uuid.UUID] = set()
+        for entry in entries:
+            if not _is_reversal(entry.source_type):
+                continue
+            cancelled.add(entry.id)
+            candidates = by_key.get((entry.source_id, -entry.amount)) or []
+            original = next((row for row in candidates if row.id not in cancelled), None)
+            if original is not None:
+                cancelled.add(original.id)
+        return cancelled
 
     async def recent_entries(
         self, org_id: uuid.UUID, ledger: str, limit: int = 5
