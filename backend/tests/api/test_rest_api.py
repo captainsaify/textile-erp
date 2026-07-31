@@ -676,3 +676,98 @@ async def test_the_audit_log_says_what_actually_changed(
     actions = await client.get("/api/v1/audit/actions", headers=_auth(token))
     assert actions.status_code == 200, actions.text
     assert any(row["action"] == "product.created" for row in actions.json()["data"])
+
+
+# --------------------------------------------------------------------
+# parties -- docs/21 §2, the Parties and Ledger tabs
+# --------------------------------------------------------------------
+
+
+async def test_parties_lists_everyone_not_only_those_who_owe(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """`receivables`/`payables` only ever list a party who owes money,
+    so a supplier you had paid off could not be looked up at all."""
+    import uuid as uuid_module
+
+    from backend.models import Customer, Supplier
+
+    suffix = uuid_module.uuid4().hex[:6]
+    async with session_factory() as session:
+        session.add_all(
+            [
+                Supplier(org_id=ORG, name=f"Settled Up {suffix}", created_by=owner.id),
+                Customer(org_id=ORG, name=f"Never Traded {suffix}", created_by=owner.id),
+            ]
+        )
+        await session.commit()
+
+    token = await _token(client, owner)
+    response = await client.get("/api/v1/parties", headers=_auth(token))
+
+    assert response.status_code == 200, response.text
+    rows = {row["name"]: row for row in response.json()["data"]}
+    assert rows[f"Settled Up {suffix}"]["kind"] == "supplier"
+    assert rows[f"Never Traded {suffix}"]["kind"] == "customer"
+    # settled up is a fact, not an absence
+    assert rows[f"Settled Up {suffix}"]["outstanding"] == "0.00"
+
+
+async def test_a_party_ledger_runs_a_balance_over_bills_and_payments(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    import datetime
+    import decimal
+    import uuid as uuid_module
+
+    from backend.models import PurchaseHeader, Supplier
+    from backend.services.settlement_service import SettlementService
+    from backend.tests.conftest import SEEDED_MAIN_WAREHOUSE_ID
+
+    suffix = uuid_module.uuid4().hex[:6]
+    async with session_factory() as session:
+        supplier = Supplier(org_id=ORG, name=f"Ledger Co {suffix}", created_by=owner.id)
+        session.add(supplier)
+        await session.flush()
+        session.add(
+            PurchaseHeader(
+                org_id=ORG,
+                supplier_id=supplier.id,
+                warehouse_id=uuid_module.UUID(SEEDED_MAIN_WAREHOUSE_ID),
+                invoice_no=f"LED-{suffix}",
+                invoice_date=datetime.date.today(),
+                subtotal=decimal.Decimal("10000"),
+                grand_total=decimal.Decimal("10000"),
+                status="confirmed",
+                created_by=owner.id,
+            )
+        )
+        supplier_id = supplier.id
+        await session.commit()
+
+    async with session_factory() as session:
+        await SettlementService(session).pay_supplier(
+            owner, supplier_name=f"Ledger Co {suffix}", amount=decimal.Decimal("4000"), via="cash"
+        )
+
+    token = await _token(client, owner)
+    response = await client.get(
+        f"/api/v1/parties/supplier/{supplier_id}/ledger", headers=_auth(token)
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["balance"] == "6000.00"
+    kinds = [row["kind"] for row in payload["data"]]
+    assert kinds == ["Purchase", "Payment (cash)"]
+    assert payload["data"][-1]["balance"] == "6000.00"
+
+
+async def test_a_party_ledger_for_the_wrong_kind_is_a_404(client: AsyncClient, owner: User) -> None:
+    import uuid as uuid_module
+
+    token = await _token(client, owner)
+    response = await client.get(
+        f"/api/v1/parties/partner/{uuid_module.uuid4()}/ledger", headers=_auth(token)
+    )
+    assert response.status_code == 404

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Textile ERP</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=7" />
+    <link rel="stylesheet" href="/assets/styles.css?v=8" />
     <link
       rel="icon"
       href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>"
@@ -40,6 +40,8 @@
           <button data-page="stock">Stock</button>
           <button data-page="purchases">Purchases</button>
           <button data-page="sales">Sales</button>
+          <button data-page="parties">Parties</button>
+          <button data-page="ledger">Ledger</button>
           <button data-page="money">Money</button>
           <button data-page="admin">Admin</button>
         </nav>
@@ -68,10 +70,17 @@
               <div id="chart-revenue" class="chart"></div>
             </figure>
           </div>
-          <section class="card">
-            <h2>Needs attention</h2>
-            <div id="alerts"></div>
-          </section>
+          <div class="grid-2">
+            <section class="card">
+              <h2>Needs attention</h2>
+              <div id="alerts"></div>
+            </section>
+            <section class="card" id="capital-card" hidden>
+              <h2>Partner capital</h2>
+              <p class="muted">What the partners have put in, less anything drawn out.</p>
+              <div id="capital" class="table-scroll"></div>
+            </section>
+          </div>
         </section>
 
         <section id="page-stock" class="page" hidden>
@@ -100,6 +109,43 @@
           <div id="sale-detail" class="card" hidden></div>
         </section>
 
+        <section id="page-parties" class="page" hidden>
+          <div class="card">
+            <div class="card-head">
+              <h2>Parties</h2>
+              <div class="filters">
+                <select id="party-kind">
+                  <option value="">Everyone</option>
+                  <option value="supplier">Suppliers</option>
+                  <option value="customer">Customers</option>
+                </select>
+                <input id="party-search" type="search" placeholder="Search name" />
+              </div>
+            </div>
+            <p class="muted">Click a party to see every bill and payment between you.</p>
+            <div id="parties-table" class="table-scroll"></div>
+          </div>
+          <div id="party-detail" class="card" hidden></div>
+        </section>
+
+        <section id="page-ledger" class="page" hidden>
+          <div class="card">
+            <div class="card-head">
+              <h2>Cash &amp; bank ledger</h2>
+              <div class="filters">
+                <select id="ledger-account">
+                  <option value="">Both accounts</option>
+                  <option value="Cash">Cash</option>
+                  <option value="Bank">Bank</option>
+                </select>
+                <input id="ledger-search" type="search" placeholder="Search notes or type" />
+              </div>
+            </div>
+            <div id="ledger-totals" class="kpi-row"></div>
+            <div id="ledger-table" class="table-scroll"></div>
+          </div>
+        </section>
+
         <section id="page-money" class="page" hidden>
           <div class="grid-2">
             <div class="card">
@@ -110,10 +156,6 @@
               <h2>Payables</h2>
               <div id="payables" class="table-scroll"></div>
             </div>
-          </div>
-          <div class="card">
-            <h2>Cash &amp; bank</h2>
-            <div id="ledgers" class="table-scroll"></div>
           </div>
         </section>
 
@@ -143,8 +185,8 @@
       <p id="banner" class="banner" role="status" hidden></p>
     </div>
 
-    <script src="/assets/money.js?v=7"></script>
-    <script src="/assets/charts.js?v=7"></script>
-    <script src="/assets/app.js?v=7"></script>
+    <script src="/assets/money.js?v=8"></script>
+    <script src="/assets/charts.js?v=8"></script>
+    <script src="/assets/app.js?v=8"></script>
   </body>
 </html>

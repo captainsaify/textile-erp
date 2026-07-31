@@ -41,11 +41,13 @@ framework's re-render performance.
 | Page | Contents |
 |---|---|
 | **Login** | Email + password → JWT ([10_API.md §3](10_API.md#3-authentication)) |
-| **Overview** | KPI row, profit trend, sales vs purchases, open alerts |
+| **Overview** | KPI row (incl. partner capital *(owner)*), profit trend, sales vs purchases, open alerts, capital by partner *(owner)* |
 | **Stock** | Full product table, low/negative emphasis, per-product movement history |
 | **Purchases** | List → detail with line items **and the original scan** |
 | **Sales** | List → detail with line items and margin per line |
-| **Money** | Cash & bank ledgers, receivables/payables aging, partner capital *(owner)* |
+| **Parties** | Every supplier and customer — including the settled-up ones — → detail with their whole statement and running balance |
+| **Ledger** | Cash & bank entries, filterable by account, with money in/out for the filter |
+| **Money** | Receivables/payables aging |
 | **Reports** | P&L for a period, Excel export request + download *(owner for P&L)* |
 | **Admin** | Audit log, nightly reconciliation status, settings *(owner)* |
 

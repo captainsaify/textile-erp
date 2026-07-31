@@ -64,5 +64,24 @@ const Money = (() => {
     return toPaise(text) < 0n;
   }
 
-  return { toPaise, format, compact, toPlotValue, isNegative };
+  function isZero(text) {
+    return toPaise(text) === 0n;
+  }
+
+  /** paise -> the same string shape the API sends, so a total can be
+   * passed anywhere an amount from the server can. */
+  function fromPaise(paise) {
+    const negative = paise < 0n;
+    const absolute = negative ? -paise : paise;
+    const remainder = (absolute % 100n).toString().padStart(2, "0");
+    return `${negative ? "-" : ""}${absolute / 100n}.${remainder}`;
+  }
+
+  /** Exact total of money strings. Summing with + on Numbers is how a
+   * capital figure ends up a paisa out from the rows above it. */
+  function sum(values) {
+    return fromPaise(values.reduce((total, value) => total + toPaise(value), 0n));
+  }
+
+  return { toPaise, fromPaise, format, compact, toPlotValue, isNegative, isZero, sum };
 })();

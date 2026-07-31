@@ -170,7 +170,40 @@
         `${data.receivables.parties} party(ies)`,
       ),
       kpi("Payables", Money.format(data.payables.total), `${data.payables.parties} party(ies)`),
+      // Owner-only, so it is absent rather than zero for staff -- the
+      // API omits the key entirely (docs/21 §6).
+      ...(data.partner_capital
+        ? [
+            kpi(
+              "Partner capital",
+              Money.format(Money.sum(data.partner_capital.map((row) => row.balance))),
+              `${data.partner_capital.length} partner(s)`,
+            ),
+          ]
+        : []),
     ].join("");
+
+    const capitalCard = $("capital-card");
+    if (data.partner_capital && data.partner_capital.length) {
+      capitalCard.hidden = false;
+      $("capital").replaceChildren(
+        table(
+          [
+            { label: "Partner", key: "partner" },
+            { label: "Principal", numeric: true, render: (row) => money(row.balance) },
+          ],
+          [
+            ...data.partner_capital,
+            {
+              partner: "Total",
+              balance: Money.sum(data.partner_capital.map((row) => row.balance)),
+            },
+          ],
+        ),
+      );
+    } else {
+      capitalCard.hidden = true;
+    }
 
     const alerts = [];
     if (Number(data.inventory.negative_stock_count) > 0) {
@@ -427,14 +460,153 @@
     panel.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
+  // --------------------------------------------------------- parties
+
+  let partyRows = [];
+
+  function renderParties() {
+    const kind = $("party-kind").value;
+    const needle = $("party-search").value.trim().toLowerCase();
+    const rows = partyRows.filter(
+      (row) =>
+        (!kind || row.kind === kind) && (!needle || row.name.toLowerCase().includes(needle)),
+    );
+
+    $("parties-table").replaceChildren(
+      table(
+        [
+          { label: "Name", key: "name" },
+          {
+            label: "Side",
+            render: (row) =>
+              `<span class="pill ${row.kind === "supplier" ? "warn" : "good"}">${row.kind}</span>`,
+          },
+          { label: "Phone", render: (row) => text(row.phone) },
+          {
+            // 0.00 is a fact worth showing: it is the difference between
+            // "settled up" and "never traded with"
+            label: "Outstanding",
+            numeric: true,
+            render: (row) => money(row.outstanding),
+          },
+          { label: "Oldest unpaid", render: (row) => text(row.oldest_date || "") },
+        ],
+        rows,
+        { onRowClick: (row) => loadPartyLedger(row) },
+      ),
+    );
+  }
+
+  async function loadParties() {
+    $("party-detail").hidden = true;
+    partyRows = rowsOf(await api("/parties"));
+    renderParties();
+  }
+
+  async function loadPartyLedger(party) {
+    const detail = await api(`/parties/${party.kind}/${party.id}/ledger`);
+    const panel = $("party-detail");
+    panel.replaceChildren();
+
+    const head = document.createElement("div");
+    head.className = "detail-head";
+    const owes = party.kind === "supplier" ? "owed to them" : "owed by them";
+    head.innerHTML = `
+      <div>
+        <h2>${text(detail.name)}</h2>
+        <p class="muted">${text(detail.kind)} · ${money(detail.balance)} ${owes}</p>
+      </div>
+      <button class="link" id="close-party">Close</button>`;
+    panel.append(head);
+
+    const wrap = document.createElement("div");
+    wrap.className = "table-scroll";
+    wrap.append(
+      table(
+        [
+          { label: "Date", key: "date" },
+          { label: "What", key: "kind" },
+          { label: "Reference", render: (row) => text(row.reference) },
+          {
+            label: "Billed",
+            numeric: true,
+            render: (row) => (Money.isZero(row.debit) ? "" : money(row.debit)),
+          },
+          {
+            label: "Settled",
+            numeric: true,
+            render: (row) => (Money.isZero(row.credit) ? "" : money(row.credit)),
+          },
+          { label: "Balance", numeric: true, render: (row) => money(row.balance) },
+        ],
+        detail.data,
+      ),
+    );
+    panel.append(wrap);
+    panel.hidden = false;
+    $("close-party").addEventListener("click", () => {
+      panel.hidden = true;
+    });
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  // ---------------------------------------------------------- ledger
+
+  let ledgerRows = [];
+
+  function renderLedger() {
+    const account = $("ledger-account").value;
+    const needle = $("ledger-search").value.trim().toLowerCase();
+    const rows = ledgerRows.filter(
+      (row) =>
+        (!account || row.account === account) &&
+        (!needle ||
+          String(row.notes || "").toLowerCase().includes(needle) ||
+          String(row.type || "").toLowerCase().includes(needle)),
+    );
+
+    const inflow = Money.sum(rows.filter((r) => !Money.isNegative(r.amount)).map((r) => r.amount));
+    const outflow = Money.sum(rows.filter((r) => Money.isNegative(r.amount)).map((r) => r.amount));
+    $("ledger-totals").innerHTML = [
+      kpi("Money in", Money.format(inflow), `${rows.length} entries shown`),
+      kpi("Money out", Money.format(outflow), "for this filter", { negative: true }),
+    ].join("");
+
+    $("ledger-table").replaceChildren(
+      table(
+        [
+          { label: "Date", key: "date" },
+          { label: "Account", key: "account" },
+          { label: "Type", key: "type" },
+          { label: "Amount", numeric: true, render: (row) => money(row.amount) },
+          // the running balance is per account, so it is meaningless
+          // beside a row from the other one -- hence the filter above
+          { label: "Balance", numeric: true, render: (row) => money(row.resulting_balance) },
+          { label: "Notes", render: (row) => text(row.notes || "") },
+        ],
+        rows,
+      ),
+    );
+  }
+
+  async function loadLedger() {
+    const [cash, bank] = await Promise.all([
+      optional("/ledgers/cash?limit=200"),
+      optional("/ledgers/bank?limit=200"),
+    ]);
+    ledgerRows = [
+      ...((cash && cash.entries) || []).map((row) => ({ ...row, account: "Cash" })),
+      ...((bank && bank.entries) || []).map((row) => ({ ...row, account: "Bank" })),
+    ].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    renderLedger();
+  }
+
   // ----------------------------------------------------------- money
 
   async function loadMoney() {
-    const [receivables, payables, cash, bank] = await Promise.all([
+    const [receivables, payables] = await Promise.all([
       optional("/receivables"),
       optional("/payables"),
-      optional("/ledgers/cash?limit=25"),
-      optional("/ledgers/bank?limit=25"),
     ]);
 
     const partyColumns = [
@@ -444,25 +616,6 @@
     ];
     $("receivables").replaceChildren(table(partyColumns, rowsOf(receivables)));
     $("payables").replaceChildren(table(partyColumns, rowsOf(payables)));
-
-    const entries = [
-      ...((cash && cash.entries) || []).map((row) => ({ ...row, account: "Cash" })),
-      ...((bank && bank.entries) || []).map((row) => ({ ...row, account: "Bank" })),
-    ].sort((a, b) => String(b.date).localeCompare(String(a.date)));
-
-    $("ledgers").replaceChildren(
-      table(
-        [
-          { label: "Date", key: "date" },
-          { label: "Account", key: "account" },
-          { label: "Type", key: "type" },
-          { label: "Amount", numeric: true, render: (row) => money(row.amount) },
-          { label: "Balance", numeric: true, render: (row) => money(row.resulting_balance) },
-          { label: "Notes", render: (row) => text(row.notes || "") },
-        ],
-        entries,
-      ),
-    );
   }
 
   // ----------------------------------------------------------- admin
@@ -685,6 +838,8 @@
     stock: loadStock,
     purchases: loadPurchases,
     sales: loadSales,
+    parties: loadParties,
+    ledger: loadLedger,
     money: loadMoney,
     admin: loadAdmin,
   };
@@ -706,6 +861,10 @@
   $("login-form").addEventListener("submit", signIn);
   $("signout").addEventListener("click", signOut);
   $("stock-search").addEventListener("input", (event) => renderStock(event.target.value));
+  $("party-kind").addEventListener("change", renderParties);
+  $("party-search").addEventListener("input", renderParties);
+  $("ledger-account").addEventListener("change", renderLedger);
+  $("ledger-search").addEventListener("input", renderLedger);
   $("audit-action").addEventListener("change", renderAudit);
   $("audit-search").addEventListener("input", renderAudit);
   document.querySelectorAll("#nav button").forEach((button) => {

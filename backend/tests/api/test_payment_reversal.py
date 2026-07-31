@@ -338,3 +338,38 @@ async def test_a_supplier_whose_name_holds_on_keeps_it(
 
     assert command.party == "Delivery on Time Traders"
     assert command.on is None
+
+
+async def test_a_reversed_payment_cancels_itself_out_of_the_party_ledger(
+    owner_user: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A reversal is a compensating entry with the opposite sign. Taking
+    the absolute value of every ledger row turned it into a *second*
+    payment, so six reversed payments made a supplier who was owed
+    37,55,350 read as -51,65,000."""
+    from backend.services.report_service import ReportService
+    from backend.services.settlement_service import PaymentReversalService
+
+    supplier, _ = await _bill(session_factory, owner_user, total="10000")
+    reference = await _pay(session_factory, owner_user, supplier, "4000")
+    async with session_factory() as session:
+        supplier_id = (
+            await session.execute(sa.select(Supplier.id).where(Supplier.name == supplier))
+        ).scalar_one()
+
+    async with session_factory() as session:
+        entries = await ReportService(session).party_entries(
+            ORG, role="supplier", party_id=supplier_id
+        )
+    assert sum((e.debit - e.credit for e in entries), D("0")) == D("6000")
+
+    async with session_factory() as session:
+        await PaymentReversalService(session).reverse(owner_user, reference=reference)
+
+    async with session_factory() as session:
+        entries = await ReportService(session).party_entries(
+            ORG, role="supplier", party_id=supplier_id
+        )
+    # both rows are still there -- nothing is deleted -- and they net off
+    assert len(entries) == 3
+    assert sum((e.debit - e.credit for e in entries), D("0")) == D("10000")

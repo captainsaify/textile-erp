@@ -9,6 +9,7 @@ command uses rather than reimplementing a reversal.
 from __future__ import annotations
 
 import datetime
+import decimal
 import uuid
 from typing import Annotated, Any
 
@@ -32,6 +33,8 @@ from backend.repositories.inventory_repository import InventoryRepository
 from backend.repositories.product_repository import ProductRepository
 
 router = APIRouter(prefix="/api/v1", tags=["catalog"])
+
+ZERO = decimal.Decimal("0")
 
 
 @router.get("/products")
@@ -317,6 +320,101 @@ async def payables(user: CurrentUser, session: Session) -> dict[str, Any]:
             for row in rows
         ]
     }
+
+
+@router.get("/parties")
+async def parties(user: CurrentUser, session: Session) -> dict[str, Any]:
+    """Everyone the business deals with, both sides, in one list.
+
+    `receivables`/`payables` answer "who owes money", which leaves out
+    every party who is settled up -- so there was no way to look up a
+    supplier you had paid off. This is the list; the balance is a column
+    on it rather than the reason a row exists.
+    """
+    from backend.repositories.party_repository import CustomerRepository, SupplierRepository
+
+    suppliers = await SupplierRepository(session).outstanding_parties(user.org_id)
+    customers = await CustomerRepository(session).outstanding_parties(user.org_id)
+    balances = {row.party_id: row for row in [*suppliers, *customers]}
+
+    def _row(record: Supplier | Customer, kind: str) -> dict[str, Any]:
+        balance = balances.get(record.id)
+        return {
+            "id": str(record.id),
+            "kind": kind,
+            "name": record.name,
+            "phone": record.phone or "",
+            "outstanding": money_str(balance.outstanding if balance else ZERO),
+            "oldest_date": (
+                balance.oldest_date.isoformat() if balance and balance.oldest_date else None
+            ),
+        }
+
+    supplier_rows = (
+        (
+            await session.execute(
+                select(Supplier)
+                .where(Supplier.org_id == user.org_id, Supplier.deleted_at.is_(None))
+                .order_by(Supplier.name)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    customer_rows = (
+        (
+            await session.execute(
+                select(Customer)
+                .where(Customer.org_id == user.org_id, Customer.deleted_at.is_(None))
+                .order_by(Customer.name)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {
+        "data": [
+            *[_row(record, "supplier") for record in supplier_rows],
+            *[_row(record, "customer") for record in customer_rows],
+        ]
+    }
+
+
+@router.get("/parties/{kind}/{party_id}/ledger")
+async def party_ledger(
+    user: CurrentUser, session: Session, kind: str, party_id: uuid.UUID
+) -> dict[str, Any]:
+    """One party's bills and settlements, oldest first, with the running
+    balance -- the same rows the `ledger` export puts on their tab, so
+    the page and the spreadsheet cannot disagree."""
+    from backend.services.report_service import ReportService
+
+    if kind not in {"supplier", "customer"}:
+        raise HTTPException(status_code=404, detail="a party is a supplier or a customer")
+    record: Supplier | Customer | None = (
+        await session.get(Supplier, party_id)
+        if kind == "supplier"
+        else await session.get(Customer, party_id)
+    )
+    if record is None or record.org_id != user.org_id or record.deleted_at is not None:
+        raise HTTPException(status_code=404, detail=f"no such {kind}")
+
+    entries = await ReportService(session).party_entries(user.org_id, role=kind, party_id=party_id)
+    running = ZERO
+    rows = []
+    for entry in sorted(entries, key=lambda e: e.at):
+        running += entry.debit - entry.credit
+        rows.append(
+            {
+                "date": entry.at.date().isoformat(),
+                "kind": entry.kind,
+                "reference": entry.reference,
+                "debit": money_str(entry.debit),
+                "credit": money_str(entry.credit),
+                "balance": money_str(running),
+            }
+        )
+    return {"name": record.name, "kind": kind, "balance": money_str(running), "data": rows}
 
 
 @router.get("/audit")

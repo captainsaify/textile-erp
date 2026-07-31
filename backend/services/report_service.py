@@ -322,6 +322,20 @@ class ReportService:
         )
         return {row[0]: row[1] for row in (await self._session.execute(stmt)).all()}
 
+    async def party_entries(
+        self,
+        org_id: uuid.UUID,
+        *,
+        role: str,
+        party_id: uuid.UUID,
+        start: datetime.date | None = None,
+        end: datetime.date | None = None,
+    ) -> list[StatementEntry]:
+        """Public so the dashboard's party ledger reads the same rows
+        the exported one does -- two queries for one relationship is two
+        places for the balance to disagree."""
+        return await self._party_entries(org_id, role=role, party_id=party_id, start=start, end=end)
+
     async def _party_entries(
         self,
         org_id: uuid.UUID,
@@ -383,10 +397,14 @@ class ReportService:
             ]
             source_type, payment_label = "customer_payment", "Receipt"
 
+        # Reversals land under their own source_type but carry the same
+        # party in source_id. Leaving them out was not a cosmetic gap:
+        # the settlement they undid was still counted, so six reversed
+        # payments made a supplier owed 37,55,350 read as fully settled.
         for ledger in (CashLedger, BankLedger):
             ledger_stmt = select(ledger).where(
                 ledger.org_id == org_id,
-                ledger.source_type == source_type,
+                ledger.source_type.in_([source_type, "payment_reversal"]),
                 ledger.source_id == party_id,
             )
             if start is not None:
@@ -394,14 +412,23 @@ class ReportService:
             if end is not None:
                 ledger_stmt = ledger_stmt.where(ledger.entry_date <= end)
             via = "cash" if ledger is CashLedger else "bank"
+            # Ledger rows are signed by their effect on *cash*: a payment
+            # to a supplier is negative, a receipt from a customer
+            # positive. Flipping the supplier side puts both in the same
+            # "reduces what is owed" column -- and keeps a reversal, which
+            # is the same row with the opposite sign, cancelling its
+            # original instead of reading as a second payment.
+            direction = 1 if role == "customer" else -1
             entries += [
                 StatementEntry(
                     at=self._moment(row.entry_date, row.created_at),
-                    kind=f"{payment_label} ({via})",
+                    kind=(
+                        f"Reversal ({via})"
+                        if row.source_type == "payment_reversal"
+                        else f"{payment_label} ({via})"
+                    ),
                     reference=row.notes or "",
-                    # ledger rows store money leaving as negative; a
-                    # statement reads better with the sign in the column
-                    credit=abs(row.amount),
+                    credit=direction * row.amount,
                 )
                 for row in (await self._session.execute(ledger_stmt)).scalars()
             ]
