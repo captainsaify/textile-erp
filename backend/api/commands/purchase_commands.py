@@ -45,13 +45,14 @@ _HEADER = re.compile(
     r"Date:\s*(?P<date>\d{2}-\d{2}-\d{4})(?:\s+Brand:\s*(?P<brand>.+))?\s*$",
     re.IGNORECASE,
 )
-_ITEM = re.compile(r"^(?P<code>[A-Za-z0-9_-]+)\s+(?P<qty>[\d.]+)\s+(?P<rate>[\d.]+)$")
+#: Same permissive code class as the sale grammar -- see the note there.
+_ITEM = re.compile(r"^(?P<code>[A-Za-z0-9][\w.\-/&]*)\s+(?P<qty>[\d.]+)\s+(?P<rate>[\d.]+)$")
 _LABELED = re.compile(r"^(?P<label>freight|other|total):\s*(?P<amount>[\d.]+)$", re.IGNORECASE)
 _CORRECTION = re.compile(
     r"^line\s+(?P<line>\d+)\s+(?P<field>code|qty|rate)\s+(?P<value>.+)$", re.IGNORECASE
 )
 _CREATE_PRODUCT = re.compile(
-    r"^create\s+product\s+(?P<code>[A-Za-z0-9_-]+)(?:\s+(?P<description>.+))?$",
+    r"^create\s+product\s+(?P<code>[A-Za-z0-9][\w.\-/&]*)(?:\s+(?P<description>.+))?$",
     re.IGNORECASE,
 )
 _CREATE_ALL = re.compile(r"^create\s+all\s+products?$", re.IGNORECASE)
@@ -292,6 +293,21 @@ def preview_result(draft: Draft) -> CommandResult:
             Choice(id="sheet", title="See as sheet"),
             Choice(id="discard", title="Discard"),
         )
+        if draft.shared_codes:
+            # These resolved under the answered brand, which is right --
+            # but VVP is a different garment under TOP than under MKD, so
+            # say which ones were a choice, and keep the fix one tap away.
+            listed = "\n".join(f"• {entry}" for entry in draft.shared_codes)
+            under = draft.brand_name or "no brand"
+            reply = (
+                f"{reply}\n\nℹ️ {len(draft.shared_codes)} code(s) exist under more than one "
+                f"brand:\n{listed}\nI've used *{under}*'s. Fix the brand if that's wrong."
+            )
+            choices = (
+                Choice(id="confirm", title=f"Confirm ({under})"[:20]),
+                Choice(id="fix brand", title="Fix the brand"),
+                Choice(id="discard", title="Discard"),
+            )
     return CommandResult(reply=reply, interactive=Buttons(body=body, choices=choices))
 
 
@@ -386,6 +402,7 @@ async def handle_purchase_session_reply(
         draft.brand_name = None
         draft.brand_id = None
         draft.brand_collisions = []
+        draft.shared_codes = []
         return await begin_slots(draft, ["brand"], ctx)
 
     if lowered == "create supplier":

@@ -42,7 +42,11 @@ from backend.services.session_service import (
 _HEADER = re.compile(
     r"Customer:\s*(?P<customer>.+?)(?:\s+(?P<payment>cash|bank|credit))?\s*$", re.IGNORECASE
 )
-_ITEM = re.compile(r"^(?P<code>[A-Za-z0-9_-]+)\s+(?P<qty>[\d.]+)\s+(?P<rate>[\d.]+)$")
+#: Codes off a supplier's sheet are not tidy identifiers -- this catalog
+#: alone holds VVP-1, C-ANG, MJP-H and L.P.P. A code class of
+#: [A-Za-z0-9_-] silently refused to read the line for any of the dotted
+#: ones, so those products could be bought but never sold.
+_ITEM = re.compile(r"^(?P<code>[A-Za-z0-9][\w.\-/&]*)\s+(?P<qty>[\d.]+)\s+(?P<rate>[\d.]+)$")
 _CORRECTION = re.compile(
     r"^line\s+(?P<line>\d+)\s+(?P<field>qty|rate|code)\s+(?P<value>.+)$", re.IGNORECASE
 )

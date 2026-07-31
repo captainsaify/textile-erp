@@ -361,3 +361,24 @@ async def business_today(session: AsyncSession, org_id: uuid.UUID) -> datetime.d
     """The org's local calendar date -- docs/02_Database.md §8: DATE
     columns hold the business's local date, never UTC 'today'."""
     return (await business_now(session, org_id)).date()
+
+
+async def entry_day(session: AsyncSession, org_id: uuid.UUID, on: str | None) -> datetime.date:
+    """The day the money moved, which is not always the day it was
+    typed: a ledger copied out of a paper book is entered weeks later,
+    and filing those under today would misstate every cash-flow report.
+
+    `on` is still raw text here because "today" can only be resolved
+    against the org's own calendar date, which this function is the one
+    that knows.
+    """
+    from backend.core.dates import parse_date
+    from backend.core.exceptions import ValidationError
+
+    today = await business_today(session, org_id)
+    if on is None:
+        return today
+    when = parse_date(on, today=today)
+    if when > today:
+        raise ValidationError(f"{when.strftime('%d-%m-%Y')} is in the future.")
+    return when

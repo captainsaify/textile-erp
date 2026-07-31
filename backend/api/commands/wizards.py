@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import datetime
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -34,6 +35,7 @@ from backend.api.interactive import (
     Section,
     is_abandon,
 )
+from backend.core.dates import parse_date, split_date
 from backend.core.exceptions import DomainError, ValidationError
 from backend.services.session_service import (
     AWAITING_COMMAND_SLOT,
@@ -158,6 +160,17 @@ def _code(value: str) -> str:
     return token
 
 
+def _when(value: str) -> str:
+    """Checked here, resolved later. "today" stays the word it was: only
+    the service knows the org's business date, and turning it into a
+    calendar date here would file a payment made just before midnight
+    under the wrong day."""
+    token = value.strip().lower()
+    if token in {"today", "yesterday"}:
+        return token
+    return parse_date(value, today=datetime.date.today()).strftime("%d-%m-%Y")
+
+
 def _nonempty(label: str) -> Callable[[str], str]:
     def check(value: str) -> str:
         text = value.strip().rstrip(":")
@@ -226,6 +239,19 @@ async def _method_buttons(ctx: RequestContext, filled: dict[str, str]) -> Intera
         choices=(
             Choice(id="slot cash", title="Cash"),
             Choice(id="slot bank", title="Bank"),
+        ),
+    )
+
+
+async def _when_buttons(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
+    """Most money is entered the day it moved, so that is one tap --
+    but a ledger copied out of a paper book is entered weeks later, and
+    typing the day is always allowed."""
+    return Buttons(
+        body="When did this happen?",
+        choices=(
+            Choice(id="slot today", title="Today"),
+            Choice(id="slot yesterday", title="Yesterday"),
         ),
     )
 
@@ -596,16 +622,37 @@ async def _period_menu(ctx: RequestContext, filled: dict[str, str]) -> Interacti
 # --------------------------------------------------------------------
 
 
+def _prefill_when(args: str) -> tuple[str, dict[str, str]]:
+    """Take `on 28-07-2026` off the line before anything else reads it,
+    so it can't be mistaken for an invoice reference or swallowed by a
+    party name."""
+    args, on = split_date(args)
+    filled: dict[str, str] = {}
+    if on is not None:
+        with contextlib.suppress(DomainError):
+            filled["when"] = _when(on)
+    return args, filled
+
+
+def _dated(filled: dict[str, str], required: tuple[str, ...]) -> dict[str, str]:
+    """A command typed in full still runs in one round trip (§10.5), so
+    only a command that was going to ask something anyway gets asked for
+    the date; one typed complete means today."""
+    if all(name in filled for name in required):
+        filled.setdefault("when", "today")
+    return filled
+
+
 def _prefill_settlement(args: str) -> dict[str, str]:
     """`paid wagdia` -> the party is known, ask the rest.
 
     Deliberately conservative: anything it cannot place with certainty
     is left unfilled, because a wrong guess here is a wrong payment.
     """
+    args, filled = _prefill_when(args)
     tokens = args.split()
     if tokens and tokens[0].lower() in {"supplier:", "supplier", "customer:", "customer"}:
         tokens = tokens[1:]
-    filled: dict[str, str] = {}
 
     method = next((t for t in tokens if t.lower() in {"cash", "bank"}), None)
     if method is not None:
@@ -623,12 +670,12 @@ def _prefill_settlement(args: str) -> dict[str, str]:
     party = " ".join(tokens[:amount_at] if amount_at is not None else tokens).strip().rstrip(":")
     if party:
         filled["party"] = party
-    return filled
+    return _dated(filled, ("party", "amount", "method"))
 
 
 def _prefill_money(args: str) -> dict[str, str]:
+    args, filled = _prefill_when(args)
     tokens = args.split()
-    filled: dict[str, str] = {}
     if tokens:
         filled["category"] = tokens[0]
     if len(tokens) > 1 and looks_like_amount(tokens[1]):
@@ -638,7 +685,7 @@ def _prefill_money(args: str) -> dict[str, str]:
             filled["amount"] = str(parse_amount(tokens[1]))
     if len(tokens) > 2 and tokens[2].lower() in {"cash", "bank"}:
         filled["method"] = tokens[2].lower()
-    return filled
+    return _dated(filled, ("category", "amount", "method"))
 
 
 #: Menu row id -> (report type the command takes, what else it needs).
@@ -846,8 +893,18 @@ def _settlement_wizard(command: str, party_label: str, choices: ChoiceBuilder) -
                 choices=_method_buttons,
                 validate=_method,
             ),
+            CommandSlot(
+                name="when",
+                question="When did this happen?",
+                choices=_when_buttons,
+                validate=_when,
+                example="Today, or a date like 28-07-2026",
+            ),
         ),
-        assemble=lambda f: f"{f['party']} {f['amount']} {f['method']}",
+        assemble=lambda f: (
+            f"{f['party']} {f['amount']} {f['method']}"
+            + (f" on {f['when']}" if f.get("when", "today") != "today" else "")
+        ),
         prefill=_prefill_settlement,
     )
 
@@ -867,8 +924,18 @@ def _money_wizard(command: str, choices: ChoiceBuilder | None) -> CommandWizard:
             CommandSlot(
                 name="method", question="Cash or bank?", choices=_method_buttons, validate=_method
             ),
+            CommandSlot(
+                name="when",
+                question="When did this happen?",
+                choices=_when_buttons,
+                validate=_when,
+                example="Today, or a date like 18-07-2026",
+            ),
         ),
-        assemble=lambda f: f"{f['category']} {f['amount']} {f['method']}",
+        assemble=lambda f: (
+            f"{f['category']} {f['amount']} {f['method']}"
+            + (f" on {f['when']}" if f.get("when", "today") != "today" else "")
+        ),
         prefill=_prefill_money,
     )
 

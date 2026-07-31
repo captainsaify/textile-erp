@@ -19,7 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.core.exceptions import NotFoundError, ValidationError
 from backend.models import Customer, PurchaseHeader, SalesHeader, Supplier, User
 from backend.models.enums import AccountCode, LedgerEntryType
-from backend.repositories.accounting_repository import LedgerRepository, business_today
+from backend.repositories.accounting_repository import (
+    LedgerRepository,
+    business_today,
+    entry_day,
+)
 from backend.repositories.party_repository import CustomerRepository, SupplierRepository
 from backend.services.audit_service import AuditService
 from backend.services.journal_service import JournalService
@@ -83,6 +87,7 @@ class SettlementService:
         amount: decimal.Decimal,
         via: str,
         against: str | None = None,
+        on: str | None = None,
         allow_advance: bool = False,
         whatsapp_message_id: str | None = None,
     ) -> SettlementResult:
@@ -90,7 +95,7 @@ class SettlementService:
         org_id = actor.org_id
         async with self._session.begin():
             customer = await self._resolve_customer(org_id, customer_name)
-            today = await business_today(self._session, org_id)
+            when = await entry_day(self._session, org_id, on)
 
             stmt = (
                 select(SalesHeader)
@@ -128,13 +133,13 @@ class SettlementService:
                 amount=amount,
                 source_type="customer_payment",
                 source_id=customer.id,
-                entry_date=today,
+                entry_date=when,
                 notes=f"received from {customer.name}",
                 created_by=actor.id,
             )
             await self._journal.post(
                 org_id,
-                entry_date=today,
+                entry_date=when,
                 description=f"payment received from {customer.name}",
                 source_type="customer_payment",
                 source_id=customer.id,
@@ -151,6 +156,7 @@ class SettlementService:
                 after_state={
                     "amount": str(amount),
                     "via": via,
+                    "entry_date": when.isoformat(),
                     "allocations": [
                         {"reference": a.reference, "applied": str(a.applied)} for a in allocations
                     ],
@@ -178,6 +184,7 @@ class SettlementService:
         amount: decimal.Decimal,
         via: str,
         against: str | None = None,
+        on: str | None = None,
         allow_advance: bool = False,
         whatsapp_message_id: str | None = None,
     ) -> SettlementResult:
@@ -185,7 +192,7 @@ class SettlementService:
         org_id = actor.org_id
         async with self._session.begin():
             supplier = await self._resolve_supplier(org_id, supplier_name)
-            today = await business_today(self._session, org_id)
+            when = await entry_day(self._session, org_id, on)
 
             stmt = (
                 select(PurchaseHeader)
@@ -222,13 +229,13 @@ class SettlementService:
                 amount=-amount,
                 source_type="supplier_payment",
                 source_id=supplier.id,
-                entry_date=today,
+                entry_date=when,
                 notes=f"paid to {supplier.name}",
                 created_by=actor.id,
             )
             await self._journal.post(
                 org_id,
-                entry_date=today,
+                entry_date=when,
                 description=f"payment to {supplier.name}",
                 source_type="supplier_payment",
                 source_id=supplier.id,
@@ -245,6 +252,7 @@ class SettlementService:
                 after_state={
                     "amount": str(amount),
                     "via": via,
+                    "entry_date": when.isoformat(),
                     "allocations": [
                         {"reference": a.reference, "applied": str(a.applied)} for a in allocations
                     ],

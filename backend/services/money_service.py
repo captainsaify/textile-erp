@@ -25,6 +25,7 @@ from backend.repositories.accounting_repository import (
     LedgerRepository,
     PartnerCapitalRepository,
     business_today,
+    entry_day,
 )
 from backend.repositories.party_repository import PartnerRepository
 from backend.services.audit_service import AuditService
@@ -86,6 +87,7 @@ class MoneyService:
         via: str,
         description: str | None,
         paid_by_partner_name: str | None = None,
+        on: str | None = None,
         whatsapp_message_id: str | None = None,
     ) -> MoneyRecorded:
         amount = _validate_amount(amount)
@@ -99,7 +101,7 @@ class MoneyService:
                 if partner is None:
                     raise NotFoundError("partner", paid_by_partner_name)
 
-            today = await business_today(self._session, org_id)
+            today = await entry_day(self._session, org_id, on)
             existing_categories = await self._expenses.distinct_categories(org_id)
 
             expense = await self._expenses.insert(
@@ -193,6 +195,7 @@ class MoneyService:
         amount: decimal.Decimal,
         via: str,
         description: str | None,
+        on: str | None = None,
         whatsapp_message_id: str | None = None,
     ) -> MoneyRecorded:
         amount = _validate_amount(amount)
@@ -200,7 +203,7 @@ class MoneyService:
         org_id = actor.org_id
 
         async with self._session.begin():
-            today = await business_today(self._session, org_id)
+            today = await entry_day(self._session, org_id, on)
             existing_categories = await self._income.distinct_categories(org_id)
 
             income = await self._income.insert(

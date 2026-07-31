@@ -225,30 +225,43 @@ async def resolve_after_details(draft: Draft, ctx: RequestContext) -> Draft:
         # likeliest cause is the brand having been answered wrong, and
         # confirming quietly creates a second product that then diverges
         # from the first. So it is surfaced before CONFIRM, not after.
-        draft.brand_collisions = await _collisions(draft, ctx)
+        draft.brand_collisions, draft.shared_codes = await _collisions(draft, ctx)
     return draft
 
 
-async def _collisions(draft: Draft, ctx: RequestContext) -> list[str]:
+async def _collisions(draft: Draft, ctx: RequestContext) -> tuple[list[str], list[str]]:
+    """Two different things a code shared across brands can mean.
+
+    *Collisions* are codes that did not resolve here but exist under
+    another brand — confirming invents a second product. *Shared* codes
+    did resolve, correctly, under the brand that was answered, but the
+    same code names a different product elsewhere; the resolution was a
+    real choice, so the preview names it rather than making it silently.
+    """
     from backend.repositories.product_repository import ProductRepository
 
     collisions: list[str] = []
+    shared: list[str] = []
     async with ctx.session_factory() as session:
         products = ProductRepository(session)
         for line in draft.lines:
-            if line.product_id is not None or not line.code:
+            if not line.code:
                 continue
             elsewhere = [
                 other
                 for other in await products.list_by_code(ctx.user.org_id, line.code)
                 if other.brand_id != draft.brand_id
             ]
-            if elsewhere:
-                other_brands = sorted(
-                    {(p.brand.name if p.brand else "no brand") for p in elsewhere}
-                )
-                collisions.append(f"{line.code} (already under {', '.join(other_brands)})")
-    return collisions
+            if not elsewhere:
+                continue
+            other_brands = ", ".join(
+                sorted({(p.brand.name if p.brand else "no brand") for p in elsewhere})
+            )
+            if line.product_id is None:
+                collisions.append(f"{line.code} (already under {other_brands})")
+            else:
+                shared.append(f"{line.resolved_code or line.code} (also under {other_brands})")
+    return collisions, shared
 
 
 async def _cached_vision(

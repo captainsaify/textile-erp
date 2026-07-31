@@ -181,3 +181,68 @@ async def test_collisions_survive_the_session_round_trip(
     restored = Draft.from_context(draft.to_context())
 
     assert restored.brand_collisions == draft.brand_collisions
+
+
+async def _existing_under(
+    session_factory: async_sessionmaker[AsyncSession],
+    actor: User,
+    brand_name: str,
+    codes: list[str],
+) -> None:
+    async with session_factory() as session:
+        brand = Brand(org_id=ORG, name=brand_name)
+        session.add(brand)
+        await session.flush()
+        for code in codes:
+            session.add(
+                Product(
+                    org_id=ORG,
+                    product_type_id=uuid.UUID(SEEDED_TEXTILE_TYPE_ID),
+                    code=code,
+                    brand_id=brand.id,
+                    description=f"{brand_name} {code}",
+                    unit_id=uuid.UUID(SEEDED_KG_UNIT_ID),
+                    created_by=actor.id,
+                )
+            )
+        await session.commit()
+
+
+async def test_a_code_shared_with_another_brand_is_named_before_confirm(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Noor Traders' bill carried VVP and VVP-1 and the brand was answered
+    TOP, so both resolved to TOP's products -- correctly. But VVP also
+    names an MKD product, so which one this bought was a real choice,
+    and the preview says so instead of making it silently."""
+    await _existing_under_top(session_factory, ctx.user, ["VVP", "VVP-1"])
+    await _existing_under(session_factory, ctx.user, "MKD", ["VVP"])
+
+    draft = _mkd_draft(["VVP", "VVP-1"])
+    draft.brand_name = "TOP"
+    draft.supplier_id = uuid.uuid4()
+    draft = await resolve_after_details(draft, ctx)
+
+    # resolved, under TOP -- nothing is being created
+    assert all(line.product_id is not None for line in draft.lines)
+    assert draft.brand_collisions == []
+    assert draft.shared_codes == ["VVP (also under MKD)"]
+    # VVP-1 exists under one brand only, so it stays quiet
+    assert not any("VVP-1" in entry for entry in draft.shared_codes)
+
+    result = preview_result(draft)
+    assert "exist under more than one brand" in result.reply
+    assert isinstance(result.interactive, Buttons)
+    assert [c.id for c in result.interactive.choices] == ["confirm", "fix brand", "discard"]
+
+
+async def test_shared_codes_survive_the_session_round_trip(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await _existing_under_top(session_factory, ctx.user, ["VVP"])
+    await _existing_under(session_factory, ctx.user, "MKD", ["VVP"])
+    draft = _mkd_draft(["VVP"])
+    draft.brand_name = "TOP"
+    draft = await resolve_after_details(draft, ctx)
+
+    assert Draft.from_context(draft.to_context()).shared_codes == draft.shared_codes

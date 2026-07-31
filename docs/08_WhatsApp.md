@@ -174,8 +174,10 @@ return approximation, §
 
 ### `expense` {#expense}
 
-**Syntax:** `expense <category> <amount> <cash|bank> [description]`
+**Syntax:** `expense <category> <amount> <cash|bank> [description] [on <DD-MM-YYYY>]`
 **Example:** `expense transport 1500 cash loading charges for July batch`
+**Backdating:** as for [`paid`](#paid) — `on <DD-MM-YYYY>`, `today` or
+`yesterday`. Also accepted by `income`.
 **Success:** `✅ Expense recorded — Transport ₹1,500.00 (cash). Cash
 balance now ₹18,500.00.`
 **Errors:** amount `<= 0` rejected; unrecognized category is accepted
@@ -248,8 +250,14 @@ from one number); approval request expires after 48h
 
 ### `received` {#received}
 
-**Syntax:** `received Customer: <name> <amount> <cash|bank> [against <invoice-ref>]`
+**Syntax:** `received Customer: <name> <amount> <cash|bank> [against <invoice-ref>] [on <DD-MM-YYYY>]`
 **Example:** `received Customer: ABC 2000 cash`
+**Backdating:** `on 28-07-2026` (also `today` / `yesterday`) files the
+entry under the day the money actually moved rather than the day it was
+typed — a ledger copied out of a paper book is entered weeks late, and
+filing it under today misstates every cash-flow period. A future date is
+refused. The wizard asks the same question as its last step; a command
+typed in full without `on` means today, and still runs in one round trip.
 **Success:**
 ```
 ✅ Payment received — ABC ₹2,000.00 (cash), applied to INV-oldest-first
@@ -266,7 +274,7 @@ prompt, per [04_Purchases.md §9](04_Purchases.md#9-payment-tracking)
 
 ### `paid` {#paid}
 
-**Syntax:** `paid Supplier: <name> <amount> <cash|bank> [against <invoice-ref>]`
+**Syntax:** `paid Supplier: <name> <amount> <cash|bank> [against <invoice-ref>] [on <DD-MM-YYYY>]`
 **Example:** `paid Supplier: Shree Textiles 10000 bank against INV-4521`
 **Success/Errors/Permissions:** mirrors `received` exactly, payable
 side — [04_Purchases.md §9](04_Purchases.md#9-payment-tracking).

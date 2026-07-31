@@ -115,7 +115,7 @@ async def test_bare_command_asks_the_first_question(ctx: RequestContext) -> None
     assert "Usage:" not in result.reply
     state, context = await state_of(ctx)
     assert state == AWAITING_COMMAND_SLOT
-    assert context["queue"] == ["party", "amount", "method"]
+    assert context["queue"] == ["party", "amount", "method", "when"]
 
 
 async def test_partial_command_asks_only_for_what_is_missing(ctx: RequestContext) -> None:
@@ -125,7 +125,7 @@ async def test_partial_command_asks_only_for_what_is_missing(ctx: RequestContext
     assert "How much?" in result.reply
     _, context = await state_of(ctx)
     assert context["filled"] == {"party": "wagdia"}
-    assert context["queue"] == ["amount", "method"]
+    assert context["queue"] == ["amount", "method", "when"]
 
 
 async def test_complete_command_does_not_start_a_wizard(ctx: RequestContext) -> None:
@@ -262,6 +262,7 @@ async def test_wizard_and_one_shot_produce_identical_postings(
     await answer("transport", ctx)
     await answer("1500", ctx)
     await answer("slot cash", ctx)
+    await answer("slot today", ctx)
     wizard = (await ledger_rows(session_factory), await journal_rows(session_factory))
 
     assert wizard == one_shot
@@ -275,6 +276,7 @@ async def test_tapped_and_typed_answers_agree(
     await answer("transport", ctx)
     await answer("1500", ctx)
     await answer("cash", ctx)  # typed
+    await answer("today", ctx)
     typed = await journal_rows(session_factory)
     await reset_postings(session_factory)
 
@@ -282,6 +284,7 @@ async def test_tapped_and_typed_answers_agree(
     await answer("slot transport", ctx)
     await answer("1500", ctx)
     await answer("slot cash", ctx)  # tapped
+    await answer("slot today", ctx)
     assert await journal_rows(session_factory) == typed
 
 
@@ -289,7 +292,8 @@ async def test_the_finished_wizard_runs_the_real_command(ctx: RequestContext) ->
     await begin("expense", "", ctx)
     await answer("transport", ctx)
     await answer("1500", ctx)
-    result = await answer("slot cash", ctx)
+    await answer("slot cash", ctx)
+    result = await answer("slot today", ctx)
 
     # the reply is the command's own, not something the wizard invented
     assert "transport" in result.reply.lower()
@@ -311,7 +315,7 @@ async def test_wrong_type_of_answer_re_asks_naming_the_expectation(ctx: RequestC
     assert "How much?" in result.reply
     state, context = await state_of(ctx)
     assert state == AWAITING_COMMAND_SLOT
-    assert context["queue"] == ["amount", "method"]
+    assert context["queue"] == ["amount", "method", "when"]
 
 
 async def test_a_non_method_where_the_method_belongs_is_refused(ctx: RequestContext) -> None:
@@ -320,7 +324,7 @@ async def test_a_non_method_where_the_method_belongs_is_refused(ctx: RequestCont
 
     assert "isn't a payment method" in result.reply
     _, context = await state_of(ctx)
-    assert context["queue"] == ["method"]
+    assert context["queue"] == ["method", "when"]
 
 
 async def test_back_clears_the_previous_answer(ctx: RequestContext) -> None:
@@ -332,7 +336,7 @@ async def test_back_clears_the_previous_answer(ctx: RequestContext) -> None:
     assert "Which supplier?" in result.reply
     _, context = await state_of(ctx)
     assert context["filled"] == {}
-    assert context["queue"] == ["party", "amount", "method"]
+    assert context["queue"] == ["party", "amount", "method", "when"]
 
 
 async def test_cancel_records_nothing(
@@ -380,8 +384,24 @@ async def test_someone_else_prompts_for_typing_rather_than_answering_itself(
         ("Supplier: wagdia 40000", {"party": "wagdia", "amount": "40000.00"}),
         ("wagdia cash", {"party": "wagdia", "method": "cash"}),
         (
+            # typed in full -- no date question, because a complete
+            # command still runs in one round trip (§10.5)
             "wagdia textiles 40,00,000 bank",
-            {"party": "wagdia textiles", "amount": "4000000.00", "method": "bank"},
+            {
+                "party": "wagdia textiles",
+                "amount": "4000000.00",
+                "method": "bank",
+                "when": "today",
+            },
+        ),
+        (
+            "wagdia 40000 cash on 28-07-2026",
+            {
+                "party": "wagdia",
+                "amount": "40000.00",
+                "method": "cash",
+                "when": "28-07-2026",
+            },
         ),
     ],
 )

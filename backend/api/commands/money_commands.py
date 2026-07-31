@@ -11,6 +11,7 @@ import re
 from backend.api.amounts import parse_amount
 from backend.api.command_types import CommandResult, RequestContext
 from backend.api.formatting import fmt_date, fmt_money
+from backend.core.dates import split_date
 from backend.core.exceptions import DomainError, ValidationError
 from backend.repositories.accounting_repository import LedgerRepository
 from backend.services.money_service import MoneyService
@@ -25,10 +26,15 @@ class MoneyCommand:
     via: str
     description: str | None
     paid_by: str | None
+    #: Raw text: only the org's business date can resolve "today".
+    on: str | None = None
 
 
 def parse_money_command(args: str, command: str) -> MoneyCommand:
-    usage = f"Usage: {command} <category> <amount> <cash|bank> [description]"
+    usage = f"Usage: {command} <category> <amount> <cash|bank> [description] [on DD-MM-YYYY]"
+    # Taken out before anything else, so `on 18-07-2026` is never read as
+    # part of the description -- money is routinely entered days late.
+    args, on = split_date(args)
     tokens = args.split()
     if len(tokens) < 3:
         raise ValidationError(usage)
@@ -48,7 +54,12 @@ def parse_money_command(args: str, command: str) -> MoneyCommand:
             description = description[: match.start()].strip() or None
 
     return MoneyCommand(
-        category=category, amount=amount, via=via, description=description, paid_by=paid_by
+        category=category,
+        amount=amount,
+        via=via,
+        description=description,
+        paid_by=paid_by,
+        on=on,
     )
 
 
@@ -63,6 +74,7 @@ async def handle_expense(args: str, ctx: RequestContext) -> CommandResult:
                 via=command.via,
                 description=command.description,
                 paid_by_partner_name=command.paid_by,
+                on=command.on,
                 whatsapp_message_id=ctx.message_id,
             )
     except DomainError as exc:
@@ -98,6 +110,7 @@ async def handle_income(args: str, ctx: RequestContext) -> CommandResult:
                 amount=command.amount,
                 via=command.via,
                 description=command.description,
+                on=command.on,
                 whatsapp_message_id=ctx.message_id,
             )
     except DomainError as exc:

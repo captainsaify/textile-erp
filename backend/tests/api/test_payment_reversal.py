@@ -283,3 +283,58 @@ async def test_an_unpaid_bill_is_undone_without_the_question(
     result = await handle_undo(f"purchase {invoice}", ctx)
 
     assert result.interactive is None
+
+
+# --------------------------------------------------------------------
+# backdating -- docs/06_Accounting.md, ledgers copied from a paper book
+# --------------------------------------------------------------------
+
+
+async def test_a_payment_can_be_filed_under_the_day_it_actually_moved(
+    owner_user: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A month of payments entered in one sitting all landed on today,
+    which put every one of them in the wrong cash-flow period."""
+    from backend.api.command_types import RequestContext
+    from backend.api.commands.settlement_commands import handle_paid
+    from backend.models import CashLedger
+
+    supplier, _ = await _bill(session_factory, owner_user, total="600000")
+    ctx = RequestContext(user=owner_user, session_factory=session_factory, message_id="m-date")
+
+    result = await handle_paid(f"{supplier} 600000 cash on 28-07-2026", ctx)
+
+    assert "Payment made" in result.reply
+    async with session_factory() as session:
+        entry_date = (
+            await session.execute(sa.select(CashLedger.entry_date).where(CashLedger.org_id == ORG))
+        ).scalar_one()
+    assert entry_date == datetime.date(2026, 7, 28)
+
+
+async def test_a_payment_dated_in_the_future_is_refused(
+    owner_user: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from backend.api.command_types import RequestContext
+    from backend.api.commands.settlement_commands import handle_paid
+
+    supplier, _ = await _bill(session_factory, owner_user)
+    ctx = RequestContext(user=owner_user, session_factory=session_factory, message_id="m-future")
+    tomorrow = (datetime.date.today() + datetime.timedelta(days=400)).strftime("%d-%m-%Y")
+
+    result = await handle_paid(f"{supplier} 5000 cash on {tomorrow}", ctx)
+
+    assert "in the future" in result.reply
+
+
+async def test_a_supplier_whose_name_holds_on_keeps_it(
+    owner_user: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """`on` is only a date clause when a date follows it -- otherwise
+    "Delivery on Time" would lose two words out of its name."""
+    from backend.api.commands.settlement_commands import parse_settlement
+
+    command = parse_settlement("Delivery on Time Traders 5000 cash", "paid")
+
+    assert command.party == "Delivery on Time Traders"
+    assert command.on is None

@@ -120,6 +120,12 @@ class Draft:
     #: because the likeliest cause is the brand being answered wrong, and
     #: confirming creates a second product that then diverges silently.
     brand_collisions: list[str] = dataclasses.field(default_factory=list)
+    #: Codes that *did* resolve under this brand but exist under another
+    #: one too -- VVP is a golden velvet pant under TOP and a velvet
+    #: sport pant under MKD. Resolving to the answered brand is right,
+    #: but it is a silent choice between two real products, so the
+    #: preview says which ones were ambiguous before anything is saved.
+    shared_codes: list[str] = dataclasses.field(default_factory=list)
 
     @property
     def subtotal(self) -> decimal.Decimal:
@@ -142,6 +148,7 @@ class Draft:
             "brand_id": str(self.brand_id) if self.brand_id else None,
             "brand_name": self.brand_name,
             "brand_collisions": list(self.brand_collisions),
+            "shared_codes": list(self.shared_codes),
             "lines": [
                 {
                     "code": line.code,
@@ -178,6 +185,7 @@ class Draft:
             brand_id=uuid.UUID(context["brand_id"]) if context["brand_id"] else None,
             brand_name=context["brand_name"],
             brand_collisions=list(context.get("brand_collisions") or []),
+            shared_codes=list(context.get("shared_codes") or []),
             lines=[
                 DraftLine(
                     code=line["code"],

@@ -13,6 +13,7 @@ from backend.api.amounts import looks_like_amount, parse_amount
 from backend.api.command_types import CommandResult, RequestContext
 from backend.api.formatting import fmt_money
 from backend.api.interactive import is_abandon
+from backend.core.dates import split_date
 from backend.core.exceptions import DomainError, ValidationError
 from backend.services.session_service import (
     AWAITING_SETTLEMENT_CONFIRMATION,
@@ -33,6 +34,9 @@ class SettlementCommand:
     amount: decimal.Decimal
     via: str
     against: str | None
+    #: Raw, not a date: "today" can only be resolved against the org's
+    #: business date, which the service reads inside its transaction.
+    on: str | None = None
 
 
 def parse_settlement(args: str, kind: str) -> SettlementCommand:
@@ -46,8 +50,15 @@ def parse_settlement(args: str, kind: str) -> SettlementCommand:
     """
     label = "Customer" if kind == "received" else "Supplier"
     example = f"{kind} {'ABC' if kind == 'received' else 'Wagdia'} 40000 cash"
-    usage = f"Usage: {kind} [{label}:] <name> <amount> <cash|bank> [against <ref>]\ne.g. {example}"
+    usage = (
+        f"Usage: {kind} [{label}:] <name> <amount> <cash|bank> [against <ref>] [on DD-MM-YYYY]\n"
+        f"e.g. {example}"
+    )
 
+    # Pulled out first: money is routinely entered days after it moved,
+    # and `on 28-07-2026` must not be mistaken for the invoice reference
+    # or absorbed into the party's name.
+    args, on = split_date(args)
     tokens = args.split()
     if not tokens:
         raise ValidationError(usage)
@@ -106,7 +117,7 @@ def parse_settlement(args: str, kind: str) -> SettlementCommand:
     if not party:
         raise ValidationError(f"Which {label.lower()}?\n{usage}")
 
-    return SettlementCommand(party=party, amount=amount, via=via, against=against)
+    return SettlementCommand(party=party, amount=amount, via=via, against=against, on=on)
 
 
 def render_settlement(result: SettlementResult, kind: str) -> str:
@@ -141,6 +152,7 @@ async def _run(
                     amount=command.amount,
                     via=command.via,
                     against=command.against,
+                    on=command.on,
                     allow_advance=allow_advance,
                     whatsapp_message_id=ctx.message_id,
                 )
@@ -151,6 +163,7 @@ async def _run(
                     amount=command.amount,
                     via=command.via,
                     against=command.against,
+                    on=command.on,
                     allow_advance=allow_advance,
                     whatsapp_message_id=ctx.message_id,
                 )
@@ -166,6 +179,7 @@ async def _run(
                     "amount": str(command.amount),
                     "via": command.via,
                     "against": command.against,
+                    "on": command.on,
                 },
             )
         return CommandResult(reply=exc.message)
@@ -210,5 +224,6 @@ async def handle_settlement_session_reply(
         amount=decimal.Decimal(str(context["amount"])),
         via=str(context["via"]),
         against=context["against"] if context.get("against") else None,
+        on=context.get("on") or None,
     )
     return await _run(command, ctx, str(context["kind"]), allow_advance=True)

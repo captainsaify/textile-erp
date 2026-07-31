@@ -160,19 +160,115 @@ async def test_edit_changes_an_allowed_field(
 async def test_edit_refuses_a_field_not_on_the_allow_list(
     ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """`code` is deliberately not editable: inventory, movements and the
-    OCR learning dictionary all key off it."""
+    """Only the allow-list is editable -- `unit` isn't on it, because
+    inventory and the weighted average were measured in the old one."""
     async with session_factory() as session, session.begin():
         master = await _master(session, ctx.user)
-    result = await handle_edit(f"product {master.code} code NEWCODE", ctx)
+    result = await handle_edit(f"product {master.code} unit metre", ctx)
     # refused, and the refusal names what *is* editable
     assert "Editable on a product" in result.reply
     assert "reorder_level" in result.reply
+
+
+async def test_edit_renames_a_product_code(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A code misread off a sheet (44P for 44D) is the mistake this
+    system exists to let people fix. Stored uppercase, because that is
+    how every lookup compares it."""
+    async with session_factory() as session, session.begin():
+        master = await _master(session, ctx.user)
+    result = await handle_edit(f"product {master.code} code 44d", ctx)
+    assert "44D" in result.reply
+    async with session_factory() as session:
+        code = (
+            await session.execute(sa.select(Product.code).where(Product.id == master.product_id))
+        ).scalar_one()
+    assert code == "44D"
+
+
+async def test_edit_asks_which_brand_when_a_code_is_shared(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """TOP and MKD both sell a "VVP". Renaming whichever one the query
+    returned first would silently rewrite the wrong brand's catalog."""
+    async with session_factory() as session, session.begin():
+        brands = [Brand(org_id=ORG, name=name) for name in ("Topaz", "Mekado")]
+        session.add_all(brands)
+        await session.flush()
+        session.add_all(
+            Product(
+                org_id=ORG,
+                product_type_id=uuid.UUID(SEEDED_TEXTILE_TYPE_ID),
+                code="VVP",
+                description=f"VVP {brand.name}",
+                brand_id=brand.id,
+                unit_id=uuid.UUID(SEEDED_KG_UNIT_ID),
+                created_by=ctx.user.id,
+            )
+            for brand in brands
+        )
+
+    ambiguous = await handle_edit("product VVP description Shared", ctx)
+    assert "Topaz" in ambiguous.reply and "Mekado" in ambiguous.reply
+
+    # ...and the brand-qualified reference resolves to exactly one.
+    picked = await handle_edit("product VVP Topaz description Only the Topaz one", ctx)
+    assert "Only the Topaz one" in picked.reply
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                sa.select(Brand.name, Product.description)
+                .join(Brand, Brand.id == Product.brand_id)
+                .where(Product.code == "VVP")
+            )
+        ).all()
+        descriptions: dict[str, str] = {row[0]: row[1] for row in rows}
+    assert descriptions == {"Topaz": "Only the Topaz one", "Mekado": "VVP Mekado"}
+
+
+async def test_edit_refuses_a_rename_onto_a_taken_code(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The partial unique index would refuse this anyway -- as an
+    IntegrityError naming neither product."""
+    async with session_factory() as session, session.begin():
+        master = await _master(session, ctx.user)
+        session.add(
+            Product(
+                org_id=ORG,
+                product_type_id=uuid.UUID(SEEDED_TEXTILE_TYPE_ID),
+                code="TAKEN",
+                description="Already here",
+                unit_id=uuid.UUID(SEEDED_KG_UNIT_ID),
+                created_by=ctx.user.id,
+            )
+        )
+    result = await handle_edit(f"product {master.code} code TAKEN", ctx)
+    assert "Already here" in result.reply
     async with session_factory() as session:
         code = (
             await session.execute(sa.select(Product.code).where(Product.id == master.product_id))
         ).scalar_one()
     assert code == master.code  # unchanged
+
+
+async def test_edit_moves_a_product_to_another_brand(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    async with session_factory() as session, session.begin():
+        master = await _master(session, ctx.user)
+    result = await handle_edit(f"product {master.code} brand {master.brand_name}", ctx)
+    assert master.brand_name in result.reply
+    async with session_factory() as session:
+        brand_name = (
+            await session.execute(
+                sa.select(Brand.name)
+                .join(Product, Product.brand_id == Brand.id)
+                .where(Product.id == master.product_id)
+            )
+        ).scalar_one()
+    assert brand_name == master.brand_name
 
 
 async def test_edit_handles_a_multiword_reference(
