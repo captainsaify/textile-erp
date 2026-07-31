@@ -30,3 +30,7 @@ docker/certs/
 # create`. This one file is the tunnel's identity: anyone holding it can
 # serve traffic on the hostname. The config.yml beside it is tracked.
 docker/cloudflared/credentials.json
+# The live tunnel config: cloudflared cannot read the hostname from the
+# environment, so it is literal in the file. config.example.yml ships in
+# its place.
+docker/cloudflared/config.yml

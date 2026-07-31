@@ -206,4 +206,14 @@ treat it as a working system rather than a stable library.
 
 ## Licence
 
-Not yet chosen — all rights reserved for now. Please ask before reusing.
+[MIT](LICENSE). Use it, fork it, sell it — just keep the notice.
+
+## Deploying it somewhere
+
+The public hostname is not in this repo. Set `TUNNEL_HOSTNAME` in `.env`
+and copy `docker/cloudflared/config.example.yml` to `config.yml` with
+the same hostname — cloudflared has no environment substitution, so it
+has to be literal in that file, which is why the real one is gitignored.
+[`docs/16_Deployment.md`](docs/16_Deployment.md) §11 walks the whole
+tunnel setup, and `./docker/tunnel-check.sh` tells you which link is
+broken when the webhook goes quiet.

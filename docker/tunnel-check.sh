@@ -13,7 +13,16 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-HOSTNAME_FQDN="${TUNNEL_HOSTNAME:-erp.example.com}"
+# No default: a checker that silently falls back to some other
+# deployment's hostname reports confidently on a system you do not run.
+HOSTNAME_FQDN="${TUNNEL_HOSTNAME:-}"
+if [ -z "$HOSTNAME_FQDN" ] && [ -f .env ]; then
+    HOSTNAME_FQDN="$(grep -E '^TUNNEL_HOSTNAME=' .env | cut -d= -f2- | tr -d "\"'")"
+fi
+if [ -z "$HOSTNAME_FQDN" ]; then
+    echo "Set TUNNEL_HOSTNAME in .env (e.g. erp.example.com) or in the environment." >&2
+    exit 2
+fi
 DOMAIN="${HOSTNAME_FQDN#*.}"
 CREDENTIALS="docker/cloudflared/credentials.json"
 

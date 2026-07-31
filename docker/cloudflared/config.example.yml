@@ -7,10 +7,14 @@
 # twice in July 2026). A named tunnel keeps one hostname forever, so the
 # callback URL is configured once.
 #
-# Which tunnel this is comes from CLOUDFLARE_TUNNEL_ID in .env, passed on
-# the command line by docker-compose.yml -- this file is tracked in git
-# and holds no secret. The secret is credentials.json beside it, written
-# by `cloudflared tunnel create` and gitignored.
+# Copy to `config.yml` beside this file and put your own hostname in.
+# The real config.yml is gitignored: cloudflared has no environment
+# substitution, so the hostname has to be literal in the file, and a
+# repository is not the place to publish the address of a running
+# system. The tunnel's id comes from CLOUDFLARE_TUNNEL_ID in .env,
+# passed on the command line by docker-compose.yml; the secret is
+# credentials.json beside this, written by `cloudflared tunnel create`
+# and likewise gitignored.
 
 credentials-file: /etc/cloudflared/credentials.json
 
