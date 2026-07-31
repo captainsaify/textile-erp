@@ -126,13 +126,30 @@ Guarantees:
   (abuse/mistake protection for known users).
 - API rate limiting: [10_API.md §7](10_API.md#7-rate-limiting--abuse-protection)
   (login brute-force protection + general throttling).
-- Perimeter: Nginx `limit_req` zones on the webhook and API endpoints
-  as a coarse first line of defense (protects worker/DB capacity from
-  any burst regardless of source), independent of and in addition to
-  the application-level limiters above — two layers because Nginx
-  rate limiting is cheap and stateless (protects against volume) while
-  the Redis-backed limiters are precise and identity-aware (protects
-  against a specific user/IP's behavior).
+- Perimeter: Nginx `limit_req` zones as a coarse first line of defence
+  (protects worker/DB capacity from any burst regardless of source),
+  independent of and in addition to the application-level limiters
+  above — two layers because Nginx rate limiting is cheap and stateless
+  (protects against volume) while the Redis-backed limiters are precise
+  and identity-aware (protects against a specific user/IP's behaviour).
+
+  | Zone | Applies to | Rate | Burst |
+  |---|---|---|---|
+  | `webhook` | `/webhooks/` | 30 r/s | 60 |
+  | `login` | `/api/v1/auth/` | **12 r/min** | 5 |
+  | `api` | everything else under `/api/` | 20 r/s | 40 |
+
+  Throttled requests get **429**, not 503: a client being slowed down
+  should be told to slow down, not told the server is broken.
+
+> **This paragraph used to describe zones "on the webhook and API
+> endpoints". Only the webhook one existed.** The 2026-08-01 audit
+> (§13) confirmed it against production: twelve consecutive wrong
+> passwords, twelve 401s, no throttling at any layer — the
+> application-level login protection this document points at in
+> `10_API.md §7` was never built either. A control that exists only in
+> the documentation is worse than a missing one, because it stops
+> anyone looking.
 
 ## 7. Secrets management {#secrets}
 
@@ -232,3 +249,53 @@ already-downloaded copies from persisting).
   Dockerfile), and the Postgres data volume and backup volume are the
   only paths requiring write access beyond application code
   directories.
+
+## 13. Audit, 2026-08-01 {#audit-2026-08}
+
+Run when the repository was made public. Everything below was confirmed
+against the live deployment, not read off the configuration — the two
+had already diverged once (§6), and a control nobody has exercised is a
+control nobody should trust.
+
+### Fixed
+
+| # | Finding | Severity |
+|---|---|---|
+| 1 | The dashboard owner's password had been pasted into a chat transcript and **still authenticated**. Rotated to a generated 24-character secret; the old one now fails. | **critical** |
+| 2 | **No rate limiting on sign-in**, at any layer. Twelve wrong passwords, twelve 401s. With #1 that is a complete account-takeover chain against an internet-reachable dashboard. Now 12/min per address. | **critical** |
+| 3 | **Every security header was missing from the dashboard page itself.** `add_header` is inherited only while the child block declares none of its own; `location = /index.html` set `Cache-Control` and silently dropped HSTS, `X-Frame-Options`, `nosniff` and `Referrer-Policy`. They were present on `/api/` throughout, which is why nobody noticed. Moved to `docker/security-headers.conf` and re-included wherever a block adds a header. | high |
+| 4 | **No Content-Security-Policy.** Added a strict one — the dashboard has no build step, no CDN and no third-party anything, so it can afford `script-src 'self'` with no escape hatch. | medium |
+
+### Verified sound
+
+- **Webhook signatures**: HMAC-SHA256 over the raw body, constant-time
+  compare, fails closed on a missing or malformed header.
+- **Authorisation**: every API route 401s unauthenticated. `org_id` is
+  read from the token and never from the request.
+- **Passwords**: Argon2. **JWT**: 15-minute access tokens, 64-character
+  signing key.
+- **Network exposure**: only nginx publishes a port. Postgres, Redis and
+  the API are unmapped inside the compose network; the local override
+  that publishes them is not in use in production. The WhatsApp bridge
+  binds `127.0.0.1` only.
+- **No CORS middleware**, so no cross-origin API use is possible — the
+  right answer for a same-origin dashboard.
+- **Refresh tokens** are returned by the API and the frontend simply
+  never stores one, so there is nothing for an XSS bug to steal. Note
+  this differs from [`21_WebDashboard.md §5`](21_WebDashboard.md), which
+  describes an `HttpOnly` cookie that was never implemented; the
+  behaviour is safer than the design, and the session just expires after
+  15 minutes.
+
+### Open
+
+- **Backups are plaintext.** `BACKUP_ENCRYPTION_KEY` exists in
+  `.env` and in `Settings`, and **nothing reads it** — the `pg_dump`
+  output is written unencrypted. A setting that implies a protection it
+  does not provide is the dangerous kind. Either wire it up or delete
+  it; leaving it is the one option that must not stand.
+- **Backups are on the same disk as the database they protect**, so
+  neither survives losing the machine.
+- No `ssl_prefer_server_ciphers`, and `ssl_ciphers HIGH:!aNULL:!MD5`
+  is broader than needed. Low impact behind Cloudflare, which
+  terminates TLS for the public request anyway.

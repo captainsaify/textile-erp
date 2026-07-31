@@ -35,6 +35,10 @@ services:
       - "443:443"
     volumes:
       - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Included by every block that sets a header of its own, because
+      # nginx stops inheriting add_header the moment a child declares one
+      # (docker/security-headers.conf explains what that cost us).
+      - ./docker/security-headers.conf:/etc/nginx/security-headers.conf:ro
       - ./docker/certs:/etc/nginx/certs:ro
       # No frontend build step, so no frontend service: the files are
       # mounted straight into nginx (docs/21_WebDashboard.md §7).
