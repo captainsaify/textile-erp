@@ -162,6 +162,29 @@ def render_warnings(draft: SaleDraft, warnings: SaleWarnings, *, is_owner: bool)
     return "\n".join(lines)
 
 
+def _sale_preview(draft: SaleDraft) -> CommandResult:
+    lines = [f"🧾 Sale draft — {draft.customer_name} ({draft.payment_type.value})"]
+    for line in draft.lines:
+        unit = line.unit_code or ""
+        lines.append(
+            f"{line.resolved_code or line.code}  {fmt_qty(line.qty)} {unit} × "
+            f"{fmt_money(line.rate)} = {fmt_money(line.line_total)}".replace("  ", " ")
+        )
+    lines.append(f"Total: {fmt_money(draft.grand_total)}")
+    lines.append("Reply CONFIRM to save, 'sheet' to see it as a spreadsheet, or 'discard'.")
+    return CommandResult(
+        reply="\n".join(lines),
+        interactive=Buttons(
+            body=f"Save this sale? {fmt_money(draft.grand_total)} to {draft.customer_name}.",
+            choices=(
+                Choice(id="confirm", title="Confirm"),
+                Choice(id="sheet", title="See as sheet"),
+                Choice(id="discard", title="Discard"),
+            ),
+        ),
+    )
+
+
 def render_sale(sale: ConfirmedSale) -> str:
     lines = [f"✅ Sale recorded — {sale.customer_name} ({sale.payment_type.value})"]
     for line in sale.lines:
@@ -338,16 +361,26 @@ async def handle_sale(args: str, ctx: RequestContext) -> CommandResult:
 
     async with ctx.session_factory() as session:
         warnings = await SalesService(session).check_warnings(ctx.user.org_id, draft)
+    await sessions.set(ctx.user.org_id, ctx.user.id, AWAITING_SALE_CONFIRMATION, draft.to_context())
     if warnings.any:
-        await sessions.set(
-            ctx.user.org_id, ctx.user.id, AWAITING_SALE_CONFIRMATION, draft.to_context()
-        )
         return CommandResult(
             reply=render_warnings(
                 draft, warnings, is_owner=role_at_least(ctx.user.role, UserRole.OWNER)
-            )
+            ),
+            interactive=Buttons(
+                body=f"Save this sale? {fmt_money(draft.grand_total)} to {draft.customer_name}.",
+                choices=(
+                    Choice(id="confirm", title="Confirm anyway"),
+                    Choice(id="sheet", title="See as sheet"),
+                    Choice(id="discard", title="Discard"),
+                ),
+            ),
         )
-    return await _try_record(draft, ctx)
+    # Previewed, not auto-recorded. Sales used to confirm themselves on
+    # the grounds that `undo` is cheap -- but a sale of the wrong brand's
+    # stock at the wrong rate is cheap to reverse and expensive to
+    # notice, and the same CONFIRM step already guards every purchase.
+    return _sale_preview(draft)
 
 
 async def handle_sale_session_reply(
@@ -494,7 +527,7 @@ async def _continue_after_resolution(draft: SaleDraft, ctx: RequestContext) -> C
                 draft, warnings, is_owner=role_at_least(ctx.user.role, UserRole.OWNER)
             )
         )
-    return await _try_record(draft, ctx)
+    return _sale_preview(draft)
 
 
 # --------------------------------------------------------------------

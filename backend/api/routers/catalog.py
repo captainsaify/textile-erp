@@ -322,6 +322,70 @@ async def payables(user: CurrentUser, session: Session) -> dict[str, Any]:
     }
 
 
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+async def _document_response(build: Any, filename: str) -> Response:
+    """Built on request, never stored: a bill whose rate was corrected
+    has one current version, and serving a file written at confirmation
+    time would hand back the superseded one (docs/27_Documents.md)."""
+    from pathlib import Path
+
+    document = await build
+    data = Path(document.path).read_bytes()
+    return Response(
+        content=data,
+        media_type=XLSX_MIME,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.get("/purchases/{purchase_id}/sheet")
+async def purchase_sheet(purchase_id: uuid.UUID, user: CurrentUser, session: Session) -> Response:
+    """This bill as the sheet the partners read, current as of now --
+    including every correction, listed on it with who made it and when."""
+    from backend.services.document_service import DocumentService
+
+    header = await session.get(PurchaseHeader, purchase_id)
+    if header is None or header.org_id != user.org_id:
+        raise HTTPException(status_code=404, detail="no such purchase")
+    return await _document_response(
+        DocumentService(session).purchase(user.org_id, purchase_id),
+        f"purchase-{header.invoice_no}.xlsx",
+    )
+
+
+@router.get("/sales/{sale_id}/sheet")
+async def sale_sheet(sale_id: uuid.UUID, user: CurrentUser, session: Session) -> Response:
+    from backend.services.document_service import DocumentService
+
+    header = await session.get(SalesHeader, sale_id)
+    if header is None or header.org_id != user.org_id:
+        raise HTTPException(status_code=404, detail="no such sale")
+    return await _document_response(
+        DocumentService(session).sale(user.org_id, sale_id),
+        f"sale-{str(sale_id)[:8]}.xlsx",
+    )
+
+
+@router.get("/payments/{reference}/sheet")
+async def payment_sheet(reference: str, user: CurrentUser, session: Session) -> Response:
+    """A payment's receipt: what moved, and which bills it settled."""
+    from backend.core.exceptions import NotFoundError
+    from backend.services.document_service import DocumentService
+
+    try:
+        return await _document_response(
+            DocumentService(session).payment(user.org_id, reference),
+            f"payment-{reference}.xlsx",
+        )
+    except NotFoundError:
+        raise HTTPException(status_code=404, detail="no such payment") from None
+
+
 @router.get("/parties")
 async def parties(user: CurrentUser, session: Session) -> dict[str, Any]:
     """Everyone the business deals with, both sides, in one list.

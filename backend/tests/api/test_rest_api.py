@@ -771,3 +771,66 @@ async def test_a_party_ledger_for_the_wrong_kind_is_a_404(client: AsyncClient, o
         f"/api/v1/parties/partner/{uuid_module.uuid4()}/ledger", headers=_auth(token)
     )
     assert response.status_code == 404
+
+
+# --------------------------------------------------------------------
+# documents -- docs/27_Documents.md
+# --------------------------------------------------------------------
+
+
+async def test_a_purchase_serves_its_current_sheet(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Built on request, not stored: a bill whose rate was corrected has
+    one current version, and a file written at confirmation time would
+    hand back the superseded one."""
+    import datetime
+    import decimal
+    import uuid as uuid_module
+
+    from backend.models import PurchaseHeader, Supplier
+    from backend.tests.conftest import SEEDED_MAIN_WAREHOUSE_ID
+
+    suffix = uuid_module.uuid4().hex[:5]
+    async with session_factory() as session:
+        supplier = Supplier(org_id=ORG, name=f"Doc Co {suffix}", created_by=owner.id)
+        session.add(supplier)
+        await session.flush()
+        header = PurchaseHeader(
+            org_id=ORG,
+            supplier_id=supplier.id,
+            warehouse_id=uuid_module.UUID(SEEDED_MAIN_WAREHOUSE_ID),
+            invoice_no=f"DOC-{suffix}",
+            invoice_date=datetime.date.today(),
+            subtotal=decimal.Decimal("5000"),
+            grand_total=decimal.Decimal("5000"),
+            status="confirmed",
+            created_by=owner.id,
+        )
+        session.add(header)
+        await session.commit()
+        header_id = header.id
+
+    token = await _token(client, owner)
+    response = await client.get(f"/api/v1/purchases/{header_id}/sheet", headers=_auth(token))
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument"
+    )
+    assert f"DOC-{suffix}" in response.headers["content-disposition"]
+    assert response.content[:2] == b"PK"  # a real xlsx, not an error page
+
+
+async def test_a_missing_document_is_a_404_not_a_broken_file(
+    client: AsyncClient, owner: User
+) -> None:
+    import uuid as uuid_module
+
+    token = await _token(client, owner)
+    for path in (
+        f"/api/v1/purchases/{uuid_module.uuid4()}/sheet",
+        f"/api/v1/sales/{uuid_module.uuid4()}/sheet",
+        "/api/v1/payments/deadbeef/sheet",
+    ):
+        assert (await client.get(path, headers=_auth(token))).status_code == 404

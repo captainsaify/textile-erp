@@ -99,6 +99,38 @@
     return el;
   }
 
+  /* The transaction's own sheet, fetched with the bearer token rather
+   * than linked -- a plain href would drop the Authorization header and
+   * come back a 401. Built server-side on request, so what downloads
+   * always includes any correction made since (docs/27_Documents.md). */
+  function sheetLink(path, filename) {
+    const button = document.createElement("button");
+    button.className = "link";
+    button.textContent = "Sheet";
+    button.title = "Download this as a spreadsheet, current as of now";
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      button.textContent = "…";
+      try {
+        const response = await fetch(API + path, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) throw new Error("That sheet couldn't be built.");
+        const url = URL.createObjectURL(await response.blob());
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = filename;
+        anchor.click();
+        URL.revokeObjectURL(url);
+      } catch (exc) {
+        banner(exc.message);
+      } finally {
+        button.textContent = "Sheet";
+      }
+    });
+    return button;
+  }
+
   function money(value) {
     const formatted = Money.format(value);
     return Money.isNegative(value)
@@ -304,6 +336,11 @@
             render: (row) =>
               `<span class="pill ${row.payment_status === "paid" ? "good" : "warn"}">${row.payment_status}</span>`,
           },
+          {
+            label: "",
+            render: (row) =>
+              sheetLink(`/purchases/${row.id}/sheet`, `purchase-${row.invoice_no}.xlsx`),
+          },
         ],
         rowsOf(payload),
         { onRowClick: (row) => loadPurchaseDetail(row.id) },
@@ -400,6 +437,10 @@
               )}</span>`,
           },
           { label: "Status", key: "status" },
+          {
+            label: "",
+            render: (row) => sheetLink(`/sales/${row.id}/sheet`, `sale-${row.id.slice(0, 8)}.xlsx`),
+          },
         ],
         rowsOf(payload),
         { onRowClick: (row) => loadSaleDetail(row.id) },
@@ -600,6 +641,13 @@
               row.cancelled
                 ? `<span class="muted">${text(row.notes || "")} · reversed</span>`
                 : text(row.notes || ""),
+          },
+          {
+            label: "",
+            render: (row) =>
+              row.reference
+                ? sheetLink(`/payments/${row.reference}/sheet`, `payment-${row.reference}.xlsx`)
+                : "",
           },
         ],
         rows,

@@ -271,8 +271,11 @@ async def test_a_sale_asks_which_brand_rather_than_calling_the_code_unknown(
 
     # answering it sells that brand's product, and only that one
     state = await SessionService(session_factory).get(ORG, ctx.user.id)
-    recorded = await handle_sale_session_reply("brand Puma", ctx, state)
+    answered = await handle_sale_session_reply("brand Puma", ctx, state)
+    assert "Sale draft" in answered.reply  # resolved, and now previewable
 
+    state = await SessionService(session_factory).get(ORG, ctx.user.id)
+    recorded = await handle_sale_session_reply("confirm", ctx, state)
     assert "Sale recorded" in recorded.reply
     async with session_factory() as session:
         sold = (

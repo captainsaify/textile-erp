@@ -199,6 +199,7 @@ trigger, threshold, and message copy in the linked doc.
 | [docs/22_GroupBroadcast.md](docs/22_GroupBroadcast.md) | Posting to the partners' group via an outbound-only relay |
 | [docs/23_ReceiptCorrections.md](docs/23_ReceiptCorrections.md) | When fewer bales arrive than were billed |
 | [docs/26_RateChanges.md](docs/26_RateChanges.md) | Correcting the price on a confirmed bill |
+| [docs/27_Documents.md](docs/27_Documents.md) | A sheet for every purchase, sale and payment, rebuilt on request |
 
 ## Coding Standards (summary — full detail in [`docs/17_CodingStandards.md`](docs/17_CodingStandards.md))
 

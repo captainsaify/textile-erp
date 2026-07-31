@@ -129,7 +129,11 @@ async def test_credit_sale_reduces_stock_and_creates_receivable(
     stocked: dict[str, uuid.UUID],
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    result = await handle_sale("Customer: ABC\nTRP 20 165\nMJP 5 220", ctx)
+    # A clean sale previews and waits, like a purchase does -- one
+    # CONFIRM between a typed rate and stock leaving the building.
+    preview = await handle_sale("Customer: ABC\nTRP 20 165\nMJP 5 220", ctx)
+    assert "🧾 Sale draft — ABC (credit)" in preview.reply
+    result = await _reply("confirm", ctx)
     assert "✅ Sale recorded — ABC (credit)" in result.reply
     assert "TRP  20.0 KG × ₹165.00 = ₹3,300.00" in result.reply
     assert "Total: ₹4,400.00" in result.reply
@@ -202,7 +206,8 @@ async def test_cash_sale_posts_ledger_inflow(
     stocked: dict[str, uuid.UUID],
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    result = await handle_sale("Customer: ABC cash\nTRP 10 200", ctx)
+    await handle_sale("Customer: ABC cash\nTRP 10 200", ctx)
+    result = await _reply("confirm", ctx)
     assert "✅ Sale recorded — ABC (cash)" in result.reply
     assert "Cash balance now ₹2,000.00" in result.reply
 
@@ -245,6 +250,8 @@ async def test_insufficient_stock_blocks_then_override(
     assert 'Reply "override"' in result.reply
 
     result = await _reply("line 1 qty 30", ctx)
+    assert "🧾 Sale draft" in result.reply  # corrected, and now clean
+    result = await _reply("confirm", ctx)
     assert "✅ Sale recorded" in result.reply
 
     async with session_factory() as session:
@@ -285,10 +292,12 @@ async def test_identical_resend_is_not_double_counted(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     text = "Customer: ABC\nTRP 20 165"
-    first = await handle_sale(text, ctx)
+    await handle_sale(text, ctx)
+    first = await _reply("confirm", ctx)
     assert "✅ Sale recorded" in first.reply
 
-    second = await handle_sale(text, ctx)
+    await handle_sale(text, ctx)
+    second = await _reply("confirm", ctx)
     assert "↩️ This looks identical" in second.reply
 
     async with session_factory() as session:
@@ -304,6 +313,8 @@ async def test_unknown_customer_offers_creation(
     assert "create customer" in result.reply
 
     result = await _reply("create customer", ctx)
+    assert "🧾 Sale draft — Brand New Buyer (credit)" in result.reply
+    result = await _reply("confirm", ctx)
     assert "✅ Sale recorded — Brand New Buyer (credit)" in result.reply
 
 

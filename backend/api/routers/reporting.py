@@ -9,10 +9,12 @@ adapters, not calculations.
 from __future__ import annotations
 
 import datetime
+import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, status
 from pydantic import BaseModel
+from sqlalchemy import select
 
 from backend.api.amounts import money_str, qty_str
 from backend.api.deps import CurrentUser, OwnerUser, Paging, Session
@@ -123,6 +125,7 @@ async def ledger(
     # in "money in" and "money out", where between them they claimed
     # twice an amount that never moved.
     cancelled = LedgerRepository.cancelled_ids(entries)
+    references = await _payment_references(session, user.org_id, entries)
     return {
         "balance": money_str(await repo.balance(user.org_id, ledger)),
         "entries": [
@@ -133,10 +136,59 @@ async def ledger(
                 "resulting_balance": money_str(entry.resulting_balance),
                 "notes": entry.notes,
                 "cancelled": entry.id in cancelled,
+                # A settlement's handle, so the row can offer its
+                # receipt. Absent on everything else -- an expense or a
+                # capital contribution has no second document.
+                "reference": references.get(entry.id),
             }
             for entry in entries
         ],
     }
+
+
+async def _payment_references(
+    session: Any, org_id: uuid.UUID, entries: list[Any]
+) -> dict[uuid.UUID, str]:
+    """Match settlement rows back to the audit entry that is their
+    reference, so each can offer its receipt.
+
+    Matched on party and amount rather than a stored link. Two identical
+    payments to the same party on the same day are genuinely
+    interchangeable -- either receipt describes either row -- so the
+    ambiguity costs nothing.
+    """
+    from backend.models import AuditLog
+
+    payment_rows = [e for e in entries if e.source_type in {"supplier_payment", "customer_payment"}]
+    if not payment_rows:
+        return {}
+
+    audit = (
+        (
+            await session.execute(
+                select(AuditLog).where(
+                    AuditLog.org_id == org_id,
+                    AuditLog.action.in_(["payment.paid", "payment.received"]),
+                    AuditLog.entity_id.in_({e.source_id for e in payment_rows}),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    pool: dict[tuple[uuid.UUID, str], list[str]] = {}
+    for entry in audit:
+        state = entry.after_state or {}
+        pool.setdefault((entry.entity_id, str(state.get("amount", ""))), []).append(
+            str(entry.id)[:8]
+        )
+
+    references: dict[uuid.UUID, str] = {}
+    for row in payment_rows:
+        candidates = pool.get((row.source_id, f"{abs(row.amount):.2f}")) or []
+        if candidates:
+            references[row.id] = candidates.pop()
+    return references
 
 
 class ExportRequest(BaseModel):
