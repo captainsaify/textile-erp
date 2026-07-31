@@ -372,6 +372,22 @@ class DocumentService:
         by_line = self._notes_by_line(changes)
         by_code = self._notes_by_code(changes)
 
+        # A bill-wide change names the codes it touched, and a code can
+        # be renamed afterwards -- bill 006's rate correction named
+        # "L.P.P" and the product is now "LPP", so the marker landed on
+        # nothing. A rate correction repriced the whole bill; when its
+        # codes match no row, every row carries it. Better a marker on a
+        # line that only shares the bill than a repriced line that says
+        # nothing.
+        codes_present = {(product.code if product else "").upper() for _, product, _ in lines}
+        bill_wide = [
+            change.note
+            for change in changes
+            if change.note
+            and change.codes
+            and not ({code.upper() for code in change.codes} & codes_present)
+        ]
+
         def _label(line_brand: Brand | None) -> str:
             shown = line_brand or fallback_brand
             return shown.name if shown is not None else ""
@@ -396,6 +412,7 @@ class DocumentService:
                 note="; ".join(
                     by_line.get(line.id, [])
                     + by_code.get((product.code if product else "").upper(), [])
+                    + bill_wide
                 ),
             )
             for index, (line, product, brand) in enumerate(lines, start=1)

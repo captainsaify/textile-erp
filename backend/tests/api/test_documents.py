@@ -329,6 +329,35 @@ async def test_a_rate_correction_marks_every_code_it_named(
     assert _note_column(str(document.path))[0].startswith("Rate 150 → 107")
 
 
+async def test_a_rate_correction_naming_a_since_renamed_code_still_marks_the_bill(
+    ctx: RequestContext,
+    stocked: dict[str, uuid.UUID],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Bill 006's rate correction named `L.P.P`; the product was renamed
+    to `LPP` the next day, and the marker landed on nothing. A rate
+    correction repriced the whole bill, so when its codes match no row
+    every row carries it."""
+    from backend.services.audit_service import AuditService
+
+    header_id = await _bill(session_factory, ctx.user, stocked["TRP"])
+    async with session_factory() as session, session.begin():
+        await AuditService(session).record(
+            ORG,
+            ctx.user.id,
+            action="purchase.rate_corrected",
+            entity_type="purchase_headers",
+            entity_id=header_id,
+            before_state={"rate": "10500.0000", "codes": "L.P.P"},
+            after_state={"rate": "105", "codes": "L.P.P"},
+        )
+
+    async with session_factory() as session:
+        document = await DocumentService(session).purchase(ORG, header_id)
+
+    assert _note_column(str(document.path))[0].startswith("Rate 10500 → 105")
+
+
 async def test_the_web_view_and_the_workbook_are_one_build(
     ctx: RequestContext,
     stocked: dict[str, uuid.UUID],
