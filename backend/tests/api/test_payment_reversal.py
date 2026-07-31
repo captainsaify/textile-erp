@@ -465,3 +465,56 @@ async def test_the_exported_statement_and_the_payable_agree(
     # is the payable
     assert any(isinstance(value, str) and "Reversal" in value for value in cells)
     assert D(str(cells[-1])) == payable
+
+
+async def test_a_period_statement_opens_with_what_was_already_owed(
+    owner_user: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A July statement for a supplier billed in June started from zero
+    and closed on a number that was true of July alone. Everyone reads
+    that as wrong, because it is not what they are owed."""
+    import datetime
+
+    from openpyxl import load_workbook
+
+    from backend.repositories.party_repository import SupplierRepository
+    from backend.services.report_service import ReportService
+
+    supplier, _ = await _bill(session_factory, owner_user, total="10000")
+    async with session_factory() as session:
+        supplier_id = (
+            await session.execute(sa.select(Supplier.id).where(Supplier.name == supplier))
+        ).scalar_one()
+        # backdate the bill to before the statement period
+        await session.execute(
+            sa.update(PurchaseHeader)
+            .where(PurchaseHeader.supplier_id == supplier_id)
+            .values(invoice_date=datetime.date.today() - datetime.timedelta(days=60))
+        )
+        await session.commit()
+    await _pay(session_factory, owner_user, supplier, "4000")
+
+    async with session_factory() as session:
+        payable = await SupplierRepository(session).outstanding(ORG, supplier_id)
+    async with session_factory() as session, session.begin():
+        job = await ReportService(session).enqueue(
+            owner_user,
+            report_type="statement",
+            start=datetime.date.today() - datetime.timedelta(days=7),
+            end=datetime.date.today() + datetime.timedelta(days=1),
+            filters={"supplier_id": str(supplier_id)},
+        )
+        job_id = job.id
+    async with session_factory() as session:
+        built = await ReportService(session).generate(job_id)
+
+    assert built.file_path is not None
+    cells = [
+        cell.value
+        for row in load_workbook(built.file_path).worksheets[0].iter_rows()
+        for cell in row
+    ]
+    assert "Opening balance" in cells
+    # the bill is outside the window; the closing balance is still what
+    # is owed
+    assert D(str(cells[-1])) == payable == D("6000")

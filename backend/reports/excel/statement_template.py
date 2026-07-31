@@ -49,12 +49,13 @@ def build_statement(
     party: str,
     role: str,
     period: str,
+    opening: decimal.Decimal = ZERO,
 ) -> Workbook:
     workbook = Workbook()
     sheet = workbook.active
     assert sheet is not None
     sheet.title = "Statement"
-    write_statement_sheet(sheet, entries, party=party, role=role, period=period)
+    write_statement_sheet(sheet, entries, party=party, role=role, period=period, opening=opening)
     return workbook
 
 
@@ -65,6 +66,7 @@ def write_statement_sheet(
     party: str,
     role: str,
     period: str,
+    opening: decimal.Decimal = ZERO,
 ) -> decimal.Decimal:
     """Write one party's history onto an existing worksheet and return
     the closing balance.
@@ -72,6 +74,11 @@ def write_statement_sheet(
     Split out from `build_statement` so the ledger can repeat it once per
     party in a single workbook -- one party per tab -- without a second
     implementation of what a statement looks like.
+
+    `opening` is what was already owed when the period began. Without it
+    a July statement starts from zero and closes on a number that is not
+    the payable -- true of that month alone, and read by everyone as
+    wrong.
     """
     owed_label = "Owed to them" if role == "supplier" else "Owed by them"
     write_row(sheet, 1, [f"{role.capitalize()}: {party}", "", "", "", "", "", ""], bold=True)
@@ -79,11 +86,22 @@ def write_statement_sheet(
     write_header(sheet, HEADERS, row=3)
 
     formats = {index: MONEY_FORMAT for index in MONEY_COLUMNS}
-    balance = ZERO
+    balance = opening
     purchased_total = ZERO
     paid_total = ZERO
+    first_row = 4
 
-    for offset, entry in enumerate(sorted(entries, key=lambda e: e.at), start=4):
+    if opening != ZERO:
+        write_row(
+            sheet,
+            first_row,
+            ["", "", "Opening balance", "brought forward", "", "", float(opening)],
+            formats=formats,
+            bold=True,
+        )
+        first_row += 1
+
+    for offset, entry in enumerate(sorted(entries, key=lambda e: e.at), start=first_row):
         balance += entry.debit - entry.credit
         purchased_total += entry.debit
         paid_total += entry.credit
@@ -102,7 +120,7 @@ def write_statement_sheet(
             formats=formats,
         )
 
-    total_row = len(entries) + 4
+    total_row = len(entries) + first_row
     write_row(
         sheet,
         total_row,

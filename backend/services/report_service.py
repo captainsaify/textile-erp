@@ -474,6 +474,20 @@ class ReportService:
             end=job.period_end,
         )
 
+        # What was already owed when the period began. A July statement
+        # without it starts from zero and closes on a number that is not
+        # the payable -- true of July alone, and read by everyone as
+        # wrong.
+        opening = ZERO
+        if job.period_start is not None:
+            earlier = await self.party_entries(
+                job.org_id,
+                role=role,
+                party_id=party_id,
+                end=job.period_start - datetime.timedelta(days=1),
+            )
+            opening = sum((e.debit - e.credit for e in earlier), ZERO)
+
         workbook = build_statement(
             entries,
             party=party_name,
@@ -481,6 +495,7 @@ class ReportService:
             period=f"{fmt_date(job.period_start)} to {fmt_date(job.period_end)}"
             if job.period_start and job.period_end
             else "all time",
+            opening=opening,
         )
         path = self._output_path(job)
         workbook.save(path)
