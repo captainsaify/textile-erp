@@ -15,7 +15,16 @@ import re
 
 from backend.api.command_types import CommandResult, RequestContext
 from backend.api.formatting import fmt_money, fmt_qty
-from backend.api.interactive import is_abandon
+from backend.api.interactive import (
+    MAX_BUTTONS,
+    MAX_LIST_ROWS,
+    Buttons,
+    Choice,
+    Interactive,
+    ListMenu,
+    Section,
+    is_abandon,
+)
 from backend.core.exceptions import (
     DomainError,
     DuplicateSaleError,
@@ -191,6 +200,70 @@ def _render_unresolved(draft: SaleDraft, candidates: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _brand_question(line: SaleDraftLine) -> CommandResult:
+    """Which brand's product this line means.
+
+    A code is unique only within a brand, so VVP names a golden velvet
+    pant under TOP and a velvet sport pant under MKD. Until this is
+    answered the line has no product -- but it is not an unknown code,
+    and telling someone to "add it via a purchase first" sent them to
+    fix a catalogue that was already right.
+    """
+    body = f"Which brand is {line.code}?"
+    choices = tuple(
+        Choice(id=f"brand {name}", title=name[:20]) for name in line.brand_choices[:MAX_BUTTONS]
+    )
+    if len(line.brand_choices) <= MAX_BUTTONS:
+        interactive: Interactive = Buttons(body=body, choices=choices)
+    else:
+        interactive = ListMenu(
+            body=body,
+            menu_label="Pick brand",
+            sections=(
+                Section(
+                    title="Brands",
+                    rows=tuple(
+                        Choice(id=f"brand {name}", title=name[:24])
+                        for name in line.brand_choices[:MAX_LIST_ROWS]
+                    ),
+                ),
+            ),
+        )
+    listed = ", ".join(line.brand_choices)
+    return CommandResult(
+        reply=f"{line.code} is sold under {len(line.brand_choices)} brands ({listed}). "
+        "Which one is this?",
+        interactive=interactive,
+    )
+
+
+async def _resolve_brand_choice(line: SaleDraftLine, answer: str, ctx: RequestContext) -> bool:
+    """Point the line at that brand's product directly, rather than
+    storing the brand and re-deriving it: "no brand" is a real answer
+    and a null brand_id cannot express it."""
+    from backend.repositories.product_repository import ProductRepository
+
+    wanted = answer.strip().lower()
+    async with ctx.session_factory() as session:
+        carriers = await ProductRepository(session).list_by_code(ctx.user.org_id, line.code)
+    chosen = next(
+        (
+            product
+            for product in carriers
+            if (product.brand.name if product.brand else "no brand").lower() == wanted
+        ),
+        None,
+    )
+    if chosen is None:
+        return False
+    line.product_id = chosen.id
+    line.brand_id = chosen.brand_id
+    line.resolved_code = chosen.code
+    line.unit_code = chosen.unit.code
+    line.brand_choices = []
+    return True
+
+
 async def _try_record(
     draft: SaleDraft, ctx: RequestContext, *, below_cost_confirmed: bool = False
 ) -> CommandResult:
@@ -249,10 +322,15 @@ async def handle_sale(args: str, ctx: RequestContext) -> CommandResult:
     draft.idempotency_key = idempotency_key(ctx.user.whatsapp_number or "", args)
     draft, candidates = await _prepare(draft, ctx)
 
-    if draft.customer_id is None or draft.unresolved_codes:
+    if draft.customer_id is None or draft.unresolved_codes or draft.needs_brand:
         await sessions.set(
             ctx.user.org_id, ctx.user.id, AWAITING_SALE_CONFIRMATION, draft.to_context()
         )
+        # The customer question comes first when both are open: the
+        # brand answer is per line, and answering it into a draft whose
+        # customer is still unresolved leaves two questions in flight.
+        if draft.customer_id is not None and draft.needs_brand is not None:
+            return _brand_question(draft.needs_brand)
         return CommandResult(reply=_render_unresolved(draft, candidates))
 
     async with ctx.session_factory() as session:
@@ -279,6 +357,33 @@ async def handle_sale_session_reply(
     if is_abandon(lowered):
         await sessions.clear(ctx.user.org_id, ctx.user.id)
         return CommandResult(reply="Sale discarded.")
+
+    pending = draft.needs_brand
+    if pending is not None and lowered not in CONFIRM_VOCAB:
+        # While a brand question is open it owns the next message --
+        # otherwise a bare "TOP" would fall through to the correction
+        # parser and end up as "I don't understand".
+        answer = text.strip()
+        if lowered.startswith("brand "):
+            answer = answer[len("brand ") :].strip()
+        resolved = await _resolve_brand_choice(pending, answer, ctx)
+        if not resolved:
+            return CommandResult(
+                reply=f"'{answer}' isn't one of {pending.code}'s brands.",
+                interactive=_brand_question(pending).interactive,
+            )
+        # Re-hydrated, not just pointed at a product: stock and average
+        # cost are snapshotted per line, and the snapshot for a line
+        # that had no product yet is zero -- which would have reported
+        # "0 KG in stock" for a product with plenty.
+        draft, _ = await _prepare(draft, ctx)
+        # Parked before continuing, never after: a draft that records
+        # clears the session itself, and re-saving it afterwards would
+        # leave a finished sale sitting in the state machine.
+        await sessions.set(
+            ctx.user.org_id, ctx.user.id, AWAITING_SALE_CONFIRMATION, draft.to_context()
+        )
+        return await _continue_after_resolution(draft, ctx)
 
     if lowered == "create customer":
         if draft.customer_id is not None:
@@ -374,6 +479,8 @@ async def handle_sale_session_reply(
 async def _continue_after_resolution(draft: SaleDraft, ctx: RequestContext) -> CommandResult:
     """After a customer/product/correction answer: ask again if still
     unresolved, warn if warnings remain, otherwise record."""
+    if draft.customer_id is not None and draft.needs_brand is not None:
+        return _brand_question(draft.needs_brand)
     if draft.customer_id is None or draft.unresolved_codes:
         return CommandResult(reply=_render_unresolved(draft, []))
     async with ctx.session_factory() as session:

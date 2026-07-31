@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import datetime
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -158,6 +159,36 @@ def _code(value: str) -> str:
     if not token or " " in token:
         raise ValidationError("A product code is a single word, e.g. TRP.")
     return token
+
+
+#: One answer, several values: "VVP, VVP-1, 35A". A sale of six items
+#: was six rounds of three questions; this makes it three answers.
+_LIST_SEPARATORS = re.compile(r"[,\n;]+|\s+")
+
+
+def _split_list(value: str) -> list[str]:
+    return [part for part in _LIST_SEPARATORS.split(value.strip()) if part]
+
+
+def _codes(value: str) -> str:
+    parts = _split_list(value)
+    if not parts:
+        raise ValidationError("Give at least one product code, e.g. TRP.")
+    return ", ".join(_code(part) for part in parts)
+
+
+def _quantities(value: str) -> str:
+    parts = _split_list(value)
+    if not parts:
+        raise ValidationError("How many? e.g. 100")
+    return ", ".join(_quantity(part) for part in parts)
+
+
+def _rates(value: str) -> str:
+    parts = _split_list(value)
+    if not parts:
+        raise ValidationError("At what rate? e.g. 150")
+    return ", ".join(_amount(part) for part in parts)
 
 
 def _when(value: str) -> str:
@@ -754,22 +785,63 @@ def _more_items(value: str) -> str:
     raise ValidationError("Tap 'Add another' or \"That's all\".")
 
 
+def _still_adding(filled: dict[str, str]) -> bool:
+    return filled.get("more") != "done"
+
+
 def _items_of(filled: dict[str, str]) -> list[str]:
     banked = filled.get("items", "")
     return [line for line in banked.split("\n") if line.strip()]
 
 
+def _zip_items(filled: dict[str, str]) -> list[str]:
+    """One line per code, from answers that may each hold several.
+
+    A single quantity or rate is spread across every code -- "VVP,
+    VVP-1, 35A" at "100" and "150" is the common case of three items at
+    the same price. Anything else has to line up, because guessing which
+    code the missing number belonged to would price the wrong item.
+    """
+    codes = _split_list(filled.get("code", ""))
+    quantities = _split_list(filled.get("qty", ""))
+    rates = _split_list(filled.get("rate", ""))
+    if not codes:
+        return []
+    for label, values in (("quantities", quantities), ("rates", rates)):
+        if len(values) not in {0, 1, len(codes)}:
+            raise ValidationError(
+                f"{len(codes)} codes but {len(values)} {label} — give one per code "
+                f"({', '.join(codes)}), or a single one for all of them."
+            )
+    if not quantities or not rates:
+        return []
+
+    def spread(values: list[str]) -> list[str]:
+        return values * len(codes) if len(values) == 1 else values
+
+    return [
+        f"{code} {qty} {rate}"
+        for code, qty, rate in zip(codes, spread(quantities), spread(rates), strict=True)
+    ]
+
+
+def _check_counts(filled: dict[str, str]) -> None:
+    """Runs as the quantity's `after`, so three codes and two quantities
+    is caught at the quantity rather than one question later."""
+    _zip_items(filled)
+
+
 def _bank_item(filled: dict[str, str]) -> None:
-    """Move the item just answered into the collected list.
+    """Move the item(s) just answered into the collected list.
 
     When there is another to come, the per-item slots are cleared so the
     queue asks for them again -- that is the loop. `filled` is the only
     state a wizard has, so the loop lives in it rather than in a counter
     somewhere else that could disagree.
     """
-    item = f"{filled.get('code', '')} {filled.get('qty', '')} {filled.get('rate', '')}".strip()
-    if item:
-        filled["items"] = "\n".join([*_items_of(filled), item])
+    banked = _zip_items(filled)
+    if banked:
+        filled["items"] = "\n".join([*_items_of(filled), *banked])
     for key in ("code", "qty", "rate"):
         filled.pop(key, None)
     if filled.get("more") == "add":
@@ -955,12 +1027,32 @@ WIZARDS: dict[str, CommandWizard] = {
                 validate=_nonempty("Customer"),
                 example="e.g. Ravi Traders",
             ),
+            # `applies` is what ends the loop. Without it "That's all"
+            # cleared the item slots and `remaining` immediately asked
+            # for a code again -- the wizard could not be finished, and
+            # the answers typed at the re-asked questions ("confirm",
+            # "1", "1") were banked as an item nobody meant to sell.
             CommandSlot(
-                name="code", question="Which product code?", validate=_code, example="e.g. TRP"
+                name="code",
+                question="Which product code?",
+                validate=_codes,
+                example="e.g. TRP — or several: VVP, VVP-1, 35A",
+                applies=_still_adding,
             ),
-            CommandSlot(name="qty", question="How many?", validate=_quantity, example="e.g. 100"),
             CommandSlot(
-                name="rate", question="At what rate per unit?", validate=_amount, example="e.g. 150"
+                name="qty",
+                question="How many?",
+                validate=_quantities,
+                example="e.g. 100 — one per code, or one for all",
+                after=_check_counts,
+                applies=_still_adding,
+            ),
+            CommandSlot(
+                name="rate",
+                question="At what rate per unit?",
+                validate=_rates,
+                example="e.g. 150 — one per code, or one for all",
+                applies=_still_adding,
             ),
             CommandSlot(
                 name="more",
@@ -1259,10 +1351,16 @@ async def handle_reply(text: str, ctx: RequestContext, state: SessionState) -> C
     slot = next(s for s in wizard.slots if s.name == current)
     try:
         filled[current] = slot.validate(answer)
+        # Inside the same guard as `validate`: an answer that is fine on
+        # its own can still be wrong beside the others -- three codes and
+        # two quantities -- and that check can only run once both are in.
+        if slot.after is not None:
+            slot.after(filled)
     except DomainError as exc:
+        # Undo it, or `remaining` would treat the rejected answer as
+        # given and never ask the question again.
+        filled.pop(current, None)
         return await _reask(wizard, queue, ctx, prefix=exc.message, filled=filled)
-    if slot.after is not None:
-        slot.after(filled)
 
     queue = remaining(wizard, filled)
     if queue:

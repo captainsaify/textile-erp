@@ -57,6 +57,14 @@ class SaleDraftLine:
     unit_code: str | None = None
     avg_cost: decimal.Decimal = ZERO
     qty_on_hand: decimal.Decimal = ZERO
+    #: Which brand's product this line means, once asked. A code is
+    #: unique only within a brand, so VVP alone does not identify a
+    #: product -- and selling the wrong brand's stock is worse than
+    #: asking which one (docs/05_Sales.md §2).
+    brand_id: uuid.UUID | None = None
+    #: The brands that carry this code, set only while the question is
+    #: outstanding. Empty once the line resolves.
+    brand_choices: list[str] = dataclasses.field(default_factory=list)
 
     @property
     def line_total(self) -> decimal.Decimal:
@@ -83,7 +91,17 @@ class SaleDraft:
 
     @property
     def unresolved_codes(self) -> list[str]:
-        return [line.code for line in self.lines if line.product_id is None]
+        """Codes that name no product. A code carried by several brands
+        is *not* one of these -- it names too many, which is a question
+        with an answer, not a catalogue gap."""
+        return [
+            line.code for line in self.lines if line.product_id is None and not line.brand_choices
+        ]
+
+    @property
+    def needs_brand(self) -> SaleDraftLine | None:
+        """The first line still waiting to be told which brand."""
+        return next((line for line in self.lines if line.brand_choices), None)
 
     def to_context(self) -> dict[str, Any]:
         return {
@@ -103,6 +121,8 @@ class SaleDraft:
                     "unit_code": line.unit_code,
                     "avg_cost": str(line.avg_cost),
                     "qty_on_hand": str(line.qty_on_hand),
+                    "brand_id": str(line.brand_id) if line.brand_id else None,
+                    "brand_choices": list(line.brand_choices),
                 }
                 for line in self.lines
             ],
@@ -127,6 +147,8 @@ class SaleDraft:
                     unit_code=line["unit_code"],
                     avg_cost=decimal.Decimal(line["avg_cost"]),
                     qty_on_hand=decimal.Decimal(line["qty_on_hand"]),
+                    brand_id=uuid.UUID(line["brand_id"]) if line.get("brand_id") else None,
+                    brand_choices=list(line.get("brand_choices") or []),
                 )
                 for line in context["lines"]
             ],
@@ -229,14 +251,18 @@ class SalesService:
         warehouse = await self._default_warehouse(org_id)
         for line in draft.lines:
             if line.product_id is None:
-                product = await self._products.get_by_code(org_id, line.code)
+                product = await self._products.get_by_code(org_id, line.code, line.brand_id)
                 if product is None:
                     carriers = await self._products.list_by_code(org_id, line.code)
                     if len(carriers) > 1:
                         # the code exists but under several brands. Fuzzy
                         # search would happily return one of them; selling
                         # the wrong brand's stock is worse than asking.
+                        line.brand_choices = sorted(
+                            {(p.brand.name if p.brand else "no brand") for p in carriers}
+                        )
                         continue
+                line.brand_choices = []
                 if product is None:
                     matches = await self._products.search(org_id, line.code, limit=1)
                     product = matches[0] if matches else None

@@ -669,3 +669,65 @@ async def test_a_product_is_still_typed_because_a_list_would_not_help(
 
     assert question.interactive is None
     assert "code or name" in question.reply
+
+
+# --------------------------------------------------------------------
+# the sale item loop
+# --------------------------------------------------------------------
+
+
+async def test_that_is_all_finishes_the_sale_instead_of_asking_again(
+    ctx: RequestContext,
+) -> None:
+    """The loop had no exit. "That's all" cleared the item slots and the
+    queue asked for a code again, so the wizard could not be finished --
+    and the answers typed at the re-asked questions ("confirm", "1",
+    "1") were banked as an item nobody meant to sell."""
+    await begin("sale", "", ctx)
+    await answer("Walk-in", ctx)
+    await answer("TRP", ctx)
+    await answer("10", ctx)
+    await answer("150", ctx)
+    result = await answer("slot done", ctx)
+
+    # the wizard is over: what comes back is the sale command's own
+    # reply (this customer is new), not another item question
+    assert "Which product code?" not in result.reply
+    assert "Walk-in" in result.reply
+    state, _ = await state_of(ctx)
+    assert state != AWAITING_COMMAND_SLOT
+
+
+async def test_several_codes_in_one_answer_become_several_lines() -> None:
+    """Six items was six rounds of three questions."""
+    filled = {
+        "customer": "Ravi",
+        "code": wizards._codes("vvp, vvp-1, 35a"),
+        "qty": wizards._quantities("100, 200, 300"),
+        "rate": wizards._rates("80"),
+    }
+    wizards._bank_item(filled)
+
+    assert wizards._items_of(filled) == [
+        "VVP 100.00 80.00",
+        "VVP-1 200.00 80.00",
+        "35A 300.00 80.00",
+    ]
+    # a single rate spreads across every code; the answered slots are
+    # cleared so the loop can ask for the next item
+    assert "code" not in filled and "qty" not in filled and "rate" not in filled
+
+
+async def test_a_quantity_missing_from_the_list_is_refused(ctx: RequestContext) -> None:
+    """Guessing which code the missing number belonged to would price
+    the wrong item."""
+    await begin("sale", "", ctx)
+    await answer("Ravi", ctx)
+    await answer("vvp, vvp-1, 35a", ctx)
+    result = await answer("100, 200", ctx)
+
+    assert "3 codes but 2 quantities" in result.reply
+    _, context = await state_of(ctx)
+    # the rejected answer is not treated as given
+    assert "qty" not in context["filled"]
+    assert context["queue"][0] == "qty"

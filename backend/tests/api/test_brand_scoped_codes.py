@@ -238,3 +238,72 @@ async def test_purchase_line_keeps_the_description_as_printed(
             )
         ).scalars()
         assert list(columns) == ["description"]
+
+
+# --------------------------------------------------------------------
+# selling a code two brands share
+# --------------------------------------------------------------------
+
+
+async def test_a_sale_asks_which_brand_rather_than_calling_the_code_unknown(
+    ctx: RequestContext,
+    two_brands: tuple[Product, Product],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """VVP names a product under Nike and a different one under Puma.
+    The sale used to report it as an unknown product and suggest adding
+    it "via a purchase first" -- sending someone to fix a catalogue that
+    was already right."""
+    from backend.api.commands.sale_commands import handle_sale, handle_sale_session_reply
+    from backend.api.interactive import Buttons
+    from backend.models import Customer
+    from backend.services.session_service import SessionService
+
+    async with session_factory() as session, session.begin():
+        session.add(Customer(org_id=ORG, name="Ravi Traders", created_by=ctx.user.id))
+
+    asked = await handle_sale("Customer: Ravi Traders cash\nVVP 100 150", ctx)
+
+    assert "Unknown products" not in asked.reply
+    assert "Nike" in asked.reply and "Puma" in asked.reply
+    assert isinstance(asked.interactive, Buttons)
+    assert [c.id for c in asked.interactive.choices] == ["brand Nike", "brand Puma"]
+
+    # answering it sells that brand's product, and only that one
+    state = await SessionService(session_factory).get(ORG, ctx.user.id)
+    recorded = await handle_sale_session_reply("brand Puma", ctx, state)
+
+    assert "Sale recorded" in recorded.reply
+    async with session_factory() as session:
+        sold = (
+            await session.execute(
+                sa.select(Inventory.qty_on_hand).where(Inventory.product_id == two_brands[1].id)
+            )
+        ).scalar_one()
+        untouched = (
+            await session.execute(
+                sa.select(Inventory.qty_on_hand).where(Inventory.product_id == two_brands[0].id)
+            )
+        ).scalar_one()
+    assert sold == decimal.Decimal("1420")  # 1520 - 100, the Puma one
+    assert untouched == decimal.Decimal("800")
+
+
+async def test_a_brand_that_does_not_carry_the_code_is_refused(
+    ctx: RequestContext,
+    two_brands: tuple[Product, Product],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from backend.api.commands.sale_commands import handle_sale, handle_sale_session_reply
+    from backend.models import Customer
+    from backend.services.session_service import SessionService
+
+    async with session_factory() as session, session.begin():
+        session.add(Customer(org_id=ORG, name="Ravi Traders", created_by=ctx.user.id))
+    await handle_sale("Customer: Ravi Traders cash\nVVP 100 150", ctx)
+
+    state = await SessionService(session_factory).get(ORG, ctx.user.id)
+    result = await handle_sale_session_reply("Adidas", ctx, state)
+
+    assert "isn't one of VVP's brands" in result.reply
+    assert result.interactive is not None  # and the question is asked again
