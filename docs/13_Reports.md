@@ -15,7 +15,14 @@ same underlying report generators, not separate implementations:
 | Balance Sheet | Per [06_Accounting.md §6](06_Accounting.md#6-balance-sheet-basic) | `BalanceSheetService.report(as_of)` |
 | Cash Flow | Per [06_Accounting.md §7](06_Accounting.md#7-cash-flow) | `CashFlowService.report(range)` |
 | Ledger (customer/supplier/product) | Full transaction history + running balance | `LedgerService.report(entity, range)` |
+| Cashbook | Cash & bank movements in order, running balance, reversals shown and not counted | `ReportService._build_cashbook` |
 | Audit | Filtered `audit_logs` extract | `AuditService.report(filters)` |
+
+**"Ledger" and "cashbook" are different reports.** The partners say
+"ledger" for both, but one answers *who owes what and for how long* and
+the other *what actually moved through the cash box*. They were only
+ever conflated by name. See
+[`28_SheetsEverywhere.md`](28_SheetsEverywhere.md) §2.4.
 
 ## 2. Generation pipeline
 

@@ -66,19 +66,38 @@ Building a document never fails the command it decorates. A document
 that could not be built is a missing attachment, never a purchase that
 did not save.
 
-**Dashboard** — a `Sheet` button on every row of Purchases, Sales and
-the Ledger (payments only). Fetched with the bearer token rather than
-linked, because a plain `href` drops the `Authorization` header and
-comes back a 401.
+**Dashboard** — the document is *rendered* on the Purchases and Sales
+detail panels (beside the original scan, where there is one) and in an
+overlay from the Ledger and Money pages, with a download button on each.
+Fetched with the bearer token rather than linked, because a plain `href`
+drops the `Authorization` header and comes back a 401. See
+[`28_SheetsEverywhere.md`](28_SheetsEverywhere.md) §2.3.
 
 ## 5. Endpoints
 
 ```
-GET /api/v1/purchases/{id}/sheet
-GET /api/v1/sales/{id}/sheet
-GET /api/v1/payments/{reference}/sheet
+GET /api/v1/purchases/{id}/sheet          .xlsx
+GET /api/v1/sales/{id}/sheet              .xlsx
+GET /api/v1/payments/{reference}/sheet    .xlsx
+
+GET /api/v1/purchases/{id}/document       the same build, as JSON
+GET /api/v1/sales/{id}/document
+GET /api/v1/payments/{reference}/document
 ```
 
-All three return `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
-with `Cache-Control: no-store` — a cached copy of a document whose whole
-promise is "current as of now" would defeat it.
+The `.xlsx` routes return
+`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`; all
+six carry `Cache-Control: no-store` — a cached copy of a document whose
+whole promise is "current as of now" would defeat it.
+
+The two shapes come from **one build** (`DocumentService._purchase_bill`
+and its siblings). Deriving the screen version separately is exactly how
+two versions of one bill end up in circulation, which is the thing this
+document exists to prevent.
+
+## 6. Saying that it changed
+
+A correction that is recorded, printed, and still not noticed is not a
+correction anyone was told about. What makes it visible — the MODIFIED
+banner above the column headers, the `NOTE` column, the highlighted
+rows — is specified in [`28_SheetsEverywhere.md`](28_SheetsEverywhere.md) §2.1.

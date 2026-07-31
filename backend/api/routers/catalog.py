@@ -14,6 +14,7 @@ import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 
 from backend.api.amounts import money_str, qty_str
@@ -382,6 +383,53 @@ async def payment_sheet(reference: str, user: CurrentUser, session: Session) -> 
             DocumentService(session).payment(user.org_id, reference),
             f"payment-{reference}.xlsx",
         )
+    except NotFoundError:
+        raise HTTPException(status_code=404, detail="no such payment") from None
+
+
+def _no_store(payload: dict[str, Any]) -> JSONResponse:
+    """A document is current as of now or it is misinformation, so no
+    layer between here and the browser may keep a copy."""
+    return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/purchases/{purchase_id}/document")
+async def purchase_document(
+    purchase_id: uuid.UUID, user: CurrentUser, session: Session
+) -> JSONResponse:
+    """The same sheet as `/sheet`, as data instead of a workbook.
+
+    Both come from one build (docs/28 §2.2), so what the dashboard draws
+    beside the scan and what downloads from the button next to it cannot
+    disagree -- which is the entire reason a document exists.
+    """
+    from backend.services.document_service import DocumentService
+
+    header = await session.get(PurchaseHeader, purchase_id)
+    if header is None or header.org_id != user.org_id:
+        raise HTTPException(status_code=404, detail="no such purchase")
+    view = await DocumentService(session).purchase_view(user.org_id, purchase_id)
+    view["scan_url"] = f"/purchases/{purchase_id}/scan" if header.ocr_source_attachment_id else None
+    return _no_store(view)
+
+
+@router.get("/sales/{sale_id}/document")
+async def sale_document(sale_id: uuid.UUID, user: CurrentUser, session: Session) -> JSONResponse:
+    from backend.services.document_service import DocumentService
+
+    header = await session.get(SalesHeader, sale_id)
+    if header is None or header.org_id != user.org_id:
+        raise HTTPException(status_code=404, detail="no such sale")
+    return _no_store(await DocumentService(session).sale_view(user.org_id, sale_id))
+
+
+@router.get("/payments/{reference}/document")
+async def payment_document(reference: str, user: CurrentUser, session: Session) -> JSONResponse:
+    from backend.core.exceptions import NotFoundError
+    from backend.services.document_service import DocumentService
+
+    try:
+        return _no_store(await DocumentService(session).payment_view(user.org_id, reference))
     except NotFoundError:
         raise HTTPException(status_code=404, detail="no such payment") from None
 

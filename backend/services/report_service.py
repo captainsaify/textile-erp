@@ -53,7 +53,7 @@ from backend.repositories.party_repository import OPEN_SALE_STATUSES
 logger = get_logger(__name__)
 ZERO = decimal.Decimal("0")
 
-REPORT_TYPES = ("purchases", "sales", "stock", "statement", "invoice", "ledger")
+REPORT_TYPES = ("purchases", "sales", "stock", "statement", "invoice", "ledger", "cashbook")
 LINK_EXPIRY_DAYS = 7
 
 
@@ -159,6 +159,7 @@ class ReportService:
             "stock": self._build_stock,
             "statement": self._build_statement,
             "ledger": self._build_ledger,
+            "cashbook": self._build_cashbook,
             "invoice": self._build_invoice,
         }
         return await builders[job.report_type](job)
@@ -300,6 +301,46 @@ class ReportService:
         path = self._output_path(job)
         workbook.save(path)
         return path, len(rows)
+
+    async def _build_cashbook(self, job: ReportJob) -> tuple[Path, int]:
+        """What actually moved through the cash box and the bank, in
+        order, with a running balance -- docs/28 §2.4.
+
+        Distinct from `_build_ledger`, which is the *party* ledger. The
+        two answer different questions and were only ever called the same
+        thing because the partners say "ledger" for both.
+        """
+        from backend.reports.excel.cashbook_template import CashbookRow, build_cashbook
+        from backend.repositories.accounting_repository import LedgerRepository
+
+        repository = LedgerRepository(self._session)
+        wanted = str(job.filters.get("account", "")).lower()
+        accounts = [wanted] if wanted in {"cash", "bank"} else ["cash", "bank"]
+        start = job.period_start or datetime.date.min
+        end = job.period_end or datetime.date.max
+
+        by_account: dict[str, list[CashbookRow]] = {}
+        counted = 0
+        for account in accounts:
+            entries = await repository.entries_between(job.org_id, account, start, end)
+            cancelled = LedgerRepository.cancelled_ids(entries)
+            by_account[account.capitalize()] = [
+                CashbookRow(
+                    entry_date=entry.entry_date,
+                    entry_type=entry.entry_type.value,
+                    details=entry.notes or "",
+                    money_in=entry.amount if entry.amount > ZERO else ZERO,
+                    money_out=-entry.amount if entry.amount < ZERO else ZERO,
+                    balance=entry.resulting_balance,
+                    cancelled=entry.id in cancelled,
+                )
+                for entry in entries
+            ]
+            counted += len(entries)
+
+        path = self._output_path(job)
+        build_cashbook(by_account, period=(start, end)).save(path)
+        return path, counted
 
     async def _last_purchase_dates(self, org_id: uuid.UUID) -> dict[uuid.UUID, datetime.date]:
         stmt = (

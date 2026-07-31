@@ -42,7 +42,11 @@
     }
     if (!response.ok) {
       const detail = await response.json().catch(() => ({}));
-      throw new Error(detail.detail || detail.message || `Request failed (${response.status})`);
+      throw new Error(
+        detail.detail ||
+          detail.message ||
+          `Request failed (${response.status})`,
+      );
     }
     return response.json();
   }
@@ -63,7 +67,8 @@
    * {items, next_cursor}, the endpoints added for this dashboard return
    * {data}. Reading both here beats changing tested response shapes to
    * suit the client. */
-  const rowsOf = (payload) => (payload && (payload.items || payload.data)) || [];
+  const rowsOf = (payload) =>
+    (payload && (payload.items || payload.data)) || [];
 
   function table(columns, rows, { onRowClick } = {}) {
     const el = document.createElement("table");
@@ -90,7 +95,9 @@
       }
       columns.forEach((column) => {
         const td = tr.insertCell();
-        const value = column.render ? column.render(row) : text(row[column.key]);
+        const value = column.render
+          ? column.render(row)
+          : text(row[column.key]);
         if (value instanceof Node) td.append(value);
         else td.innerHTML = value;
         if (column.numeric) td.className = "num";
@@ -99,18 +106,22 @@
     return el;
   }
 
-  /* The transaction's own sheet, fetched with the bearer token rather
-   * than linked -- a plain href would drop the Authorization header and
-   * come back a 401. Built server-side on request, so what downloads
-   * always includes any correction made since (docs/27_Documents.md). */
-  function sheetLink(path, filename) {
+  /* Every sheet is fetched with the bearer token rather than linked --
+   * a plain href would drop the Authorization header and come back a
+   * 401. Built server-side on request, so what downloads always
+   * includes any correction made since (docs/27_Documents.md), and a
+   * page-level export writes the same report_jobs row the WhatsApp
+   * `export` command writes: a download taken from here is exactly as
+   * traceable as one taken from the chat (docs/28 §2.4). */
+  function downloadButton(path, filename, label = "Download sheet") {
     const button = document.createElement("button");
     button.className = "link";
-    button.textContent = "Sheet";
-    button.title = "Download this as a spreadsheet, current as of now";
+    button.textContent = label;
     button.addEventListener("click", async (event) => {
       event.stopPropagation();
-      button.textContent = "…";
+      const original = button.textContent;
+      button.textContent = "building…";
+      button.disabled = true;
       try {
         const response = await fetch(API + path, {
           headers: { Authorization: `Bearer ${token}` },
@@ -125,10 +136,140 @@
       } catch (exc) {
         banner(exc.message);
       } finally {
-        button.textContent = "Sheet";
+        button.textContent = original;
+        button.disabled = false;
       }
     });
     return button;
+  }
+
+  /* A page's own export, in the header beside its filters. Replaced
+   * rather than appended so re-entering a page doesn't stack buttons. */
+  function slot(id, path, filename, label = "Download sheet ⭳") {
+    const node = $(id);
+    if (node) node.replaceChildren(downloadButton(path, filename, label));
+  }
+
+  /* Our sheet, drawn from the same build that produces the workbook the
+   * button beside it downloads (docs/28 §2.2). Rendering the raw lines
+   * instead would put a second, differently-derived version of the bill
+   * on screen -- which is the one thing a document exists to prevent. */
+  function documentSheet(doc) {
+    const wrap = document.createElement("div");
+    wrap.className = "sheet";
+
+    const caption = document.createElement("p");
+    caption.className = "sheet-caption";
+    caption.textContent = doc.caption;
+    wrap.append(caption);
+
+    if (doc.banner) {
+      const warning = document.createElement("p");
+      warning.className = "sheet-banner";
+      warning.textContent = doc.banner;
+      wrap.append(warning);
+    }
+
+    const scroll = document.createElement("div");
+    scroll.className = "table-scroll";
+    const el = document.createElement("table");
+    const head = el.createTHead().insertRow();
+    doc.columns.forEach((label, index) => {
+      const th = document.createElement("th");
+      th.textContent = label;
+      if (index >= 5 && index <= 8) th.style.textAlign = "right";
+      head.append(th);
+    });
+    const body = el.createTBody();
+    doc.rows.forEach((row) => {
+      const tr = body.insertRow();
+      // a band of colour is findable at 52 lines; one tinted cell is not
+      if (row.changed) tr.className = "changed";
+      row.cells.forEach((value, index) => {
+        const td = tr.insertCell();
+        td.textContent = value;
+        if (index >= 5 && index <= 8) td.className = "num";
+      });
+    });
+    const totals = body.insertRow();
+    totals.className = "totals";
+    doc.totals.forEach((value, index) => {
+      const td = totals.insertCell();
+      td.textContent = value;
+      if (index >= 5 && index <= 8) td.className = "num";
+    });
+    scroll.append(el);
+    wrap.append(scroll);
+
+    if (doc.notes && doc.notes.length) {
+      const notes = document.createElement("ul");
+      notes.className = "sheet-notes";
+      doc.notes.forEach((note) => {
+        const li = document.createElement("li");
+        li.textContent = note;
+        notes.append(li);
+      });
+      wrap.append(notes);
+    }
+
+    if (doc.history && doc.history.length) {
+      // available, not in the way: nineteen lines of audit trail open
+      // by default would bury the bill they annotate
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      summary.textContent = `CHANGES (${doc.history.length})`;
+      details.append(summary);
+      const list = document.createElement("ul");
+      list.className = "sheet-history";
+      doc.history.forEach((entry) => {
+        const li = document.createElement("li");
+        li.textContent = entry;
+        list.append(li);
+      });
+      details.append(list);
+      wrap.append(details);
+    }
+    return wrap;
+  }
+
+  /* Documents that have no page of their own -- a payment receipt is
+   * reached from a ledger row and from a payables row, and giving it a
+   * page would mean navigating away from the list you are working. */
+  function showDocument(path, downloadPath, filename) {
+    const overlay = document.createElement("div");
+    overlay.className = "overlay";
+    const card = document.createElement("div");
+    card.className = "card overlay-card";
+    card.innerHTML = `<p class="muted">Building…</p>`;
+    overlay.append(card);
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) overlay.remove();
+    });
+    document.body.append(overlay);
+
+    api(path)
+      .then((doc) => {
+        card.replaceChildren();
+        const head = document.createElement("div");
+        head.className = "detail-head";
+        const title = document.createElement("h2");
+        title.textContent = doc.title || "Document";
+        head.append(title);
+        const actions = document.createElement("div");
+        actions.className = "filters";
+        actions.append(downloadButton(downloadPath, filename));
+        const close = document.createElement("button");
+        close.className = "link";
+        close.textContent = "Close";
+        close.addEventListener("click", () => overlay.remove());
+        actions.append(close);
+        head.append(actions);
+        card.append(head, documentSheet(doc));
+      })
+      .catch((exc) => {
+        card.innerHTML = `<p class="error">${text(exc.message)}</p>`;
+        setTimeout(() => overlay.remove(), 2500);
+      });
   }
 
   function money(value) {
@@ -145,7 +286,10 @@
     const error = $("login-error");
     error.hidden = true;
     try {
-      const body = JSON.stringify({ email: $("email").value, password: $("password").value });
+      const body = JSON.stringify({
+        email: $("email").value,
+        password: $("password").value,
+      });
       const response = await fetch(`${API}/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -201,14 +345,20 @@
         Money.format(data.receivables.total),
         `${data.receivables.parties} party(ies)`,
       ),
-      kpi("Payables", Money.format(data.payables.total), `${data.payables.parties} party(ies)`),
+      kpi(
+        "Payables",
+        Money.format(data.payables.total),
+        `${data.payables.parties} party(ies)`,
+      ),
       // Owner-only, so it is absent rather than zero for staff -- the
       // API omits the key entirely (docs/21 §6).
       ...(data.partner_capital
         ? [
             kpi(
               "Partner capital",
-              Money.format(Money.sum(data.partner_capital.map((row) => row.balance))),
+              Money.format(
+                Money.sum(data.partner_capital.map((row) => row.balance)),
+              ),
               `${data.partner_capital.length} partner(s)`,
             ),
           ]
@@ -222,13 +372,19 @@
         table(
           [
             { label: "Partner", key: "partner" },
-            { label: "Principal", numeric: true, render: (row) => money(row.balance) },
+            {
+              label: "Principal",
+              numeric: true,
+              render: (row) => money(row.balance),
+            },
           ],
           [
             ...data.partner_capital,
             {
               partner: "Total",
-              balance: Money.sum(data.partner_capital.map((row) => row.balance)),
+              balance: Money.sum(
+                data.partner_capital.map((row) => row.balance),
+              ),
             },
           ],
         ),
@@ -248,7 +404,9 @@
         `<p><span class="pill warn">Low stock</span> ${data.inventory.low_stock_count} product(s) at or under their reorder level.</p>`,
       );
     }
-    const runs = await optional("/inventory/reconciliations?unacknowledged=true");
+    const runs = await optional(
+      "/inventory/reconciliations?unacknowledged=true",
+    );
     const openRuns = rowsOf(runs);
     if (openRuns.length) {
       alerts.push(
@@ -256,7 +414,8 @@
       );
     }
     $("alerts").innerHTML =
-      alerts.join("") || `<p class="muted">Nothing needs attention right now.</p>`;
+      alerts.join("") ||
+      `<p class="muted">Nothing needs attention right now.</p>`;
 
     // Profit is owner-only; a staff account simply gets no trend, which
     // is why this degrades rather than erroring.
@@ -295,16 +454,28 @@
             // without this column can't tell two of them apart
             label: "Brand",
             render: (row) =>
-              row.brand ? text(row.brand) : `<span class="muted">not set</span>`,
+              row.brand
+                ? text(row.brand)
+                : `<span class="muted">not set</span>`,
           },
           { label: "Description", key: "description" },
-          { label: "On hand", numeric: true, render: (row) => text(row.qty_on_hand) },
-          { label: "Avg cost", numeric: true, render: (row) => money(row.avg_cost) },
+          {
+            label: "On hand",
+            numeric: true,
+            render: (row) => text(row.qty_on_hand),
+          },
+          {
+            label: "Avg cost",
+            numeric: true,
+            render: (row) => money(row.avg_cost),
+          },
           { label: "Value", numeric: true, render: (row) => money(row.value) },
           {
             label: "",
             render: (row) =>
-              Money.isNegative(row.qty_on_hand) ? `<span class="pill bad">negative</span>` : "",
+              Money.isNegative(row.qty_on_hand)
+                ? `<span class="pill bad">negative</span>`
+                : "",
           },
         ],
         rows,
@@ -313,6 +484,7 @@
   }
 
   async function loadStock() {
+    slot("dl-stock", "/exports/stock.xlsx", "stock.xlsx");
     const payload = await api("/inventory?limit=200");
     stockRows = rowsOf(payload);
     renderStock($("stock-search").value);
@@ -321,6 +493,12 @@
   // ------------------------------------------------------- purchases
 
   async function loadPurchases() {
+    slot(
+      "dl-purchases",
+      "/exports/purchases.xlsx",
+      "purchases.xlsx",
+      "Download all bills ⭳",
+    );
     const payload = await api("/purchases?limit=50");
     $("purchase-detail").hidden = true;
     $("purchases-table").replaceChildren(
@@ -329,8 +507,16 @@
           { label: "Date", key: "date" },
           { label: "Invoice", key: "invoice_no" },
           { label: "Supplier", key: "supplier" },
-          { label: "Total", numeric: true, render: (row) => money(row.grand_total) },
-          { label: "Paid", numeric: true, render: (row) => money(row.amount_paid) },
+          {
+            label: "Total",
+            numeric: true,
+            render: (row) => money(row.grand_total),
+          },
+          {
+            label: "Paid",
+            numeric: true,
+            render: (row) => money(row.amount_paid),
+          },
           {
             label: "Status",
             render: (row) =>
@@ -339,7 +525,11 @@
           {
             label: "",
             render: (row) =>
-              sheetLink(`/purchases/${row.id}/sheet`, `purchase-${row.invoice_no}.xlsx`),
+              downloadButton(
+                `/purchases/${row.id}/sheet`,
+                `purchase-${row.invoice_no}.xlsx`,
+                "Sheet ⭳",
+              ),
           },
         ],
         rowsOf(payload),
@@ -349,39 +539,68 @@
   }
 
   /* The one genuinely new capability over WhatsApp (docs/21 §3): the
-   * scanned sheet beside the lines that were read out of it. */
+   * scanned sheet beside *our* sheet built from the same data the
+   * workbook downloads from -- so the original and our arithmetic can be
+   * compared line for line, corrections included (docs/28 §2.3). */
   async function loadPurchaseDetail(id) {
-    const detail = await api(`/purchases/${id}`);
+    const [detail, doc] = await Promise.all([
+      api(`/purchases/${id}`),
+      api(`/purchases/${id}/document`),
+    ]);
     const panel = $("purchase-detail");
-
-    const lines = table(
-      [
-        { label: "#", key: "line_no" },
-        { label: "Code", key: "code" },
-        { label: "Description", key: "description" },
-        { label: "Qty", numeric: true, key: "qty" },
-        { label: "Rate", numeric: true, render: (row) => money(row.rate) },
-        { label: "Total", numeric: true, render: (row) => money(row.line_total) },
-      ],
-      detail.lines || [],
-    );
 
     panel.replaceChildren();
     const head = document.createElement("div");
     head.className = "detail-head";
-    head.innerHTML = `
-      <div>
-        <h2>${text(detail.invoice_no)} · ${text(detail.supplier)}</h2>
-        <p class="muted">${text(detail.date)} · ${money(detail.grand_total)}</p>
-      </div>
-      <button class="link" id="close-detail">Close</button>`;
+    const title = document.createElement("div");
+    title.innerHTML = `
+      <h2>${text(detail.invoice_no)} · ${text(detail.supplier)}</h2>
+      <p class="muted">${text(detail.date)} · ${money(detail.grand_total)}</p>`;
+    head.append(title);
+
+    const actions = document.createElement("div");
+    actions.className = "filters";
+    actions.append(
+      downloadButton(
+        `/purchases/${id}/sheet`,
+        `purchase-${detail.invoice_no}.xlsx`,
+        "Our sheet ⭳",
+      ),
+    );
+    if (detail.scan_url) {
+      const scan = document.createElement("button");
+      scan.className = "link";
+      scan.textContent = "Original scan ⭳";
+      scan.addEventListener("click", async () => {
+        try {
+          const response = await fetch(API + detail.scan_url, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (!response.ok) throw new Error("The scan couldn't be loaded.");
+          const url = URL.createObjectURL(await response.blob());
+          const anchor = document.createElement("a");
+          anchor.href = url;
+          anchor.download = `scan-${detail.invoice_no}`;
+          anchor.click();
+          URL.revokeObjectURL(url);
+        } catch (exc) {
+          banner(exc.message);
+        }
+      });
+      actions.append(scan);
+    }
+    const closer = document.createElement("button");
+    closer.className = "link";
+    closer.id = "close-detail";
+    closer.textContent = "Close";
+    actions.append(closer);
+    head.append(actions);
     panel.append(head);
 
     const beside = document.createElement("div");
     beside.className = "scan-beside";
     const left = document.createElement("div");
-    left.className = "table-scroll";
-    left.append(lines);
+    left.append(documentSheet(doc));
     beside.append(left);
 
     const right = document.createElement("div");
@@ -396,8 +615,12 @@
       img.addEventListener("click", () => img.classList.toggle("zoomed"));
       // the image endpoint needs the bearer token, so it is fetched
       // rather than set as a plain src
-      fetch(API + detail.scan_url, { headers: { Authorization: `Bearer ${token}` } })
-        .then((response) => (response.ok ? response.blob() : Promise.reject(response)))
+      fetch(API + detail.scan_url, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+        .then((response) =>
+          response.ok ? response.blob() : Promise.reject(response),
+        )
         .then((blob) => {
           img.src = URL.createObjectURL(blob);
         })
@@ -420,6 +643,12 @@
   // ----------------------------------------------------------- sales
 
   async function loadSales() {
+    slot(
+      "dl-sales",
+      "/exports/sales.xlsx",
+      "sales.xlsx",
+      "Download all sales ⭳",
+    );
     const payload = await api("/sales?limit=50");
     $("sale-detail").hidden = true;
     $("sales-table").replaceChildren(
@@ -427,8 +656,16 @@
         [
           { label: "Date", render: (row) => text(row.date || row.sale_date) },
           { label: "Customer", key: "customer" },
-          { label: "Total", numeric: true, render: (row) => money(row.grand_total) },
-          { label: "Paid", numeric: true, render: (row) => money(row.amount_paid) },
+          {
+            label: "Total",
+            numeric: true,
+            render: (row) => money(row.grand_total),
+          },
+          {
+            label: "Paid",
+            numeric: true,
+            render: (row) => money(row.amount_paid),
+          },
           {
             label: "Payment",
             render: (row) =>
@@ -439,7 +676,12 @@
           { label: "Status", key: "status" },
           {
             label: "",
-            render: (row) => sheetLink(`/sales/${row.id}/sheet`, `sale-${row.id.slice(0, 8)}.xlsx`),
+            render: (row) =>
+              downloadButton(
+                `/sales/${row.id}/sheet`,
+                `sale-${row.id.slice(0, 8)}.xlsx`,
+                "Sheet ⭳",
+              ),
           },
         ],
         rowsOf(payload),
@@ -451,20 +693,35 @@
   /* Margin per line is the reason to open a sale: what it sold for
    * against what it cost us (docs/21 §3). */
   async function loadSaleDetail(id) {
-    const detail = await api(`/sales/${id}`);
+    const [detail, doc] = await Promise.all([
+      api(`/sales/${id}`),
+      api(`/sales/${id}/document`),
+    ]);
     const panel = $("sale-detail");
     panel.replaceChildren();
 
     const head = document.createElement("div");
     head.className = "detail-head";
-    head.innerHTML = `
-      <div>
-        <h2>${text(detail.customer)}</h2>
-        <p class="muted">${text(detail.date || detail.sale_date)} · ${money(
-          detail.grand_total,
-        )}</p>
-      </div>
-      <button class="link" id="close-sale">Close</button>`;
+    const title = document.createElement("div");
+    title.innerHTML = `
+      <h2>${text(detail.customer)}</h2>
+      <p class="muted">${text(detail.date || detail.sale_date)} · ${money(detail.grand_total)}</p>`;
+    head.append(title);
+    const actions = document.createElement("div");
+    actions.className = "filters";
+    actions.append(
+      downloadButton(
+        `/sales/${id}/sheet`,
+        `sale-${id.slice(0, 8)}.xlsx`,
+        "Sheet ⭳",
+      ),
+    );
+    const closer = document.createElement("button");
+    closer.className = "link";
+    closer.id = "close-sale";
+    closer.textContent = "Close";
+    actions.append(closer);
+    head.append(actions);
     panel.append(head);
 
     const wrap = document.createElement("div");
@@ -476,8 +733,16 @@
           { label: "Code", key: "code" },
           { label: "Qty", numeric: true, key: "qty" },
           { label: "Rate", numeric: true, render: (row) => money(row.rate) },
-          { label: "Cost", numeric: true, render: (row) => money(row.cost || "0") },
-          { label: "Total", numeric: true, render: (row) => money(row.line_total) },
+          {
+            label: "Cost",
+            numeric: true,
+            render: (row) => money(row.cost || "0"),
+          },
+          {
+            label: "Total",
+            numeric: true,
+            render: (row) => money(row.line_total),
+          },
           {
             label: "Margin",
             numeric: true,
@@ -494,6 +759,9 @@
       ),
     );
     panel.append(wrap);
+    // The margin table above answers "was this worth selling"; the sheet
+    // below is the invoice itself, identical to what downloads.
+    panel.append(documentSheet(doc));
     panel.hidden = false;
     $("close-sale").addEventListener("click", () => {
       panel.hidden = true;
@@ -510,7 +778,8 @@
     const needle = $("party-search").value.trim().toLowerCase();
     const rows = partyRows.filter(
       (row) =>
-        (!kind || row.kind === kind) && (!needle || row.name.toLowerCase().includes(needle)),
+        (!kind || row.kind === kind) &&
+        (!needle || row.name.toLowerCase().includes(needle)),
     );
 
     $("parties-table").replaceChildren(
@@ -530,7 +799,10 @@
             numeric: true,
             render: (row) => money(row.outstanding),
           },
-          { label: "Oldest unpaid", render: (row) => text(row.oldest_date || "") },
+          {
+            label: "Oldest unpaid",
+            render: (row) => text(row.oldest_date || ""),
+          },
         ],
         rows,
         { onRowClick: (row) => loadPartyLedger(row) },
@@ -539,6 +811,12 @@
   }
 
   async function loadParties() {
+    slot(
+      "dl-parties",
+      "/exports/parties.xlsx?role=supplier",
+      "suppliers.xlsx",
+      "Suppliers ⭳",
+    );
     $("party-detail").hidden = true;
     partyRows = rowsOf(await api("/parties"));
     renderParties();
@@ -552,12 +830,26 @@
     const head = document.createElement("div");
     head.className = "detail-head";
     const owes = party.kind === "supplier" ? "owed to them" : "owed by them";
-    head.innerHTML = `
-      <div>
-        <h2>${text(detail.name)}</h2>
-        <p class="muted">${text(detail.kind)} · ${money(detail.balance)} ${owes}</p>
-      </div>
-      <button class="link" id="close-party">Close</button>`;
+    const title = document.createElement("div");
+    title.innerHTML = `
+      <h2>${text(detail.name)}</h2>
+      <p class="muted">${text(detail.kind)} · ${money(detail.balance)} ${owes}</p>`;
+    head.append(title);
+    const actions = document.createElement("div");
+    actions.className = "filters";
+    actions.append(
+      downloadButton(
+        `/exports/statement.xlsx?kind=${party.kind}&party_id=${party.id}`,
+        `statement-${party.name.replace(/\W+/g, "-")}.xlsx`,
+        "Statement ⭳",
+      ),
+    );
+    const closer = document.createElement("button");
+    closer.className = "link";
+    closer.id = "close-party";
+    closer.textContent = "Close";
+    actions.append(closer);
+    head.append(actions);
     panel.append(head);
 
     const wrap = document.createElement("div");
@@ -576,9 +868,14 @@
           {
             label: "Settled",
             numeric: true,
-            render: (row) => (Money.isZero(row.credit) ? "" : money(row.credit)),
+            render: (row) =>
+              Money.isZero(row.credit) ? "" : money(row.credit),
           },
-          { label: "Balance", numeric: true, render: (row) => money(row.balance) },
+          {
+            label: "Balance",
+            numeric: true,
+            render: (row) => money(row.balance),
+          },
         ],
         detail.data,
       ),
@@ -602,8 +899,12 @@
       (row) =>
         (!account || row.account === account) &&
         (!needle ||
-          String(row.notes || "").toLowerCase().includes(needle) ||
-          String(row.type || "").toLowerCase().includes(needle)),
+          String(row.notes || "")
+            .toLowerCase()
+            .includes(needle) ||
+          String(row.type || "")
+            .toLowerCase()
+            .includes(needle)),
     );
 
     // A reversal and the entry it reversed both stay in the list --
@@ -618,8 +919,14 @@
     );
     const undone = rows.length - counted.length;
     $("ledger-totals").innerHTML = [
-      kpi("Money in", Money.format(inflow), `${counted.length} entries counted`),
-      kpi("Money out", Money.format(outflow), "for this filter", { negative: true }),
+      kpi(
+        "Money in",
+        Money.format(inflow),
+        `${counted.length} entries counted`,
+      ),
+      kpi("Money out", Money.format(outflow), "for this filter", {
+        negative: true,
+      }),
       ...(undone
         ? [kpi("Cancelled", String(undone), "reversed entries, not counted")]
         : []),
@@ -631,10 +938,18 @@
           { label: "Date", key: "date" },
           { label: "Account", key: "account" },
           { label: "Type", key: "type" },
-          { label: "Amount", numeric: true, render: (row) => money(row.amount) },
+          {
+            label: "Amount",
+            numeric: true,
+            render: (row) => money(row.amount),
+          },
           // the running balance is per account, so it is meaningless
           // beside a row from the other one -- hence the filter above
-          { label: "Balance", numeric: true, render: (row) => money(row.resulting_balance) },
+          {
+            label: "Balance",
+            numeric: true,
+            render: (row) => money(row.resulting_balance),
+          },
           {
             label: "Notes",
             render: (row) =>
@@ -643,11 +958,11 @@
                 : text(row.notes || ""),
           },
           {
+            // A settlement has a receipt; an expense or a capital
+            // contribution has no second document to open.
             label: "",
             render: (row) =>
-              row.reference
-                ? sheetLink(`/payments/${row.reference}/sheet`, `payment-${row.reference}.xlsx`)
-                : "",
+              row.reference ? receiptButton(row.reference) : "",
           },
         ],
         rows,
@@ -655,14 +970,43 @@
     );
   }
 
+  function receiptButton(reference) {
+    const button = document.createElement("button");
+    button.className = "link";
+    button.textContent = "Receipt";
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      showDocument(
+        `/payments/${reference}/document`,
+        `/payments/${reference}/sheet`,
+        `payment-${reference}.xlsx`,
+      );
+    });
+    return button;
+  }
+
   async function loadLedger() {
+    // The cashbook, not the party ledger: the partners call both
+    // "ledger", and this tab is the one about money that moved.
+    slot(
+      "dl-ledger",
+      "/exports/cashbook.xlsx",
+      "cashbook.xlsx",
+      "Download cashbook ⭳",
+    );
     const [cash, bank] = await Promise.all([
       optional("/ledgers/cash?limit=200"),
       optional("/ledgers/bank?limit=200"),
     ]);
     ledgerRows = [
-      ...((cash && cash.entries) || []).map((row) => ({ ...row, account: "Cash" })),
-      ...((bank && bank.entries) || []).map((row) => ({ ...row, account: "Bank" })),
+      ...((cash && cash.entries) || []).map((row) => ({
+        ...row,
+        account: "Cash",
+      })),
+      ...((bank && bank.entries) || []).map((row) => ({
+        ...row,
+        account: "Bank",
+      })),
     ].sort((a, b) => String(b.date).localeCompare(String(a.date)));
     renderLedger();
   }
@@ -670,18 +1014,50 @@
   // ----------------------------------------------------------- money
 
   async function loadMoney() {
+    slot(
+      "dl-receivables",
+      "/exports/parties.xlsx?role=customer",
+      "customers.xlsx",
+      "All customers ⭳",
+    );
+    slot(
+      "dl-payables",
+      "/exports/parties.xlsx?role=supplier",
+      "suppliers.xlsx",
+      "All suppliers ⭳",
+    );
     const [receivables, payables] = await Promise.all([
       optional("/receivables"),
       optional("/payables"),
     ]);
 
-    const partyColumns = [
+    // The statement is the answer to the question this page raises --
+    // "why is that the number?" -- so it belongs on the row, not three
+    // clicks away on another tab.
+    const partyColumns = (kind) => [
       { label: "Name", key: "name" },
-      { label: "Outstanding", numeric: true, render: (row) => money(row.outstanding) },
+      {
+        label: "Outstanding",
+        numeric: true,
+        render: (row) => money(row.outstanding),
+      },
       { label: "Oldest", render: (row) => text(row.oldest_date || "") },
+      {
+        label: "",
+        render: (row) =>
+          downloadButton(
+            `/exports/statement.xlsx?kind=${kind}&party_id=${row.id}`,
+            `statement-${String(row.name).replace(/\W+/g, "-")}.xlsx`,
+            "Statement ⭳",
+          ),
+      },
     ];
-    $("receivables").replaceChildren(table(partyColumns, rowsOf(receivables)));
-    $("payables").replaceChildren(table(partyColumns, rowsOf(payables)));
+    $("receivables").replaceChildren(
+      table(partyColumns("customer"), rowsOf(receivables)),
+    );
+    $("payables").replaceChildren(
+      table(partyColumns("supplier"), rowsOf(payables)),
+    );
   }
 
   // ----------------------------------------------------------- admin
@@ -697,7 +1073,10 @@
       container.append(
         table(
           [
-            { label: "Started", render: (row) => text(row.started_at || "").slice(0, 16) },
+            {
+              label: "Started",
+              render: (row) => text(row.started_at || "").slice(0, 16),
+            },
             { label: "Kind", key: "kind" },
             {
               label: "Result",
@@ -712,15 +1091,20 @@
               label: "",
               render: (row) => {
                 if (row.mismatch_count === 0) return "";
-                if (row.acknowledged_at) return `<span class="muted">acknowledged</span>`;
+                if (row.acknowledged_at)
+                  return `<span class="muted">acknowledged</span>`;
                 const button = document.createElement("button");
                 button.className = "link";
                 button.textContent = "Acknowledge";
                 button.addEventListener("click", async (event) => {
                   event.stopPropagation();
                   try {
-                    await api(`/inventory/reconcile/${row.id}/acknowledge`, { method: "POST" });
-                    banner("Recorded that you've seen it. The figures are unchanged.");
+                    await api(`/inventory/reconcile/${row.id}/acknowledge`, {
+                      method: "POST",
+                    });
+                    banner(
+                      "Recorded that you've seen it. The figures are unchanged.",
+                    );
                     await loadAdmin();
                   } catch (exc) {
                     banner(exc.message);
@@ -757,7 +1141,15 @@
     "total",
   ]);
 
-  const IDENTIFYING = ["code", "name", "invoice_no", "reference", "amount", "via", "description"];
+  const IDENTIFYING = [
+    "code",
+    "name",
+    "invoice_no",
+    "reference",
+    "amount",
+    "via",
+    "description",
+  ];
 
   function fieldValue(key, value) {
     if (value === undefined || value === null || value === "") return "—";
@@ -792,16 +1184,22 @@
     };
     const keys = [
       ...IDENTIFYING.filter(meaningful),
-      ...Object.keys(state).filter((key) => !IDENTIFYING.includes(key) && meaningful(key)),
+      ...Object.keys(state).filter(
+        (key) => !IDENTIFYING.includes(key) && meaningful(key),
+      ),
     ].slice(0, 3);
     if (!keys.length) return `<span class="muted">no detail recorded</span>`;
-    return keys.map((key) => `<b>${fieldValue(key, state[key])}</b>`).join(" · ");
+    return keys
+      .map((key) => `<b>${fieldValue(key, state[key])}</b>`)
+      .join(" · ");
   }
 
   function detailPanel(entry) {
     const before = entry.before_state || {};
     const after = entry.after_state || {};
-    const fields = [...new Set([...Object.keys(before), ...Object.keys(after)])];
+    const fields = [
+      ...new Set([...Object.keys(before), ...Object.keys(after)]),
+    ];
     if (!fields.length) {
       return `<p class="muted">Nothing was recorded beyond the action itself.</p>`;
     }
@@ -848,7 +1246,10 @@
 
     const built = table(
       [
-        { label: "When", render: (row) => text(row.created_at).slice(0, 16).replace("T", " ") },
+        {
+          label: "When",
+          render: (row) => text(row.created_at).slice(0, 16).replace("T", " "),
+        },
         { label: "Action", key: "action" },
         { label: "What", render: summarise },
         { label: "By", render: (row) => text(row.actor || "") },
@@ -926,7 +1327,9 @@
 
   $("login-form").addEventListener("submit", signIn);
   $("signout").addEventListener("click", signOut);
-  $("stock-search").addEventListener("input", (event) => renderStock(event.target.value));
+  $("stock-search").addEventListener("input", (event) =>
+    renderStock(event.target.value),
+  );
   $("party-kind").addEventListener("change", renderParties);
   $("party-search").addEventListener("input", renderParties);
   $("ledger-account").addEventListener("change", renderLedger);

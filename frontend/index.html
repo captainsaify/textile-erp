@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Textile ERP</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=9" />
+    <link rel="stylesheet" href="/assets/styles.css?v=10" />
     <link
       rel="icon"
       href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>"
@@ -16,9 +16,17 @@
     <main id="login" class="login">
       <form id="login-form" class="card login-card">
         <h1>Textile ERP</h1>
-        <p class="muted">Read-only dashboard. Everything that changes data stays on WhatsApp.</p>
+        <p class="muted">
+          Read-only dashboard. Everything that changes data stays on WhatsApp.
+        </p>
         <label for="email">Email</label>
-        <input id="email" name="email" type="email" autocomplete="username" required />
+        <input
+          id="email"
+          name="email"
+          type="email"
+          autocomplete="username"
+          required
+        />
         <label for="password">Password</label>
         <input
           id="password"
@@ -77,7 +85,9 @@
             </section>
             <section class="card" id="capital-card" hidden>
               <h2>Partner capital</h2>
-              <p class="muted">What the partners have put in, less anything drawn out.</p>
+              <p class="muted">
+                What the partners have put in, less anything drawn out.
+              </p>
               <div id="capital" class="table-scroll"></div>
             </section>
           </div>
@@ -87,7 +97,14 @@
           <div class="card">
             <div class="card-head">
               <h2>Stock on hand</h2>
-              <input id="stock-search" type="search" placeholder="Search code or description" />
+              <div class="filters">
+                <input
+                  id="stock-search"
+                  type="search"
+                  placeholder="Search code or description"
+                />
+                <span id="dl-stock"></span>
+              </div>
             </div>
             <div id="stock-table" class="table-scroll"></div>
           </div>
@@ -95,7 +112,10 @@
 
         <section id="page-purchases" class="page" hidden>
           <div class="card">
-            <h2>Purchases</h2>
+            <div class="card-head">
+              <h2>Purchases</h2>
+              <span id="dl-purchases"></span>
+            </div>
             <div id="purchases-table" class="table-scroll"></div>
           </div>
           <div id="purchase-detail" class="card" hidden></div>
@@ -103,7 +123,10 @@
 
         <section id="page-sales" class="page" hidden>
           <div class="card">
-            <h2>Sales</h2>
+            <div class="card-head">
+              <h2>Sales</h2>
+              <span id="dl-sales"></span>
+            </div>
             <div id="sales-table" class="table-scroll"></div>
           </div>
           <div id="sale-detail" class="card" hidden></div>
@@ -119,10 +142,17 @@
                   <option value="supplier">Suppliers</option>
                   <option value="customer">Customers</option>
                 </select>
-                <input id="party-search" type="search" placeholder="Search name" />
+                <input
+                  id="party-search"
+                  type="search"
+                  placeholder="Search name"
+                />
+                <span id="dl-parties"></span>
               </div>
             </div>
-            <p class="muted">Click a party to see every bill and payment between you.</p>
+            <p class="muted">
+              Click a party to see every bill and payment between you.
+            </p>
             <div id="parties-table" class="table-scroll"></div>
           </div>
           <div id="party-detail" class="card" hidden></div>
@@ -138,7 +168,12 @@
                   <option value="Cash">Cash</option>
                   <option value="Bank">Bank</option>
                 </select>
-                <input id="ledger-search" type="search" placeholder="Search notes or type" />
+                <input
+                  id="ledger-search"
+                  type="search"
+                  placeholder="Search notes or type"
+                />
+                <span id="dl-ledger"></span>
               </div>
             </div>
             <div id="ledger-totals" class="kpi-row"></div>
@@ -149,11 +184,17 @@
         <section id="page-money" class="page" hidden>
           <div class="grid-2">
             <div class="card">
-              <h2>Receivables</h2>
+              <div class="card-head">
+                <h2>Receivables</h2>
+                <span id="dl-receivables"></span>
+              </div>
               <div id="receivables" class="table-scroll"></div>
             </div>
             <div class="card">
-              <h2>Payables</h2>
+              <div class="card-head">
+                <h2>Payables</h2>
+                <span id="dl-payables"></span>
+              </div>
               <div id="payables" class="table-scroll"></div>
             </div>
           </div>
@@ -163,8 +204,8 @@
           <div class="card">
             <h2>Nightly reconciliation</h2>
             <p class="muted">
-              A mismatch is reported, never repaired — repairing it would destroy the evidence that
-              something upstream is wrong.
+              A mismatch is reported, never repaired — repairing it would
+              destroy the evidence that something upstream is wrong.
             </p>
             <div id="reconciliations"></div>
           </div>
@@ -172,8 +213,14 @@
             <div class="card-head">
               <h2>Recent activity</h2>
               <div class="filters">
-                <select id="audit-action"><option value="">All actions</option></select>
-                <input id="audit-search" type="search" placeholder="Search details" />
+                <select id="audit-action">
+                  <option value="">All actions</option>
+                </select>
+                <input
+                  id="audit-search"
+                  type="search"
+                  placeholder="Search details"
+                />
               </div>
             </div>
             <p class="muted">Click a row to see exactly what changed.</p>
@@ -185,8 +232,8 @@
       <p id="banner" class="banner" role="status" hidden></p>
     </div>
 
-    <script src="/assets/money.js?v=9"></script>
-    <script src="/assets/charts.js?v=9"></script>
-    <script src="/assets/app.js?v=9"></script>
+    <script src="/assets/money.js?v=10"></script>
+    <script src="/assets/charts.js?v=10"></script>
+    <script src="/assets/app.js?v=10"></script>
   </body>
 </html>

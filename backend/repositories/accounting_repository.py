@@ -107,6 +107,32 @@ class LedgerRepository:
         rows = (await self._session.execute(stmt)).scalars()
         return cast("list[CashLedger | BankLedger]", list(rows))
 
+    async def entries_between(
+        self,
+        org_id: uuid.UUID,
+        ledger: str,
+        start: datetime.date,
+        end: datetime.date,
+    ) -> list[CashLedger | BankLedger]:
+        """A period's rows, oldest first -- the order a cashbook is read.
+
+        `recent_entries` is newest-first and capped, which is right for a
+        dashboard panel and wrong for an export: a cashbook whose rows
+        run backwards has a running balance column that means nothing.
+        """
+        model = _LEDGERS[ledger]
+        stmt = (
+            select(model)
+            .where(
+                model.org_id == org_id,
+                model.entry_date >= start,
+                model.entry_date <= end,
+            )
+            .order_by(model.entry_date, model.created_at, model.id)
+        )
+        rows = (await self._session.execute(stmt)).scalars()
+        return cast("list[CashLedger | BankLedger]", list(rows))
+
     async def append(
         self,
         org_id: uuid.UUID,

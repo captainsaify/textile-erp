@@ -43,18 +43,26 @@ framework's re-render performance.
 | **Login** | Email + password → JWT ([10_API.md §3](10_API.md#3-authentication)) |
 | **Overview** | KPI row (incl. partner capital *(owner)*), profit trend, sales vs purchases, open alerts, capital by partner *(owner)* |
 | **Stock** | Full product table, low/negative emphasis, per-product movement history |
-| **Purchases** | List → detail with line items **and the original scan** |
-| **Sales** | List → detail with line items and margin per line |
-| **Parties** | Every supplier and customer — including the settled-up ones — → detail with their whole statement and running balance |
-| **Ledger** | Cash & bank entries, filterable by account, with money in/out for the filter |
-| **Money** | Receivables/payables aging |
+| **Purchases** | List → detail with **our sheet beside the original scan**, both downloadable |
+| **Sales** | List → detail with margin per line and the invoice as a sheet |
+| **Parties** | Every supplier and customer — including the settled-up ones — → detail with their whole statement and running balance, downloadable |
+| **Ledger** | Cash & bank entries, filterable by account, with money in/out for the filter; a receipt on every settlement row |
+| **Money** | Receivables/payables aging, with each party's statement on the row |
 | **Reports** | P&L for a period, Excel export request + download *(owner for P&L)* |
 | **Admin** | Audit log, nightly reconciliation status, settings *(owner)* |
 
 The **purchase detail page is the one genuinely new capability** — the
-scanned sheet rendered beside the extracted lines. That comparison is
+scanned sheet rendered beside *our* sheet, built from the same data the
+download button produces, corrections and all. That comparison is
 impossible on WhatsApp and is exactly what builds trust in the OCR.
-`purchase_headers.ocr_source_attachment_id` already links them.
+`purchase_headers.ocr_source_attachment_id` already links them. See
+[`28_SheetsEverywhere.md`](28_SheetsEverywhere.md) §2.3.
+
+**Every page has a download.** Each one creates the same `report_jobs`
+row the WhatsApp `export` command creates and runs the same builder,
+synchronously — a browser asking for a fifteen-row cashbook should not
+have to enqueue, poll and follow a link
+([28 §2.4](28_SheetsEverywhere.md)).
 
 ## 4. What to visualise, and as what {#forms}
 

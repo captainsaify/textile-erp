@@ -14,7 +14,7 @@ from fastapi import FastAPI
 
 from backend.api import bridge, webhooks
 from backend.api.errors import register_error_handlers
-from backend.api.routers import auth, catalog, reconciliation, reporting
+from backend.api.routers import auth, catalog, exports, reconciliation, reporting
 from backend.core.db import check_db_connection
 from backend.core.lifecycle import release_all
 from backend.core.logging import configure_logging, get_logger
@@ -49,6 +49,7 @@ def create_app() -> FastAPI:
     app.include_router(reporting.router)
     app.include_router(catalog.router)
     app.include_router(reconciliation.router)
+    app.include_router(exports.router)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:

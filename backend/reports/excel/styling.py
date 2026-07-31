@@ -16,6 +16,11 @@ from openpyxl.worksheet.worksheet import Worksheet
 HEADER_FILL = PatternFill("solid", fgColor="D9D9D9")
 HEADER_FONT = Font(bold=True)
 TOTAL_FONT = Font(bold=True)
+#: A changed document has to look changed. Amber fill, dark red bold
+#: text -- the one thing on the sheet that isn't grey, so it is seen
+#: before the numbers it is warning about (docs/28 §2.1).
+WARN_FILL = PatternFill("solid", fgColor="FFF2CC")
+WARN_FONT = Font(bold=True, color="9C0006")
 THIN = Side(style="thin", color="808080")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 

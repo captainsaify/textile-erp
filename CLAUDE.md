@@ -200,6 +200,7 @@ trigger, threshold, and message copy in the linked doc.
 | [docs/23_ReceiptCorrections.md](docs/23_ReceiptCorrections.md) | When fewer bales arrive than were billed |
 | [docs/26_RateChanges.md](docs/26_RateChanges.md) | Correcting the price on a confirmed bill |
 | [docs/27_Documents.md](docs/27_Documents.md) | A sheet for every purchase, sale and payment, rebuilt on request |
+| [docs/28_SheetsEverywhere.md](docs/28_SheetsEverywhere.md) | Making a correction visible on the sheet, and a download on every page |
 
 ## Coding Standards (summary — full detail in [`docs/17_CodingStandards.md`](docs/17_CodingStandards.md))
 

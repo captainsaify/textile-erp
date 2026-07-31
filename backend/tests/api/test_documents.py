@@ -179,6 +179,188 @@ async def test_a_correction_is_printed_on_the_document_with_who_and_when(
     assert "100 → 107" in change
 
 
+async def _line_id(
+    session_factory: async_sessionmaker[AsyncSession], header_id: uuid.UUID
+) -> uuid.UUID:
+    import sqlalchemy as sa
+
+    async with session_factory() as session:
+        return (
+            await session.execute(
+                sa.select(PurchaseLine.id).where(PurchaseLine.purchase_header_id == header_id)
+            )
+        ).scalar_one()
+
+
+async def _correct_receipt(
+    session_factory: async_sessionmaker[AsyncSession],
+    actor: User,
+    line_id: uuid.UUID,
+    *,
+    code: str,
+    before: str,
+    after: str,
+) -> None:
+    from backend.services.audit_service import AuditService
+
+    async with session_factory() as session, session.begin():
+        await AuditService(session).record(
+            ORG,
+            actor.id,
+            action="purchase.receipt_corrected",
+            entity_type="purchase_lines",
+            entity_id=line_id,
+            before_state={"code": code, "pieces": before, "qty": str(D(before) * 80)},
+            after_state={"code": code, "pieces": after, "qty": str(D(after) * 80)},
+        )
+
+
+def _note_column(path: str) -> list[str]:
+    """The NOTE cells of the data rows, in order."""
+    sheet = load_workbook(path).worksheets[0]
+    header_row = 3 if str(sheet.cell(row=2, column=1).value or "").startswith("⚠") else 2
+    notes: list[str] = []
+    for index in range(header_row + 1, sheet.max_row + 1):
+        if str(sheet.cell(row=index, column=1).value) == "TOTAL":
+            break
+        notes.append(str(sheet.cell(row=index, column=10).value or ""))
+    return notes
+
+
+async def test_a_corrected_row_says_so_on_the_row_itself(
+    ctx: RequestContext,
+    stocked: dict[str, uuid.UUID],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The failure this exists to prevent: nineteen corrections recorded
+    against bill 003, every one of them on the sheet, and the partner
+    reading it concluded nothing had been recorded -- because the table
+    showed the corrected quantity looking exactly like a billed one and
+    the evidence sat nine rows below the TOTAL (docs/28 §1.1)."""
+    header_id = await _bill(session_factory, ctx.user, stocked["TRP"])
+    await _correct_receipt(
+        session_factory,
+        ctx.user,
+        await _line_id(session_factory, header_id),
+        code="TRP",
+        before="10",
+        after="12",
+    )
+
+    async with session_factory() as session:
+        document = await DocumentService(session).purchase(ORG, header_id)
+
+    assert _note_column(str(document.path))[0].startswith("Received 10 → 12 bales")
+
+    # and the warning is above the table, not below the total
+    sheet = load_workbook(str(document.path)).worksheets[0]
+    banner = str(sheet.cell(row=2, column=1).value)
+    assert banner.startswith("⚠ MODIFIED")
+    assert "1 change(s)" in banner
+    assert ctx.user.full_name in banner
+
+
+async def test_a_twice_corrected_row_keeps_both_corrections(
+    ctx: RequestContext,
+    stocked: dict[str, uuid.UUID],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """ANG on bill 003 went 1360 → 800 → 1040. The last correction is
+    not the whole story when someone corrected a correction."""
+    header_id = await _bill(session_factory, ctx.user, stocked["TRP"])
+    line_id = await _line_id(session_factory, header_id)
+    await _correct_receipt(session_factory, ctx.user, line_id, code="TRP", before="17", after="10")
+    await _correct_receipt(session_factory, ctx.user, line_id, code="TRP", before="10", after="13")
+
+    async with session_factory() as session:
+        document = await DocumentService(session).purchase(ORG, header_id)
+
+    note = _note_column(str(document.path))[0]
+    assert note.index("17 → 10") < note.index("10 → 13")
+
+
+async def test_an_untouched_bill_carries_no_banner_and_no_notes(
+    ctx: RequestContext,
+    stocked: dict[str, uuid.UUID],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A warning on every document trains everyone to ignore the row."""
+    header_id = await _bill(session_factory, ctx.user, stocked["TRP"])
+
+    async with session_factory() as session:
+        document = await DocumentService(session).purchase(ORG, header_id)
+
+    sheet = load_workbook(str(document.path)).worksheets[0]
+    assert sheet.cell(row=2, column=1).value == "S.NO"  # headers, not a banner
+    assert _note_column(str(document.path)) == [""]
+
+
+async def test_a_rate_correction_marks_every_code_it_named(
+    ctx: RequestContext,
+    stocked: dict[str, uuid.UUID],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A rate correction is recorded once against the header but is
+    visible on every line it repriced -- and those are exactly the lines
+    whose AMOUNT stopped matching the photographed sheet."""
+    import sqlalchemy as sa
+
+    from backend.services.audit_service import AuditService
+
+    header_id = await _bill(session_factory, ctx.user, stocked["TRP"])
+    async with session_factory() as session:
+        code = (
+            await session.execute(sa.select(Product.code).where(Product.id == stocked["TRP"]))
+        ).scalar_one()
+    async with session_factory() as session, session.begin():
+        await AuditService(session).record(
+            ORG,
+            ctx.user.id,
+            action="purchase.rate_corrected",
+            entity_type="purchase_headers",
+            entity_id=header_id,
+            before_state={"rate": "150.0000", "codes": f"{code}, SOMETHINGELSE"},
+            after_state={"rate": "107", "codes": f"{code}, SOMETHINGELSE"},
+        )
+
+    async with session_factory() as session:
+        document = await DocumentService(session).purchase(ORG, header_id)
+
+    assert _note_column(str(document.path))[0].startswith("Rate 150 → 107")
+
+
+async def test_the_web_view_and_the_workbook_are_one_build(
+    ctx: RequestContext,
+    stocked: dict[str, uuid.UUID],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The dashboard draws the sheet and the button beside it downloads
+    the sheet. Deriving those separately is how two versions of one bill
+    end up in circulation (docs/28 §2.2)."""
+    header_id = await _bill(session_factory, ctx.user, stocked["TRP"])
+    await _correct_receipt(
+        session_factory,
+        ctx.user,
+        await _line_id(session_factory, header_id),
+        code="TRP",
+        before="10",
+        after="12",
+    )
+
+    async with session_factory() as session:
+        service = DocumentService(session)
+        view = await service.purchase_view(ORG, header_id)
+        document = await service.purchase(ORG, header_id)
+
+    sheet = load_workbook(str(document.path)).worksheets[0]
+    assert view["columns"] == [str(cell.value) for cell in sheet[3]]
+    assert view["banner"] == str(sheet.cell(row=2, column=1).value)
+    assert view["rows"][0]["changed"] is True
+    assert view["rows"][0]["cells"][9] == _note_column(str(document.path))[0]
+    assert view["rows"][0]["cells"][3] == str(sheet.cell(row=4, column=4).value)
+    assert view["history"]
+
+
 async def test_a_reversed_bill_says_so(
     ctx: RequestContext,
     stocked: dict[str, uuid.UUID],

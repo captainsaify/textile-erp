@@ -39,6 +39,8 @@ from openpyxl.worksheet.worksheet import Worksheet
 from backend.reports.excel.styling import (
     MONEY_FORMAT,
     QTY_FORMAT,
+    WARN_FILL,
+    WARN_FONT,
     autosize,
     write_header,
     write_row,
@@ -47,6 +49,11 @@ from backend.reports.excel.styling import (
 ZERO = decimal.Decimal("0")
 
 #: (header, source attribute). Order *is* the sheet's column order.
+#:
+#: NOTE is appended rather than woven in: the nine columns before it are
+#: the layout the partners have read for years, and a tenth on the end
+#: is additive. It is blank on every row of an uncorrected bill, so such
+#: a sheet still reads exactly as it always did (docs/28 §2.1).
 COLUMNS: list[tuple[str, str]] = [
     ("S.NO", "serial"),
     ("QTY", "pieces"),
@@ -57,6 +64,7 @@ COLUMNS: list[tuple[str, str]] = [
     ("T.KG", "total_weight"),
     ("RATE", "rate"),
     ("AMOUNT", "amount"),
+    ("NOTE", "note"),
 ]
 
 #: 1-indexed columns carrying a quantity, shown to 3dp.
@@ -86,6 +94,12 @@ class PurchaseSheetRow:
     total_weight: decimal.Decimal | None
     rate: decimal.Decimal | None = None
     amount: decimal.Decimal | None = None
+    #: What changed on *this* row since the bill was confirmed, e.g.
+    #: "Received 800.000 → 960.000 (30-07)". Blank on untouched rows.
+    #: Without it a corrected quantity sits in the table looking exactly
+    #: like a billed one, and the reader has no reason to scroll to the
+    #: CHANGES block that would have told them otherwise.
+    note: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -104,6 +118,10 @@ class PurchaseBill:
     #: corrected is worse than no sheet: two copies in circulation and
     #: nothing on either saying which is current.
     history: list[str] = dataclasses.field(default_factory=list)
+    #: The one-line warning printed above the column headers when this
+    #: bill has been changed. A bill is read top-down and stops at the
+    #: TOTAL, so a notice that lives below it is not a notice.
+    banner: str = ""
 
     def caption(self) -> str:
         date = self.invoice_date.strftime("%d-%m-%Y") if self.invoice_date else "date not recorded"
@@ -150,20 +168,39 @@ def _write_bill(sheet: Worksheet, bill: PurchaseBill) -> None:
     # The bill's identity sits above its table: with one tab per invoice,
     # a truncated tab name alone can't tell two of them apart.
     write_row(sheet, 1, [bill.caption(), *[""] * (len(COLUMNS) - 1)], bold=True)
-    write_header(sheet, headers, row=2)
+
+    # A bill that was changed says so before the reader reaches a single
+    # number. Nineteen corrections printed below the TOTAL were read, in
+    # practice, as no corrections at all (docs/28 §1.1).
+    header_row = 2
+    if bill.banner:
+        write_row(sheet, 2, [bill.banner, *[""] * (len(COLUMNS) - 1)])
+        for index in range(1, len(COLUMNS) + 1):
+            cell = sheet.cell(row=2, column=index)
+            cell.fill = WARN_FILL
+            cell.font = WARN_FONT
+        header_row = 3
+
+    write_header(sheet, headers, row=header_row)
 
     formats: dict[int, str] = {index: QTY_FORMAT for index in NUMERIC_COLUMNS}
     formats.update({index: MONEY_FORMAT for index in MONEY_COLUMNS})
 
-    for offset, row in enumerate(bill.rows, start=3):
+    first_data_row = header_row + 1
+    for offset, row in enumerate(bill.rows, start=first_data_row):
         write_row(
             sheet,
             offset,
             [_cell_value(row, attribute) for _, attribute in COLUMNS],
             formats=formats,
         )
+        # Tinting the whole row, not just its note: at 52 lines the eye
+        # finds a band of colour and would never find one filled cell.
+        if row.note:
+            for index in range(1, len(COLUMNS) + 1):
+                sheet.cell(row=offset, column=index).fill = WARN_FILL
 
-    total_row = len(bill.rows) + 3
+    total_row = len(bill.rows) + first_data_row
     totals: list[Any] = [""] * len(COLUMNS)
     totals[0] = "TOTAL"
     for index in TOTALLED_COLUMNS:
@@ -183,7 +220,7 @@ def _write_bill(sheet: Worksheet, bill: PurchaseBill) -> None:
             write_row(sheet, cursor, [entry, *[""] * (len(COLUMNS) - 1)])
 
     autosize(sheet, headers)
-    sheet.freeze_panes = "A3"
+    sheet.freeze_panes = f"A{first_data_row}"
 
 
 def _cell_value(row: PurchaseSheetRow, attribute: str) -> Any:

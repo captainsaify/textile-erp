@@ -285,6 +285,9 @@ def test_purchase_sheet_uses_the_partners_column_order() -> None:
         # a purchase sheet is a bill, so it carries what was paid
         "RATE",
         "AMOUNT",
+        # appended, never woven in: the nine before it are the layout
+        # the partners already read (docs/28 §2.1)
+        "NOTE",
     ]
 
 
@@ -331,6 +334,7 @@ def test_purchase_sheet_writes_headers_rows_and_a_totals_row() -> None:
         "T.KG",
         "RATE",
         "AMOUNT",
+        "NOTE",
     ]
     assert sheet.cell(row=3, column=4).value == "35A"
     assert sheet.cell(row=3, column=8).value == 115
