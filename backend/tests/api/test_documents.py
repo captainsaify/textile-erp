@@ -361,6 +361,52 @@ async def test_the_web_view_and_the_workbook_are_one_build(
     assert view["history"]
 
 
+async def test_the_summary_export_carries_the_same_corrections(
+    ctx: RequestContext,
+    stocked: dict[str, uuid.UUID],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The bug this pins: "all purchases" and the per-bill download were
+    two different builders, and only one of them knew about corrections.
+    The same bill said MODIFIED in one file and nothing at all in the
+    other -- WhatsApp's `export` and the dashboard's "download all bills"
+    both went through the ignorant one (docs/28 §3)."""
+    from backend.services.report_service import ReportService
+
+    header_id = await _bill(session_factory, ctx.user, stocked["TRP"])
+    await _correct_receipt(
+        session_factory,
+        ctx.user,
+        await _line_id(session_factory, header_id),
+        code="TRP",
+        before="10",
+        after="12",
+    )
+
+    async with session_factory() as session:
+        single = await DocumentService(session).purchase(ORG, header_id)
+        job = await ReportService(session).enqueue(
+            ctx.user,
+            report_type="purchases",
+            start=datetime.date(2026, 1, 1),
+            end=datetime.date(2026, 12, 31),
+        )
+        job_id = job.id
+        await session.commit()
+        result = await ReportService(session).generate(job_id)
+
+    assert result.status == "ready" and result.file_path is not None
+    combined = load_workbook(result.file_path).worksheets[0]
+
+    assert str(combined.cell(row=2, column=1).value).startswith("⚠ MODIFIED")
+    assert [cell.value for cell in combined[3]] == [
+        cell.value for cell in load_workbook(str(single.path)).worksheets[0][3]
+    ]
+    assert str(combined.cell(row=4, column=10).value).startswith("Received 10 → 12 bales")
+    # and the arithmetic is the same arithmetic, not a second derivation
+    assert combined.cell(row=4, column=9).value == 8000
+
+
 async def test_a_reversed_bill_says_so(
     ctx: RequestContext,
     stocked: dict[str, uuid.UUID],

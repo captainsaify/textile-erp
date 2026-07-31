@@ -221,7 +221,54 @@ Where the buttons go:
 
 ---
 
-## 3. What is deliberately not built
+## 3. There was a second builder
+
+The banner and the `NOTE` column shipped, and bill 005 downloaded from
+the *dashboard row* looked right — MODIFIED at the top, five tinted rows,
+`Received 10 → 9 bales (800 → 720 KG) · 30-07`. The same bill inside
+**"download all bills"**, and the same bill sent by WhatsApp's `export →
+one invoice`, said nothing at all.
+
+Because there were two purchase-sheet builders:
+
+| Path | Went through | Knew about corrections |
+|---|---|---|
+| WhatsApp confirmation attachment | `DocumentService` | yes |
+| WhatsApp `sheet` | `DocumentService` | yes |
+| Dashboard, one bill | `DocumentService` | yes |
+| **WhatsApp `export` → one invoice** | `ReportService._build_purchases` | **no** |
+| **WhatsApp `export` → purchases** | `ReportService._build_purchases` | **no** |
+| **Dashboard "download all bills"** | `ReportService._build_purchases` | **no** |
+
+They had also drifted on arithmetic — one took `AMOUNT` from
+`line.line_total`, the other recomputed `rate × T.KG`. They happened to
+agree today. Nothing was making them.
+
+**The fix is structural, not a second patch.** `ReportService` now
+decides *which* bills the export covers and `DocumentService` builds
+every one of them:
+
+```python
+header_ids = <the scope query>
+bills = [b.bill for b in await DocumentService(session).purchase_bills(org_id, header_ids)]
+build_purchase_sheet(bills, title="Purchases").save(path)
+```
+
+`purchase_bills()` is batched — four queries for the whole export
+regardless of how many bills it covers — so the single-bill path and the
+hundred-bill path really are the same code, not the same code plus a
+fast copy of it. `test_the_summary_export_carries_the_same_corrections`
+pins the combined workbook's banner, headers, `NOTE` cell and `AMOUNT`
+to the per-bill sheet, so a third builder cannot be introduced quietly.
+
+The sales register (a flat one-row-per-line list, not one sheet per
+sale) gets the same treatment in its own shape: a `NOTE` column reading
+`4.000 returned` and a tinted row, because a quantity that was partly
+sent back is not the whole story either.
+
+---
+
+## 4. What is deliberately not built
 
 - **No stored sheet files.** Unchanged from `27_Documents.md` §1 and for
   the same reason: a file written at confirmation time is stale the
@@ -238,7 +285,7 @@ Where the buttons go:
 
 ---
 
-## 4. Tests
+## 5. Tests
 
 | Test | Pins |
 |---|---|

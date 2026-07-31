@@ -27,7 +27,6 @@ from backend.core.logging import get_logger
 from backend.models import (
     Product,
     PurchaseHeader,
-    PurchaseLine,
     ReportJob,
     SalesHeader,
     SalesLine,
@@ -35,14 +34,13 @@ from backend.models import (
     User,
 )
 from backend.reports.excel.purchase_sheet_template import (
-    PurchaseBill,
-    PurchaseSheetRow,
     build_purchase_sheet,
 )
 from backend.reports.excel.statement_template import StatementEntry, build_statement
 from backend.reports.excel.styling import (
     MONEY_FORMAT,
     QTY_FORMAT,
+    WARN_FILL,
     autosize,
     write_header,
     write_row,
@@ -166,73 +164,39 @@ class ReportService:
 
     async def _build_purchases(self, job: ReportJob) -> tuple[Path, int]:
         """The legacy-format export (docs/13_Reports.md §5), one sheet per
-        bill. `pieces` and `weight_per_unit` come from the purchase line
-        as captured from the original sheet, so a re-export reads like the
-        sheet that was photographed.
+        bill.
 
-        LABEL is the *brand*: a supplier ships many brands, and a code is
-        only unique within one. The line's own product brand wins over the
-        header's, because that is what the code was resolved against.
+        This selects *which* bills; `DocumentService` builds them. It used
+        to build them itself, and the two builders had drifted into
+        disagreement: the sheet you downloaded for one bill said MODIFIED
+        and carried its corrections, and the sheet for that same bill
+        inside "all purchases" said nothing at all. There is now one
+        builder, so that cannot recur (docs/28 §3).
         """
-        from sqlalchemy.orm import aliased
+        from backend.services.document_service import DocumentService
 
-        from backend.models import Brand
-
-        product_brand = aliased(Brand)
-        header_brand = aliased(Brand)
-        stmt = (
-            select(PurchaseLine, PurchaseHeader, Product, Supplier, product_brand, header_brand)
-            .join(PurchaseHeader, PurchaseHeader.id == PurchaseLine.purchase_header_id)
-            .join(Product, Product.id == PurchaseLine.product_id)
-            .join(Supplier, Supplier.id == PurchaseHeader.supplier_id)
-            .outerjoin(product_brand, product_brand.id == Product.brand_id)
-            .outerjoin(header_brand, header_brand.id == PurchaseHeader.brand_id)
-            .where(
-                PurchaseHeader.org_id == job.org_id,
-                PurchaseHeader.deleted_at.is_(None),
-                PurchaseHeader.status == "confirmed",
-                *self._purchase_scope(job),
-            )
-            .order_by(PurchaseHeader.invoice_date, PurchaseHeader.invoice_no, PurchaseLine.line_no)
+        header_ids = list(
+            (
+                await self._session.execute(
+                    select(PurchaseHeader.id)
+                    .where(
+                        PurchaseHeader.org_id == job.org_id,
+                        PurchaseHeader.deleted_at.is_(None),
+                        PurchaseHeader.status == "confirmed",
+                        *self._purchase_scope(job),
+                    )
+                    .order_by(PurchaseHeader.invoice_date, PurchaseHeader.invoice_no)
+                )
+            ).scalars()
         )
 
-        bills: dict[uuid.UUID, PurchaseBill] = {}
-        row_count = 0
-        for line, header, product, supplier, line_brand, invoice_brand in (
-            await self._session.execute(stmt)
-        ).all():
-            bill = bills.get(header.id)
-            if bill is None:
-                bill = PurchaseBill(
-                    supplier=supplier.name,
-                    invoice_no=header.invoice_no,
-                    invoice_date=header.invoice_date,
-                    rows=[],
-                )
-                bills[header.id] = bill
-            brand = line_brand or invoice_brand
-            total_weight = line.total_weight_kg or line.qty
-            bill.rows.append(
-                PurchaseSheetRow(
-                    serial=len(bill.rows) + 1,
-                    pieces=line.weight_kg and (line.qty / line.weight_kg) or None,
-                    description=line.description or product.description,
-                    code=product.code,
-                    label=brand.name if brand else "",
-                    weight_per_unit=line.weight_kg,
-                    total_weight=total_weight,
-                    rate=line.rate,
-                    # the rate is per costing unit, so the line's value is
-                    # rate x T.KG -- the same basis the payable was raised on
-                    amount=(line.rate * total_weight) if total_weight is not None else None,
-                )
-            )
-            row_count += 1
-
-        workbook = build_purchase_sheet(list(bills.values()), title="Purchases")
+        bills = [
+            built.bill
+            for built in await DocumentService(self._session).purchase_bills(job.org_id, header_ids)
+        ]
         path = self._output_path(job)
-        workbook.save(path)
-        return path, row_count
+        build_purchase_sheet(bills, title="Purchases").save(path)
+        return path, sum(len(bill.rows) for bill in bills)
 
     def _purchase_scope(self, job: ReportJob) -> list[Any]:
         """Narrow a purchases export to one supplier or one invoice.
@@ -571,7 +535,21 @@ class ReportService:
             )
             .order_by(SalesHeader.sale_date, SalesHeader.created_at, SalesLine.line_no)
         )
-        headers = ["DATE", "CUSTOMER", "CODE", "DESCRIPTION", "QTY", "RATE", "AMOUNT", "COST"]
+        # NOTE for the same reason the purchase sheet has one: a line
+        # that was partly sent back shows a quantity that is no longer
+        # the whole story, and a register that doesn't say so is read as
+        # if nothing happened (docs/28 §2.1).
+        headers = [
+            "DATE",
+            "CUSTOMER",
+            "CODE",
+            "DESCRIPTION",
+            "QTY",
+            "RATE",
+            "AMOUNT",
+            "COST",
+            "NOTE",
+        ]
         workbook = Workbook()
         sheet = workbook.active
         assert sheet is not None
@@ -598,13 +576,21 @@ class ReportService:
                     float(line.rate),
                     float(line.line_total),
                     float(cost),
+                    (
+                        f"{line.returned_qty:f} returned"
+                        if line.returned_qty and line.returned_qty > ZERO
+                        else ""
+                    ),
                 ],
                 formats=formats,
             )
+            if line.returned_qty and line.returned_qty > ZERO:
+                for column in range(1, len(headers) + 1):
+                    sheet.cell(row=offset, column=column).fill = WARN_FILL
         write_row(
             sheet,
             len(records) + 2,
-            ["TOTAL", "", "", "", "", "", float(total_amount), float(total_cost)],
+            ["TOTAL", "", "", "", "", "", float(total_amount), float(total_cost), ""],
             formats=formats,
             bold=True,
         )

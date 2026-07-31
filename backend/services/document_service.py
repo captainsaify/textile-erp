@@ -26,11 +26,13 @@ import datetime
 import decimal
 import tempfile
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import String, cast, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from backend.core.exceptions import NotFoundError
 from backend.models import (
@@ -116,6 +118,10 @@ class Change:
     who: str
     action: str
     line: str
+    #: What the audit row was recorded against -- a header, a line, or a
+    #: party. Kept so a batched build can post each change back to the
+    #: bill it belongs to.
+    entity_id: uuid.UUID
     #: The purchase line this changed, when it changed exactly one.
     line_id: uuid.UUID | None = None
     #: Product codes a bill-wide change applied to (a rate correction
@@ -181,6 +187,7 @@ class DocumentService:
                     who=who or "system",
                     action=entry.action,
                     line=f"{when} · {who or 'system'} · {what}{_describe(entry)}",
+                    entity_id=entry.entity_id,
                     line_id=(entry.entity_id if entry.entity_type == "purchase_lines" else None),
                     codes=_codes(entry),
                     note=_row_note(entry),
@@ -238,28 +245,136 @@ class DocumentService:
         return _view(await self._purchase_bill(org_id, header_id))
 
     async def _purchase_bill(self, org_id: uuid.UUID, header_id: uuid.UUID) -> _Built:
-        header = await self._session.get(PurchaseHeader, header_id)
-        if header is None or header.org_id != org_id:
+        built = await self.purchase_bills(org_id, [header_id])
+        if not built:
             raise NotFoundError("purchase", str(header_id))
+        return built[0]
 
-        supplier = await self._session.get(Supplier, header.supplier_id)
-        lines = (
+    async def purchase_bills(
+        self, org_id: uuid.UUID, header_ids: Sequence[uuid.UUID]
+    ) -> list[_Built]:
+        """Bills in the order asked for, built the one way there is.
+
+        This is public because the *summary* exports need it. There used
+        to be a second bill-builder in ReportService, and the difference
+        between them was that one knew about corrections and one did not
+        -- so the sheet downloaded per-row said MODIFIED and the sheet
+        for the same bill inside "all purchases" said nothing. Two
+        builders is two versions of one bill in circulation, which is
+        precisely what a document exists to prevent (docs/28 §3).
+
+        Batched rather than looped: an export of a year's bills would
+        otherwise issue four queries per invoice.
+        """
+        if not header_ids:
+            return []
+        wanted = list(header_ids)
+
+        headers = {
+            header.id: header
+            for header in (
+                await self._session.execute(
+                    select(PurchaseHeader).where(
+                        PurchaseHeader.org_id == org_id, PurchaseHeader.id.in_(wanted)
+                    )
+                )
+            ).scalars()
+        }
+        if not headers:
+            return []
+
+        suppliers = {
+            supplier.id: supplier
+            for supplier in (
+                await self._session.execute(
+                    select(Supplier).where(
+                        Supplier.id.in_({header.supplier_id for header in headers.values()})
+                    )
+                )
+            ).scalars()
+        }
+        # LABEL is the brand. The line's own product brand wins over the
+        # header's, because that is what the code was resolved against;
+        # the header's is the fallback for a bill booked before products
+        # carried one.
+        header_brand = aliased(Brand)
+        brands = {
+            brand.id: brand
+            for brand in (
+                await self._session.execute(
+                    select(header_brand).where(
+                        header_brand.id.in_(
+                            {
+                                header.brand_id
+                                for header in headers.values()
+                                if header.brand_id is not None
+                            }
+                        )
+                    )
+                )
+            ).scalars()
+        }
+
+        rows_by_header: dict[uuid.UUID, list[tuple[PurchaseLine, Product | None, Brand | None]]] = {
+            header_id: [] for header_id in headers
+        }
+        for line, product, brand in (
             (
                 await self._session.execute(
                     select(PurchaseLine, Product, Brand)
                     .join(Product, Product.id == PurchaseLine.product_id, isouter=True)
                     .join(Brand, Brand.id == Product.brand_id, isouter=True)
-                    .where(PurchaseLine.purchase_header_id == header_id)
-                    .order_by(PurchaseLine.line_no)
+                    .where(PurchaseLine.purchase_header_id.in_(list(headers)))
+                    .order_by(PurchaseLine.purchase_header_id, PurchaseLine.line_no)
                 )
             )
             .tuples()
             .all()
-        )
+        ):
+            rows_by_header[line.purchase_header_id].append((line, product, brand))
 
-        changes = await self._changes(org_id, header_id, *[line.id for line, _, _ in lines])
+        line_owner = {
+            line.id: header_id
+            for header_id, lines in rows_by_header.items()
+            for line, _, _ in lines
+        }
+        changes = await self._changes(org_id, *headers, *line_owner)
+        changes_by_header: dict[uuid.UUID, list[Change]] = {header_id: [] for header_id in headers}
+        for change in changes:
+            owner = line_owner.get(change.entity_id, change.entity_id)
+            if owner in changes_by_header:
+                changes_by_header[owner].append(change)
+
+        built: list[_Built] = []
+        for header_id in wanted:
+            header = headers.get(header_id)
+            if header is None:
+                continue
+            built.append(
+                self._assemble(
+                    header,
+                    suppliers.get(header.supplier_id),
+                    brands.get(header.brand_id) if header.brand_id else None,
+                    rows_by_header[header_id],
+                    changes_by_header[header_id],
+                )
+            )
+        return built
+
+    def _assemble(
+        self,
+        header: PurchaseHeader,
+        supplier: Supplier | None,
+        fallback_brand: Brand | None,
+        lines: list[tuple[PurchaseLine, Product | None, Brand | None]],
+        changes: list[Change],
+    ) -> _Built:
         by_line = self._notes_by_line(changes)
         by_code = self._notes_by_code(changes)
+
+        def _label(line_brand: Brand | None) -> str:
+            shown = line_brand or fallback_brand
+            return shown.name if shown is not None else ""
 
         rows = [
             PurchaseSheetRow(
@@ -270,9 +385,9 @@ class DocumentService:
                 pieces=((line.qty / line.weight_kg) if line.weight_kg else None),
                 description=line.description or (product.description if product else ""),
                 code=product.code if product else "",
-                label=brand.name if brand else "",
+                label=_label(brand),
                 weight_per_unit=line.weight_kg,
-                total_weight=line.qty,
+                total_weight=line.total_weight_kg or line.qty,
                 rate=line.rate,
                 amount=line.line_total,
                 # A line corrected twice keeps both, oldest first: the
