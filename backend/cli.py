@@ -12,7 +12,7 @@ import re
 from typing import Annotated
 
 import typer
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.core.db import dispose_engine, get_session_factory
@@ -111,6 +111,113 @@ def set_password_command(
     except AuthError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from None
+
+
+@cli.command("create-partner")
+def create_partner(
+    display_name: Annotated[str, typer.Option("--name", help="Partner name, e.g. Firoz")],
+    whatsapp_number: Annotated[
+        str | None,
+        typer.Option("--whatsapp", help="Link to an existing user's E.164 number"),
+    ] = None,
+    profit_share: Annotated[float, typer.Option("--share", help="Profit share percent")] = 50.0,
+) -> None:
+    """Register a partner so `capital` and `withdraw` can reach them.
+
+    Capital is the one part of the books with no self-service entry
+    point: `capital Firoz 5000000 cash` needs a partner row, and nothing
+    in the system ever created one, so partner capital was unreachable
+    from a fresh database. Same reasoning as `create-user` -- onboarding
+    can't happen over WhatsApp, because WhatsApp is what it enables.
+
+    Linking a number is optional but is what lets this partner approve
+    another's withdrawal (docs/06_Accounting.md §8): an unlinked partner
+    is never listed as someone a request is waiting on.
+    """
+    import decimal
+
+    from backend.models import Partner
+    from backend.services.audit_service import AuditService
+
+    async def _run() -> tuple[str, str]:
+        factory = get_session_factory()
+        try:
+            async with factory() as session, session.begin():
+                org = (await session.execute(select(Organization).limit(1))).scalar_one()
+                actor = (
+                    (
+                        await session.execute(
+                            select(User)
+                            .where(User.org_id == org.id, User.deleted_at.is_(None))
+                            .order_by(User.created_at)
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if actor is None:
+                    raise ValueError("no users -- run `create-user` first")
+
+                existing = (
+                    await session.execute(
+                        select(Partner).where(
+                            Partner.org_id == org.id,
+                            func.lower(Partner.display_name) == display_name.lower(),
+                            Partner.deleted_at.is_(None),
+                        )
+                    )
+                ).scalar_one_or_none()
+                if existing is not None:
+                    raise ValueError(f"partner '{existing.display_name}' already exists")
+
+                user = None
+                if whatsapp_number is not None:
+                    user = (
+                        await session.execute(
+                            select(User).where(
+                                User.whatsapp_number == whatsapp_number,
+                                User.deleted_at.is_(None),
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if user is None:
+                        raise ValueError(
+                            f"no user on {whatsapp_number} -- run `create-user` for them first"
+                        )
+
+                partner = Partner(
+                    org_id=org.id,
+                    user_id=user.id if user is not None else None,
+                    display_name=display_name,
+                    profit_share_percent=decimal.Decimal(str(profit_share)),
+                    created_by=actor.id,
+                )
+                session.add(partner)
+                await session.flush()
+                await AuditService(session).record(
+                    org.id,
+                    actor.id,
+                    action="partner.created",
+                    entity_type="partners",
+                    entity_id=partner.id,
+                    after_state={
+                        "display_name": partner.display_name,
+                        "profit_share_percent": str(partner.profit_share_percent),
+                        "linked_user": user.full_name if user is not None else None,
+                    },
+                )
+                return partner.display_name, (user.full_name if user is not None else "unlinked")
+        finally:
+            await dispose_engine()
+
+    try:
+        name, linked = asyncio.run(_run())
+    except ValueError as exc:
+        typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    typer.secho(
+        f"created partner '{name}' ({linked}, {profit_share}% share)", fg=typer.colors.GREEN
+    )
 
 
 @cli.command("assign-brand")

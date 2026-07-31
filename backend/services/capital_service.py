@@ -27,6 +27,7 @@ from backend.repositories.accounting_repository import (
     LedgerRepository,
     PartnerCapitalRepository,
     business_today,
+    entry_day,
 )
 from backend.repositories.party_repository import PartnerRepository
 from backend.repositories.settings_repository import SettingsRepository
@@ -204,11 +205,12 @@ class CapitalService:
         partner_name: str,
         amount: decimal.Decimal,
         via: str,
+        on: str | None = None,
         whatsapp_message_id: str | None = None,
     ) -> CapitalPosted:
         amount = _validate_amount(amount)
         async with self._session.begin():
-            today = await business_today(self._session, actor.org_id)
+            today = await entry_day(self._session, actor.org_id, on)
             partner = await self._resolve_partner(actor.org_id, partner_name)
             balance = await self._post_entry(
                 actor,

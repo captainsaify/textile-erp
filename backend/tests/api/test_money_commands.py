@@ -270,3 +270,34 @@ def test_expense_and_capital_accept_grouped_amounts() -> None:
     assert expense.amount == decimal.Decimal("1500.00")
     capital = parse_capital_command("Rahul 5,00,000 bank", usage="u")
     assert capital.amount == decimal.Decimal("500000.00")
+
+
+def test_a_multi_word_category_survives() -> None:
+    """Their real categories, off the expense screen: "furniture
+    expenses", "rent july and comission", "rent advance". A fixed
+    <category> <amount> <via> split refused every one of them -- and so
+    did the wizard, which reassembles the line it would have been typed
+    as."""
+    parsed = parse_money_command("rent july and comission 200000 cash", "expense")
+
+    assert parsed.category == "rent july and comission"
+    assert parsed.amount == decimal.Decimal("200000")
+    assert parsed.via == "cash"
+    assert parsed.description is None
+
+
+def test_the_method_is_the_one_with_the_amount_in_front_of_it() -> None:
+    """ "cash" turns up inside descriptions too."""
+    parsed = parse_money_command("petrol 800 bank paid in cash by mistake", "expense")
+
+    assert parsed.via == "bank"
+    assert parsed.category == "petrol"
+    assert parsed.description == "paid in cash by mistake"
+
+
+def test_an_expense_can_be_dated() -> None:
+    parsed = parse_money_command("labour panipat 2500 cash on 18-07-2026", "expense")
+
+    assert parsed.category == "labour panipat"
+    assert parsed.on == "18-07-2026"
+    assert parsed.description is None

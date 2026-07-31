@@ -8,7 +8,7 @@ import dataclasses
 import decimal
 import re
 
-from backend.api.amounts import parse_amount
+from backend.api.amounts import looks_like_amount, parse_amount
 from backend.api.command_types import CommandResult, RequestContext
 from backend.api.formatting import fmt_date, fmt_money
 from backend.core.dates import split_date
@@ -38,13 +38,40 @@ def parse_money_command(args: str, command: str) -> MoneyCommand:
     tokens = args.split()
     if len(tokens) < 3:
         raise ValidationError(usage)
-    category, amount_raw, via = tokens[0], tokens[1], tokens[2].lower()
+
+    # The category is everything before the amount, not the first word.
+    # Their real categories are "furniture expenses", "rent july and
+    # comission", "rent advance" -- a fixed <category> <amount> <via>
+    # split refused every one of them, and the wizard refused them too,
+    # because it reassembles the same line it would have been typed as.
+    def _via_at(*, needs_amount: bool) -> int | None:
+        return next(
+            (
+                i
+                for i, token in enumerate(tokens)
+                if token.lower() in {"cash", "bank"}
+                and i > 0
+                and (looks_like_amount(tokens[i - 1]) or not needs_amount)
+            ),
+            None,
+        )
+
+    # An amount before it is what tells "cash" the method from "cash" the
+    # word in a category. Falling back to a bare one keeps a malformed
+    # amount ("-5") reported as an amount problem rather than as a
+    # missing payment method.
+    via_at = _via_at(needs_amount=True) or _via_at(needs_amount=False)
+    if via_at is None:
+        head = tokens[0]
+        raise ValidationError(f"Say cash or bank — e.g. {command} {head} 1500 cash")
+    via = tokens[via_at].lower()
+    category = " ".join(tokens[: via_at - 1]).strip()
+    if not category:
+        raise ValidationError(f"What kind of {command}? {usage}")
     # Indian grouping accepted: the system prints ₹40,92,000.00, so
     # refusing that shape back would be the system contradicting itself.
-    amount = parse_amount(amount_raw)
-    if via not in {"cash", "bank"}:
-        raise ValidationError(f"Say cash or bank — e.g. {command} {category} {amount_raw} cash")
-    description = " ".join(tokens[3:]).strip() or None
+    amount = parse_amount(tokens[via_at - 1])
+    description = " ".join(tokens[via_at + 1 :]).strip() or None
 
     paid_by = None
     if description:

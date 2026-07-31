@@ -13,6 +13,7 @@ from backend.api.amounts import parse_amount
 from backend.api.command_types import CommandResult, Notification, RequestContext
 from backend.api.formatting import fmt_money
 from backend.api.interactive import Buttons, Choice
+from backend.core.dates import split_date
 from backend.core.exceptions import DomainError, ValidationError
 from backend.services.capital_service import (
     CapitalPosted,
@@ -20,7 +21,9 @@ from backend.services.capital_service import (
     WithdrawalPending,
 )
 
-CAPITAL_USAGE = "Usage: capital <partner> <amount> <cash|bank> [contribution|withdrawal]"
+CAPITAL_USAGE = (
+    "Usage: capital <partner> <amount> <cash|bank> [contribution|withdrawal] [on DD-MM-YYYY]"
+)
 WITHDRAW_USAGE = "Usage: withdraw <partner> <amount> <cash|bank>"
 
 _KINDS = {"contribution", "withdrawal"}
@@ -33,6 +36,8 @@ class CapitalCommand:
     amount: decimal.Decimal
     via: str
     kind: str
+    #: Raw text: only the org's business date can resolve "today".
+    on: str | None = None
 
 
 def parse_capital_command(
@@ -44,6 +49,9 @@ def parse_capital_command(
     everything before it is the name -- the same shape the `expense`
     grammar avoids by putting the category first.
     """
+    # Money that went in weeks ago is entered today; `on 01-07-2026`
+    # comes off the line before the amount is looked for.
+    args, on = split_date(args)
     tokens = args.split()
     if len(tokens) < 3:
         raise ValidationError(usage)
@@ -72,7 +80,7 @@ def parse_capital_command(
         raise ValidationError(usage)
 
     assert kind is not None
-    return CapitalCommand(partner_name=partner_name, amount=amount, via=via, kind=kind)
+    return CapitalCommand(partner_name=partner_name, amount=amount, via=via, kind=kind, on=on)
 
 
 def _render_posted(posted: CapitalPosted) -> str:
@@ -133,6 +141,7 @@ async def handle_capital(args: str, ctx: RequestContext) -> CommandResult:
                     partner_name=command.partner_name,
                     amount=command.amount,
                     via=command.via,
+                    on=command.on,
                     whatsapp_message_id=ctx.message_id,
                 )
                 return CommandResult(reply=_render_posted(posted))
