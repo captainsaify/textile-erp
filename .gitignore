@@ -11,6 +11,10 @@ htmlcov/
 data/attachments/
 data/backups/
 data/reports/
+# Runtime logs. They carry LAN addresses, connector ids and dead tunnel
+# hostnames -- operational noise that has no business in the history of
+# the code, and one of them was tracked by accident.
+data/logs/
 frontend/node_modules/
 frontend/dist/
 .DS_Store
