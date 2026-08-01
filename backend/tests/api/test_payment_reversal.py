@@ -518,3 +518,34 @@ async def test_a_period_statement_opens_with_what_was_already_owed(
     # the bill is outside the window; the closing balance is still what
     # is owed
     assert D(str(cells[-1])) == payable == D("6000")
+
+
+async def test_a_payment_carries_its_note_into_the_party_statement(
+    owner_user: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The partners' own book explains half its payments -- "in ac
+    mahadev", "through hanif pune". Without somewhere to put that, a
+    statement can show ₹1,65,000 moved and not that it moved through
+    somebody else."""
+    from backend.api.command_types import RequestContext
+    from backend.api.commands.settlement_commands import handle_paid, parse_settlement
+    from backend.services.report_service import ReportService
+
+    command = parse_settlement("Wagdia 4000 cash note: through Hanif Pune", "paid")
+    assert command.party == "Wagdia"
+    assert command.note == "through Hanif Pune"
+
+    supplier, _ = await _bill(session_factory, owner_user, total="10000")
+    ctx = RequestContext(user=owner_user, session_factory=session_factory, message_id="m-note")
+    result = await handle_paid(f"{supplier} 4000 cash note: through Hanif Pune", ctx)
+    assert "through Hanif Pune" in result.reply
+
+    async with session_factory() as session:
+        supplier_id = (
+            await session.execute(sa.select(Supplier.id).where(Supplier.name == supplier))
+        ).scalar_one()
+        entries = await ReportService(session).party_entries(
+            ORG, role="supplier", party_id=supplier_id
+        )
+    payment = next(entry for entry in entries if "Payment" in entry.kind)
+    assert "through Hanif Pune" in payment.reference

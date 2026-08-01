@@ -202,6 +202,13 @@ def _when(value: str) -> str:
     return parse_date(value, today=datetime.date.today()).strftime("%d-%m-%Y")
 
 
+def _optional_note(value: str) -> str:
+    """ "-" is the skip, and is what the button sends. Stored rather than
+    dropped so `back` can tell "skipped" from "not asked yet"."""
+    text = value.strip()
+    return text if text and text not in {"-", "no", "none", "skip"} else "-"
+
+
 def _nonempty(label: str) -> Callable[[str], str]:
     def check(value: str) -> str:
         text = value.strip().rstrip(":")
@@ -271,6 +278,17 @@ async def _method_buttons(ctx: RequestContext, filled: dict[str, str]) -> Intera
             Choice(id="slot cash", title="Cash"),
             Choice(id="slot bank", title="Bank"),
         ),
+    )
+
+
+async def _note_buttons(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
+    """Optional, and visibly so. Most payments need no explanation; the
+    ones that do are the ones nobody can reconstruct later -- "through
+    hanif pune", "in ac mahadev" -- and a wizard with no way to type one
+    loses them all."""
+    return Buttons(
+        body="Add a note? (why, or who it went through)",
+        choices=(Choice(id="slot -", title="No note"),),
     )
 
 
@@ -665,12 +683,16 @@ def _prefill_when(args: str) -> tuple[str, dict[str, str]]:
     return args, filled
 
 
-def _dated(filled: dict[str, str], required: tuple[str, ...]) -> dict[str, str]:
+def _dated(
+    filled: dict[str, str], required: tuple[str, ...], *, optional: tuple[str, ...] = ()
+) -> dict[str, str]:
     """A command typed in full still runs in one round trip (§10.5), so
     only a command that was going to ask something anyway gets asked for
-    the date; one typed complete means today."""
+    the date or a note; one typed complete means today and no note."""
     if all(name in filled for name in required):
         filled.setdefault("when", "today")
+        for name in optional:
+            filled.setdefault(name, "-")
     return filled
 
 
@@ -701,7 +723,7 @@ def _prefill_settlement(args: str) -> dict[str, str]:
     party = " ".join(tokens[:amount_at] if amount_at is not None else tokens).strip().rstrip(":")
     if party:
         filled["party"] = party
-    return _dated(filled, ("party", "amount", "method"))
+    return _dated(filled, ("party", "amount", "method"), optional=("note",))
 
 
 def _prefill_money(args: str) -> dict[str, str]:
@@ -974,10 +996,18 @@ def _settlement_wizard(command: str, party_label: str, choices: ChoiceBuilder) -
                 validate=_when,
                 example="Today, or a date like 28-07-2026",
             ),
+            CommandSlot(
+                name="note",
+                question="Add a note? (why, or who it went through)",
+                choices=_note_buttons,
+                validate=_optional_note,
+                example="e.g. through Hanif Pune — or tap 'No note'",
+            ),
         ),
         assemble=lambda f: (
             f"{f['party']} {f['amount']} {f['method']}"
             + (f" on {f['when']}" if f.get("when", "today") != "today" else "")
+            + (f" note: {f['note']}" if f.get("note", "-") != "-" else "")
         ),
         prefill=_prefill_settlement,
     )

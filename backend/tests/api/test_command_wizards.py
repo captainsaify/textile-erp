@@ -115,7 +115,7 @@ async def test_bare_command_asks_the_first_question(ctx: RequestContext) -> None
     assert "Usage:" not in result.reply
     state, context = await state_of(ctx)
     assert state == AWAITING_COMMAND_SLOT
-    assert context["queue"] == ["party", "amount", "method", "when"]
+    assert context["queue"] == ["party", "amount", "method", "when", "note"]
 
 
 async def test_partial_command_asks_only_for_what_is_missing(ctx: RequestContext) -> None:
@@ -125,7 +125,7 @@ async def test_partial_command_asks_only_for_what_is_missing(ctx: RequestContext
     assert "How much?" in result.reply
     _, context = await state_of(ctx)
     assert context["filled"] == {"party": "wagdia"}
-    assert context["queue"] == ["amount", "method", "when"]
+    assert context["queue"] == ["amount", "method", "when", "note"]
 
 
 async def test_complete_command_does_not_start_a_wizard(ctx: RequestContext) -> None:
@@ -315,7 +315,7 @@ async def test_wrong_type_of_answer_re_asks_naming_the_expectation(ctx: RequestC
     assert "How much?" in result.reply
     state, context = await state_of(ctx)
     assert state == AWAITING_COMMAND_SLOT
-    assert context["queue"] == ["amount", "method", "when"]
+    assert context["queue"] == ["amount", "method", "when", "note"]
 
 
 async def test_a_non_method_where_the_method_belongs_is_refused(ctx: RequestContext) -> None:
@@ -324,7 +324,7 @@ async def test_a_non_method_where_the_method_belongs_is_refused(ctx: RequestCont
 
     assert "isn't a payment method" in result.reply
     _, context = await state_of(ctx)
-    assert context["queue"] == ["method", "when"]
+    assert context["queue"] == ["method", "when", "note"]
 
 
 async def test_back_clears_the_previous_answer(ctx: RequestContext) -> None:
@@ -336,7 +336,7 @@ async def test_back_clears_the_previous_answer(ctx: RequestContext) -> None:
     assert "Which supplier?" in result.reply
     _, context = await state_of(ctx)
     assert context["filled"] == {}
-    assert context["queue"] == ["party", "amount", "method", "when"]
+    assert context["queue"] == ["party", "amount", "method", "when", "note"]
 
 
 async def test_cancel_records_nothing(
@@ -392,6 +392,7 @@ async def test_someone_else_prompts_for_typing_rather_than_answering_itself(
                 "amount": "4000000.00",
                 "method": "bank",
                 "when": "today",
+                "note": "-",
             },
         ),
         (
@@ -401,6 +402,7 @@ async def test_someone_else_prompts_for_typing_rather_than_answering_itself(
                 "amount": "40000.00",
                 "method": "cash",
                 "when": "28-07-2026",
+                "note": "-",
             },
         ),
     ],

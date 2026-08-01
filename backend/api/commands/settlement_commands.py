@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import decimal
+import re
 
 from backend.api.amounts import looks_like_amount, parse_amount
 from backend.api.command_types import CommandResult, RequestContext
@@ -28,6 +29,16 @@ _AGAINST_WORDS = {"against", "ref", "ref:", "for", "#", "invoice"}
 #: an optional, redundant label -- the command already says which side
 _LABELS = {"customer:", "supplier:", "customer", "supplier"}
 
+#: How a note is introduced. Everything after it is the note.
+_NOTE = re.compile(r"\b(?:note|memo|desc|description|remark)s?\s*[:\-]\s*(?P<note>.+)$", re.I)
+
+
+def _split_note(args: str) -> tuple[str, str | None]:
+    match = _NOTE.search(args)
+    if match is None:
+        return args, None
+    return args[: match.start()].strip(), match["note"].strip() or None
+
 
 @dataclasses.dataclass(frozen=True)
 class SettlementCommand:
@@ -38,6 +49,11 @@ class SettlementCommand:
     #: Raw, not a date: "today" can only be resolved against the org's
     #: business date, which the service reads inside its transaction.
     on: str | None = None
+    #: Why this payment looks the way it does. The partners' own book
+    #: carries one on half its rows -- "in ac mahadev", "through hanif
+    #: pune" -- and without it a statement can show that ₹1,65,000 moved
+    #: but not that it moved through someone else.
+    note: str | None = None
 
 
 def parse_settlement(args: str, kind: str) -> SettlementCommand:
@@ -52,9 +68,15 @@ def parse_settlement(args: str, kind: str) -> SettlementCommand:
     label = "Customer" if kind == "received" else "Supplier"
     example = f"{kind} {'ABC' if kind == 'received' else 'Wagdia'} 40000 cash"
     usage = (
-        f"Usage: {kind} [{label}:] <name> <amount> <cash|bank> [against <ref>] [on DD-MM-YYYY]\n"
+        f"Usage: {kind} [{label}:] <name> <amount> <cash|bank> [against <ref>] "
+        f"[on DD-MM-YYYY] [note: <text>]\n"
         f"e.g. {example}"
     )
+
+    # The note comes off first and takes the rest of the line, so it can
+    # hold anything -- including words the rest of this parser would
+    # otherwise read as a method or an amount.
+    args, note = _split_note(args)
 
     # Pulled out first: money is routinely entered days after it moved,
     # and `on 28-07-2026` must not be mistaken for the invoice reference
@@ -118,7 +140,7 @@ def parse_settlement(args: str, kind: str) -> SettlementCommand:
     if not party:
         raise ValidationError(f"Which {label.lower()}?\n{usage}")
 
-    return SettlementCommand(party=party, amount=amount, via=via, against=against, on=on)
+    return SettlementCommand(party=party, amount=amount, via=via, against=against, on=on, note=note)
 
 
 def render_settlement(result: SettlementResult, kind: str) -> str:
@@ -136,6 +158,8 @@ def render_settlement(result: SettlementResult, kind: str) -> str:
         lines.append(f"Advance recorded: {fmt_money(result.advance)}")
     lines.append(f"{result.party_name}'s {owes} now {fmt_money(result.outstanding_after)}")
     lines.append(f"{result.via.capitalize()} balance now {fmt_money(result.ledger_balance)}")
+    if result.note:
+        lines.append(f"Note: {result.note}")
     if result.reference:
         lines.append(f"Ref: {result.reference}")
     return "\n".join(lines)
@@ -156,6 +180,7 @@ async def _run(
                     via=command.via,
                     against=command.against,
                     on=command.on,
+                    note=command.note,
                     allow_advance=allow_advance,
                     whatsapp_message_id=ctx.message_id,
                 )
@@ -167,6 +192,7 @@ async def _run(
                     via=command.via,
                     against=command.against,
                     on=command.on,
+                    note=command.note,
                     allow_advance=allow_advance,
                     whatsapp_message_id=ctx.message_id,
                 )
@@ -183,6 +209,7 @@ async def _run(
                     "via": command.via,
                     "against": command.against,
                     "on": command.on,
+                    "note": command.note,
                 },
             )
         return CommandResult(reply=exc.message)
@@ -233,5 +260,6 @@ async def handle_settlement_session_reply(
         via=str(context["via"]),
         against=context["against"] if context.get("against") else None,
         on=context.get("on") or None,
+        note=context.get("note") or None,
     )
     return await _run(command, ctx, str(context["kind"]), allow_advance=True)

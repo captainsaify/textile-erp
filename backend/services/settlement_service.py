@@ -56,6 +56,13 @@ class SettlementResult:
     #: payment's only handle -- `undo payment` already takes it, and the
     #: receipt document is built from it.
     reference: str = ""
+    #: Echoed back so the confirmation shows what was recorded, not what
+    #: was typed -- they differ whenever the note was dropped.
+    note: str | None = None
+
+
+def _annotate(base: str, note: str | None) -> str:
+    return f"{base} — {note}" if note else base
 
 
 def _validate_amount(amount: decimal.Decimal) -> decimal.Decimal:
@@ -96,6 +103,7 @@ class SettlementService:
         via: str,
         against: str | None = None,
         on: str | None = None,
+        note: str | None = None,
         allow_advance: bool = False,
         whatsapp_message_id: str | None = None,
     ) -> SettlementResult:
@@ -146,7 +154,11 @@ class SettlementService:
                 source_type="customer_payment",
                 source_id=customer.id,
                 entry_date=when,
-                notes=f"received from {customer.name}",
+                # The note rides on the ledger row because that row is
+                # what a party statement prints: without it the statement
+                # can show that ₹1,65,000 moved and not that it moved
+                # through somebody else.
+                notes=_annotate(f"received from {customer.name}", note),
                 created_by=actor.id,
             )
             await self._journal.post(
@@ -169,6 +181,7 @@ class SettlementService:
                     "amount": str(amount),
                     "via": via,
                     "entry_date": when.isoformat(),
+                    "note": note,
                     "allocations": [
                         {"reference": a.reference, "applied": str(a.applied)} for a in allocations
                     ],
@@ -180,6 +193,7 @@ class SettlementService:
 
         return SettlementResult(
             reference=str(entry.id)[:8],
+            note=note,
             party_name=customer.name,
             amount=amount,
             via=via,
@@ -198,6 +212,7 @@ class SettlementService:
         via: str,
         against: str | None = None,
         on: str | None = None,
+        note: str | None = None,
         allow_advance: bool = False,
         whatsapp_message_id: str | None = None,
     ) -> SettlementResult:
@@ -243,7 +258,7 @@ class SettlementService:
                 source_type="supplier_payment",
                 source_id=supplier.id,
                 entry_date=when,
-                notes=f"paid to {supplier.name}",
+                notes=_annotate(f"paid to {supplier.name}", note),
                 created_by=actor.id,
             )
             await self._journal.post(
@@ -266,6 +281,7 @@ class SettlementService:
                     "amount": str(amount),
                     "via": via,
                     "entry_date": when.isoformat(),
+                    "note": note,
                     "allocations": [
                         {"reference": a.reference, "applied": str(a.applied)} for a in allocations
                     ],
@@ -283,6 +299,7 @@ class SettlementService:
 
         return SettlementResult(
             reference=str(entry.id)[:8],
+            note=note,
             party_name=supplier.name,
             amount=amount,
             via=via,

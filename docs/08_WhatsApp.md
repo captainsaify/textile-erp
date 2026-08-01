@@ -257,6 +257,11 @@ from one number); approval request expires after 48h
 
 **Syntax:** `received Customer: <name> <amount> <cash|bank> [against <invoice-ref>] [on <DD-MM-YYYY>]`
 **Example:** `received Customer: ABC 2000 cash`
+**Notes:** `note: <text>` at the end — `paid Iqbal Bhai 165000 cash on
+20-07-2026 note: through Hanif Pune`. It rides on the ledger row, which
+is what a party statement prints, so the statement can say not just that
+₹1,65,000 moved but that it moved through somebody else. The wizard asks
+for it last, with a "No note" button.
 **Backdating:** `on 28-07-2026` (also `today` / `yesterday`) files the
 entry under the day the money actually moved rather than the day it was
 typed — a ledger copied out of a paper book is entered weeks late, and
