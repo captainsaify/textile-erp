@@ -688,7 +688,10 @@ async def test_that_is_all_finishes_the_sale_instead_of_asking_again(
     await answer("TRP", ctx)
     await answer("10", ctx)
     await answer("150", ctx)
-    result = await answer("slot done", ctx)
+    asked = await answer("slot done", ctx)
+    # the item loop is over -- what follows is the date, asked once
+    assert "Which product code?" not in asked.reply
+    result = await answer("slot today", ctx)
 
     # the wizard is over: what comes back is the sale command's own
     # reply (this customer is new), not another item question

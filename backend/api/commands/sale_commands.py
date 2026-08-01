@@ -26,6 +26,7 @@ from backend.api.interactive import (
     Section,
     is_abandon,
 )
+from backend.core.dates import split_date
 from backend.core.exceptions import (
     DomainError,
     DuplicateSaleError,
@@ -71,9 +72,9 @@ CONFIRM_VOCAB = {"confirm", "yes", "ok", "save"}
 
 USAGE = (
     "Usage:\n"
-    "sale Customer: <name> [cash|bank|credit]\n"
+    "sale Customer: <name> [cash|bank|credit] [on DD-MM-YYYY]\n"
     "<CODE> <qty> <rate>   (one line per item)\n"
-    "Payment type defaults to credit."
+    "Payment type defaults to credit, the date to today."
 )
 
 
@@ -81,6 +82,11 @@ def parse_sale_command(args: str) -> SaleDraft:
     lines = [line.strip() for line in args.strip().splitlines() if line.strip()]
     if not lines:
         raise ValidationError(USAGE)
+    # Off the header line before it is read, so `on 28-07-2026` is never
+    # absorbed into the customer's name. Goods leave on one day and get
+    # entered on another; filing the sale under the day it was typed
+    # puts it in the wrong month's profit.
+    lines[0], on = split_date(lines[0])
     header = _HEADER.match(lines[0])
     if header is None:
         raise ValidationError(f"Couldn't read the first line. {USAGE}")
@@ -112,6 +118,7 @@ def parse_sale_command(args: str) -> SaleDraft:
         customer_name=header["customer"].strip(),
         payment_type=payment,
         lines=items,
+        on=on,
     )
 
 
@@ -163,7 +170,10 @@ def render_warnings(draft: SaleDraft, warnings: SaleWarnings, *, is_owner: bool)
 
 
 def _sale_preview(draft: SaleDraft) -> CommandResult:
-    lines = [f"🧾 Sale draft — {draft.customer_name} ({draft.payment_type.value})"]
+    # The day is only printed when it is not today: on every other sale
+    # it would be a line of noise, and here it is the thing to check.
+    dated = f", {draft.on}" if draft.on else ""
+    lines = [f"🧾 Sale draft — {draft.customer_name} ({draft.payment_type.value}{dated})"]
     for line in draft.lines:
         unit = line.unit_code or ""
         lines.append(

@@ -851,7 +851,9 @@ def _bank_item(filled: dict[str, str]) -> None:
 def _assemble_sale(filled: dict[str, str]) -> str:
     """The sale grammar: a header line, then one line per item."""
     items = _items_of(filled)
-    return "\n".join([f"Customer: {filled['customer']}", *items])
+    when = filled.get("when", "today")
+    dated = "" if when == "today" else f" on {when}"
+    return "\n".join([f"Customer: {filled['customer']}{dated}", *items])
 
 
 def _party_lookup_wizard(role: str, choices: ChoiceBuilder) -> CommandWizard:
@@ -1060,6 +1062,16 @@ WIZARDS: dict[str, CommandWizard] = {
                 choices=_more_items_buttons,
                 validate=_more_items,
                 after=_bank_item,
+            ),
+            # Asked once, after the items rather than before them: the
+            # date is the same for every line, and asking it first put a
+            # question about paperwork in front of the actual sale.
+            CommandSlot(
+                name="when",
+                question="When did this sale happen?",
+                choices=_when_buttons,
+                validate=_when,
+                example="Today, or a date like 28-07-2026",
             ),
         ),
         assemble=_assemble_sale,

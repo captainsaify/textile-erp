@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.core.exceptions import DuplicateSaleError, ValidationError
 from backend.models import Customer, SalesHeader, SalesLine, User, Warehouse
 from backend.models.enums import AccountCode, LedgerEntryType, SalePaymentType
-from backend.repositories.accounting_repository import LedgerRepository, business_today
+from backend.repositories.accounting_repository import LedgerRepository, entry_day
 from backend.repositories.party_repository import CustomerRepository
 from backend.repositories.product_repository import ProductRepository
 from backend.repositories.settings_repository import SettingsRepository
@@ -105,6 +105,10 @@ class SaleDraft:
     idempotency_key: str | None = None
     allow_negative_stock: bool = False
     warnings_acknowledged: bool = False
+    #: The day the goods went out, when it isn't today. Raw text, like
+    #: every other money command's `on`: only the org's business date
+    #: can resolve "today", and that is read inside the transaction.
+    on: str | None = None
 
     @property
     def grand_total(self) -> decimal.Decimal:
@@ -136,6 +140,7 @@ class SaleDraft:
             "idempotency_key": self.idempotency_key,
             "allow_negative_stock": self.allow_negative_stock,
             "warnings_acknowledged": self.warnings_acknowledged,
+            "on": self.on,
             "lines": [
                 {
                     "code": line.code,
@@ -162,6 +167,7 @@ class SaleDraft:
             idempotency_key=context.get("idempotency_key"),
             allow_negative_stock=context.get("allow_negative_stock", False),
             warnings_acknowledged=context.get("warnings_acknowledged", False),
+            on=context.get("on") or None,
             lines=[
                 SaleDraftLine(
                     code=line["code"],
@@ -410,7 +416,11 @@ class SalesService:
                         details={"sales_header_id": str(existing.id)},
                     )
 
-            today = await business_today(self._session, org_id)
+            # The sale's own day, not the day it was typed. A sale
+            # entered on Monday for goods that left on Saturday belongs
+            # in Saturday's cash flow, and the ledger and journal follow
+            # the header rather than the clock.
+            today = await entry_day(self._session, org_id, draft.on)
             warehouse = await self._default_warehouse(org_id)
             assert draft.customer_id is not None
             outstanding_before = await self._customers.outstanding(org_id, draft.customer_id)

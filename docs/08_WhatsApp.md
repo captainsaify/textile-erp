@@ -135,8 +135,13 @@ empty line list ("Send at least one item line").
 ### `sale` {#sale}
 
 **Syntax/example:** [05_Sales.md §2](05_Sales.md#2-sale-command-grammar-grammar).
-**Success:** immediate confirmation (no explicit CONFIRM step needed
-unless a warning fires — see §7 of this doc).
+**Backdating:** `on <DD-MM-YYYY>` (also `today`/`yesterday`) on the
+customer line — `sale Customer: ABC cash on 28-07-2026`. The header, the
+cash/bank entry and the journal all land on that day, so goods that left
+on Saturday are not counted in Monday's cash flow. The wizard asks for
+it once, after the items.
+**Success:** a preview with CONFIRM, "See as sheet" and Discard; the
+confirmation carries the sale's own spreadsheet.
 **Errors:** insufficient stock (override available), below-cost
 warning, credit-limit warning, unresolved customer/product.
 **Permissions:** owner, staff. Below-cost/credit-limit override: owner

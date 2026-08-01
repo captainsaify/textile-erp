@@ -366,3 +366,45 @@ def test_the_same_sale_text_keys_differently_once_the_window_passes() -> None:
     assert idempotency_key("+91", text, now=monday) != idempotency_key(
         "+91", text, now=monday + dt.timedelta(minutes=DEDUP_BUCKET_MINUTES * 2)
     )
+
+
+async def test_a_sale_can_be_dated(
+    ctx: RequestContext,
+    stocked: dict[str, uuid.UUID],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Goods leave on one day and get entered on another; filing the
+    sale under the day it was typed puts it in the wrong month."""
+    import datetime as dt
+
+    from backend.models import CashLedger, SalesHeader
+
+    preview = await handle_sale("Customer: ABC cash on 28-07-2026\nTRP 10 200", ctx)
+    assert "28-07-2026" in preview.reply
+
+    recorded = await _reply("confirm", ctx)
+    assert "Sale recorded" in recorded.reply
+
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                sa.select(SalesHeader.sale_date, CashLedger.entry_date)
+                .join(CashLedger, CashLedger.source_id == SalesHeader.id, isouter=True)
+                .where(SalesHeader.org_id == ORG)
+                .order_by(SalesHeader.created_at.desc())
+                .limit(1)
+            )
+        ).one()
+    # the header and the money it moved land on the same day
+    assert row[0] == dt.date(2026, 7, 28)
+    assert row[1] in (None, dt.date(2026, 7, 28))
+
+
+def test_a_customer_named_with_on_keeps_it() -> None:
+    """`on` is a date clause only when a date follows it."""
+    from backend.api.commands.sale_commands import parse_sale_command
+
+    draft = parse_sale_command("Customer: Hands on Traders credit\nTRP 10 100")
+
+    assert draft.customer_name == "Hands on Traders"
+    assert draft.on is None
