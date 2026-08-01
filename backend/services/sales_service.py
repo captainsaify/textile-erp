@@ -41,10 +41,35 @@ CUSTOMER_MATCH_THRESHOLD = 80  # §9 fuzzy >= 0.8
 _WHITESPACE = re.compile(r"\s+")
 
 
-def idempotency_key(sender_number: str, message_text: str) -> str:
-    """sha256(sender + normalized text) -- §5."""
+#: The grid the idempotency key is bucketed on, in minutes. Matches the
+#: default `sale_dedup_window_minutes`; it is a constant rather than a
+#: setting because it has to be computed in the command layer, before a
+#: database session exists, and a key that changed with a setting would
+#: stop matching the rows already written under the old one.
+DEDUP_BUCKET_MINUTES = 10
+
+
+def idempotency_key(
+    sender_number: str, message_text: str, *, now: datetime.datetime | None = None
+) -> str:
+    """sha256(sender + normalized text + time bucket) -- §5.
+
+    The bucket is what makes this a *window* rather than a life
+    sentence. `sales_headers_org_idempotency_active_uq` is absolute, so
+    a key derived from the text alone meant a customer could never buy
+    the same things for the same money twice -- which §5 says explicitly
+    must not be blocked, and which cost a real ₹1,65,000 sale two days
+    after an identical one.
+
+    An accidental double-send inside one bucket still collides. One that
+    straddles a boundary falls through to the near-duplicate warning,
+    which asks rather than refuses -- the right failure for the rarer
+    case.
+    """
     normalized = _WHITESPACE.sub(" ", message_text.strip().lower())
-    return hashlib.sha256(f"{sender_number}|{normalized}".encode()).hexdigest()
+    moment = now or datetime.datetime.now(datetime.UTC)
+    bucket = int(moment.timestamp()) // (DEDUP_BUCKET_MINUTES * 60)
+    return hashlib.sha256(f"{sender_number}|{normalized}|{bucket}".encode()).hexdigest()
 
 
 @dataclasses.dataclass

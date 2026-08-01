@@ -114,7 +114,12 @@ def test_nginx_terminates_tls_and_redirects_plain_http() -> None:
     conf = (DOCKER / "nginx.conf").read_text()
     assert "listen 443 ssl" in conf
     assert "return 301 https://" in conf
-    assert "Strict-Transport-Security" in conf
+    # HSTS moved into security-headers.conf when the other headers were
+    # added; this asserted on the wrong file afterwards and failed on
+    # main. What matters is that the TLS server includes the file, and
+    # that the file still carries HSTS.
+    assert "include /etc/nginx/security-headers.conf;" in conf
+    assert "Strict-Transport-Security" in (DOCKER / "security-headers.conf").read_text()
     # ACME must stay reachable over plain HTTP or renewal breaks
     assert ".well-known/acme-challenge" in conf
 

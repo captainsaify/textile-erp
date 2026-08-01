@@ -334,3 +334,35 @@ async def test_credit_limit_warning(
     assert "outstanding to ₹3,300.00" in result.reply  # 20 x 165
     result = await _reply("confirm", owner_ctx)
     assert "✅ Sale recorded" in result.reply
+
+
+# --------------------------------------------------------------------
+# the duplicate guard is a window, not a life sentence
+# --------------------------------------------------------------------
+
+
+def test_the_same_sale_text_keys_differently_once_the_window_passes() -> None:
+    """`sales_headers_org_idempotency_active_uq` is absolute, so a key
+    derived from the text alone meant a customer could never buy the
+    same things for the same money twice. It cost a real ₹1,65,000 sale
+    two days after an identical one, with the refusal claiming it had
+    "just" been sent."""
+    import datetime as dt
+
+    from backend.services.sales_service import DEDUP_BUCKET_MINUTES, idempotency_key
+
+    text = "Customer: Hanif Pune credit\n55D 1200 137.50"
+    monday = dt.datetime(2026, 7, 30, 12, 0, tzinfo=dt.UTC)
+
+    # an accidental re-send moments later still collides
+    assert idempotency_key("+91", text, now=monday) == idempotency_key(
+        "+91", text, now=monday + dt.timedelta(seconds=30)
+    )
+    # two days later is a different sale, and is allowed to be one
+    assert idempotency_key("+91", text, now=monday) != idempotency_key(
+        "+91", text, now=monday + dt.timedelta(days=2)
+    )
+    # the window is the bucket, not forever
+    assert idempotency_key("+91", text, now=monday) != idempotency_key(
+        "+91", text, now=monday + dt.timedelta(minutes=DEDUP_BUCKET_MINUTES * 2)
+    )

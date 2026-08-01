@@ -301,10 +301,25 @@ async def _try_record(
                 whatsapp_message_id=ctx.message_id,
             )
     except DuplicateSaleError:
-        await sessions.clear(ctx.user.org_id, ctx.user.id)
+        # Kept, not cleared: the draft is the answer to the question this
+        # is about to ask. Clearing it left "record it anyway" with
+        # nothing to record, and the old copy told people to "add a note
+        # and resend" -- which the sale grammar has no way to accept.
+        await sessions.set(
+            ctx.user.org_id, ctx.user.id, AWAITING_SALE_CONFIRMATION, draft.to_context()
+        )
         return CommandResult(
-            reply="↩️ This looks identical to a sale you just sent — not recorded again. "
-            "If it really is a second, separate sale, add a note to the message and resend."
+            reply=(
+                "↩️ This looks identical to a sale you just sent — not recorded again.\n"
+                "If it really is a second, separate sale, tap 'Record anyway'."
+            ),
+            interactive=Buttons(
+                body="Record this as a separate sale?",
+                choices=(
+                    Choice(id="record anyway", title="Record anyway"),
+                    Choice(id="discard", title="Discard"),
+                ),
+            ),
         )
     except InsufficientStockError as exc:
         return CommandResult(reply=exc.message)
@@ -480,6 +495,16 @@ async def handle_sale_session_reply(
             ctx.user.org_id, ctx.user.id, AWAITING_SALE_CONFIRMATION, draft.to_context()
         )
         return await _continue_after_resolution(draft, ctx)
+
+    if lowered in {"record anyway", "force", "separate sale", "seperate sale"}:
+        # The idempotency key is what the unique index is on, so dropping
+        # it is what makes this a genuinely separate sale rather than a
+        # retry of the blocked one.
+        draft.idempotency_key = None
+        await sessions.set(
+            ctx.user.org_id, ctx.user.id, AWAITING_SALE_CONFIRMATION, draft.to_context()
+        )
+        return await _try_record(draft, ctx, below_cost_confirmed=True)
 
     if lowered == "override":
         draft.allow_negative_stock = True
