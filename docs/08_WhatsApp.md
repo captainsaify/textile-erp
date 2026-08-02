@@ -215,15 +215,22 @@ posting to `income` instead.
 funds is far more common than a withdrawal, and withdrawal has its own
 dedicated command below for clarity anyway).
 **Example:** `capital Rahul 50000 bank contribution`
-**Success:** `✅ Capital contribution recorded — Rahul +₹50,000.00
-(bank). Rahul's capital balance now ₹2,15,000.00.`
-**Errors:** unresolved partner name; negative/zero amount rejected.
+**Success (below threshold):** `✅ Capital contribution recorded — Rahul
++₹50,000.00 (bank). Rahul's capital balance now ₹2,15,000.00.`
+**Success (at/above threshold — the default for contributions is ₹0, so
+normally this):**
+```
+🔒 This contribution (₹50,000.00) needs approval from another partner
+before it's recorded. Waiting on: Farida.
+```
+**Errors:** unresolved partner name; negative/zero amount rejected; no
+other partner with a WhatsApp number to approve.
 **Permissions:** owner only.
-**Edge cases:** large withdrawals routed through `withdraw` (below),
-not through `capital ... withdrawal`, to keep the dual-approval path
-unambiguous — `capital` with `withdrawal` explicitly stated below the
-dual-approval threshold is still accepted as a shorthand, above the
-threshold it redirects to the `withdraw` flow.
+**Edge cases:** a contribution needs a second signature just as a
+withdrawal does ([06 §8](06_Accounting.md#dual-approval-withdrawals)) —
+capital decides profit share, not just cash. `capital ... withdrawal`
+is accepted as shorthand and takes the same approval path as
+`withdraw`, so it is never a second way to move money unsigned.
 
 ---
 
@@ -237,18 +244,24 @@ threshold it redirects to the `withdraw` flow.
 🔒 This withdrawal (₹30,000.00) needs approval from another partner
 before it's processed. Waiting on: Farida.
 ```
-— and a message is sent to the other active partner(s):
+— and a message is sent to the other active partner(s), with Approve /
+Reject buttons:
 ```
-Rahul requested a capital withdrawal of ₹30,000.00 (bank).
-Reply "approve withdraw <id>" or "reject withdraw <id>".
+Rahul wants to take out ₹30,000.00 (bank) as capital.
+Reply "approve <id>" or "reject <id>".
 ```
+Worded by direction — "wants to take out" against a contribution's
+"wants to put in" — because an approver skimming a phone must not have
+to work out which way the money is going. One `approve` / `reject` pair
+answers either: the pending row records its own direction.
+
 **Errors:** insufficient capital balance is a warning, not a block
 (consistent with §13 in [06_Accounting.md](06_Accounting.md#13-edge-cases) —
 a negative capital balance is allowed, just flagged).
 **Permissions:** owner only (both requesting and approving).
-**Edge cases:** requester cannot approve their own withdrawal (checked
-even if, implausibly, both partner accounts were somehow accessible
-from one number); approval request expires after 48h
+**Edge cases:** requester cannot approve their own request, in either
+direction (checked even if, implausibly, both partner accounts were
+somehow accessible from one number); a request expires after 48h
 (`settings.withdrawal_approval_timeout_hours`) and must be re-requested.
 
 ---

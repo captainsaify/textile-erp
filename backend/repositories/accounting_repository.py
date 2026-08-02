@@ -236,16 +236,22 @@ class PartnerCapitalRepository:
         entry_date: datetime.date,
         notes: str | None,
         created_by: uuid.UUID,
+        entry_type: CapitalEntryType = CapitalEntryType.WITHDRAWAL,
     ) -> PartnerCapital:
-        """A withdrawal awaiting a second partner (§8). `amount` is stored
-        as the signed effect it *will* have; `resulting_balance` holds the
-        balance as it stands now, unchanged, and is never read while the
-        row is pending."""
+        """A capital movement awaiting a second partner (§8). `amount` is
+        stored as the signed effect it *will* have; `resulting_balance`
+        holds the balance as it stands now, unchanged, and is never read
+        while the row is pending.
+
+        `entry_type` because money *in* now waits for a signature too: a
+        contribution decides ownership and profit share, so claiming one
+        is as consequential as taking money out.
+        """
         await self._lock(org_id, partner_id)
         row = PartnerCapital(
             org_id=org_id,
             partner_id=partner_id,
-            entry_type=CapitalEntryType.WITHDRAWAL,
+            entry_type=entry_type,
             amount=amount,
             resulting_balance=await self.balance(org_id, partner_id),
             settled_via=settled_via,

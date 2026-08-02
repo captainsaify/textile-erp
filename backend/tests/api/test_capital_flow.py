@@ -19,7 +19,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from backend.api.command_types import RequestContext
+from backend.api.command_types import CommandResult, RequestContext
 from backend.api.commands.capital_commands import (
     handle_approve,
     handle_capital,
@@ -27,6 +27,7 @@ from backend.api.commands.capital_commands import (
     handle_withdraw,
     parse_capital_command,
 )
+from backend.api.interactive import Buttons
 from backend.core.exceptions import ValidationError
 from backend.models import Partner, PartnerCapital, Setting, User
 from backend.models.enums import UserRole
@@ -113,6 +114,21 @@ async def _cash_balance(session_factory: async_sessionmaker[AsyncSession]) -> de
         return await LedgerRepository(session).balance(ORG, "cash")
 
 
+def _reference(result: CommandResult) -> str:
+    """The short id out of the request the other partner was sent."""
+    note = result.notifications[0]
+    assert isinstance(note.interactive, Buttons)
+    return note.interactive.choices[0].id.split()[-1]
+
+
+async def _fund(pair: Pair, args: str) -> None:
+    """Put capital in the way the business now does it: one partner
+    asks, the other signs. Contributions no longer post on their own,
+    so every test that just needs a balance has to go the whole way."""
+    requested = await handle_capital(args, pair.rahul_ctx)
+    await handle_approve(_reference(requested), pair.farida_ctx)
+
+
 # --------------------------------------------------------------------
 # grammar
 # --------------------------------------------------------------------
@@ -146,23 +162,84 @@ def test_parse_capital_rejects_non_numeric_amount() -> None:
 
 
 # --------------------------------------------------------------------
-# contributions and small withdrawals post immediately
+# money in needs a signature too
 # --------------------------------------------------------------------
 
 
-async def test_contribution_moves_capital_and_cash(
+async def test_a_contribution_waits_for_the_other_partner(
     pair: Pair, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
+    """Capital is not just cash — it is ownership and profit share. A
+    partner recording a contribution nobody else saw decides how the
+    profit splits, so money *in* is gated exactly like money out."""
     result = await handle_capital("Rahul 50000 bank", pair.rahul_ctx)
+
+    assert "🔒" in result.reply
+    assert "contribution" in result.reply
+    assert "Waiting on: Farida" in result.reply
+    # nothing moved
+    assert await _capital_balance(session_factory, pair.rahul.id) == D("0")
+
+    note = result.notifications[0]
+    assert note.to_number == pair.farida_ctx.user.whatsapp_number
+    assert "wants to put in" in note.body
+
+
+async def test_contribution_moves_capital_and_cash_once_approved(
+    pair: Pair, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    requested = await handle_capital("Rahul 50000 bank", pair.rahul_ctx)
+    result = await handle_approve(_reference(requested), pair.farida_ctx)
+
     assert "✅ Capital contribution recorded" in result.reply
     assert "₹50,000.00" in result.reply
     assert await _capital_balance(session_factory, pair.rahul.id) == D("50000.00")
 
 
+async def test_the_contribution_threshold_can_be_raised(
+    pair: Pair, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Zero is the default — every contribution waits. A business that
+    finds that too heavy for small top-ups can lift it without losing
+    the gate on the amounts that matter."""
+    async with session_factory() as session, session.begin():
+        session.add(
+            Setting(
+                org_id=ORG,
+                key="capital_contribution_dual_approval_threshold",
+                value="100000",
+            )
+        )
+
+    result = await handle_capital("Rahul 50000 bank", pair.rahul_ctx)
+
+    assert "✅ Capital contribution recorded" in result.reply
+    assert result.notifications == ()
+    assert await _capital_balance(session_factory, pair.rahul.id) == D("50000.00")
+
+
+async def test_a_contribution_can_be_rejected(
+    pair: Pair, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    requested = await handle_capital("Rahul 50000 bank", pair.rahul_ctx)
+    result = await handle_reject(_reference(requested), pair.farida_ctx)
+
+    assert "🚫 Rejected" in result.reply
+    assert "contribution" in result.reply
+    assert await _capital_balance(session_factory, pair.rahul.id) == D("0")
+
+
+async def test_a_partner_cannot_approve_their_own_contribution(pair: Pair) -> None:
+    requested = await handle_capital("Rahul 50000 bank", pair.rahul_ctx)
+    result = await handle_approve(_reference(requested), pair.rahul_ctx)
+
+    assert "can't approve your own contribution" in result.reply
+
+
 async def test_small_withdrawal_posts_without_approval(
     pair: Pair, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    await handle_capital("Rahul 50000 cash", pair.rahul_ctx)
+    await _fund(pair, "Rahul 50000 cash")
     result = await handle_withdraw("Rahul 5000 cash", pair.rahul_ctx)
     assert "✅ Capital withdrawal recorded" in result.reply
     assert result.notifications == ()
@@ -190,7 +267,7 @@ async def test_large_withdrawal_moves_nothing_until_approved(
     pair: Pair, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     """The core invariant: a pending request touches no balance."""
-    await handle_capital("Rahul 100000 cash", pair.rahul_ctx)
+    await _fund(pair, "Rahul 100000 cash")
     capital_before = await _capital_balance(session_factory, pair.rahul.id)
     cash_before = await _cash_balance(session_factory)
 
@@ -220,8 +297,10 @@ async def test_large_withdrawal_notifies_the_other_partner(pair: Pair) -> None:
     note = result.notifications[0]
     number, body = note.to_number, note.body
     assert number == pair.farida_ctx.user.whatsapp_number
-    assert "Rahul requested a capital withdrawal" in body
-    assert "approve withdraw" in body
+    # worded by direction: an approver skimming a phone must not have to
+    # work out which way the money is going
+    assert "Rahul wants to take out" in body
+    assert "approve" in body and _reference(result) in body
 
 
 async def test_requester_cannot_approve_their_own_withdrawal(
@@ -230,9 +309,9 @@ async def test_requester_cannot_approve_their_own_withdrawal(
     """§8's entire purpose -- checked server-side, not just assumed
     because it arrives from a different phone."""
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
+    reference = _reference(request)
 
-    result = await handle_approve(f"withdraw {reference}", pair.rahul_ctx)
+    result = await handle_approve(reference, pair.rahul_ctx)
     assert "can't approve your own" in result.reply
     assert await _capital_balance(session_factory, pair.rahul.id) == D("0")
 
@@ -240,11 +319,11 @@ async def test_requester_cannot_approve_their_own_withdrawal(
 async def test_second_partner_approval_posts_the_withdrawal(
     pair: Pair, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    await handle_capital("Rahul 100000 cash", pair.rahul_ctx)
+    await _fund(pair, "Rahul 100000 cash")
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
+    reference = _reference(request)
 
-    result = await handle_approve(f"withdraw {reference}", pair.farida_ctx)
+    result = await handle_approve(reference, pair.farida_ctx)
     assert "✅ Approved." in result.reply
     assert await _capital_balance(session_factory, pair.rahul.id) == D("70000.00")
     assert await _cash_balance(session_factory) == D("70000.00")
@@ -256,26 +335,26 @@ async def test_approval_recomputes_against_the_balance_at_approval_time(
     """A contribution landing while the request waits must not be
     overwritten: the withdrawal joins the chain at approval, using the
     balance as it stands then, not as it stood at request time."""
-    await handle_capital("Rahul 100000 cash", pair.rahul_ctx)
+    await _fund(pair, "Rahul 100000 cash")
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
+    reference = _reference(request)
 
     # someone tops Rahul up while the withdrawal sits pending
-    await handle_capital("Rahul 20000 cash", pair.rahul_ctx)
+    await _fund(pair, "Rahul 20000 cash")
     assert await _capital_balance(session_factory, pair.rahul.id) == D("120000.00")
 
-    await handle_approve(f"withdraw {reference}", pair.farida_ctx)
+    await handle_approve(reference, pair.farida_ctx)
     assert await _capital_balance(session_factory, pair.rahul.id) == D("90000.00")
 
 
 async def test_rejection_leaves_balances_untouched(
     pair: Pair, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    await handle_capital("Rahul 100000 cash", pair.rahul_ctx)
+    await _fund(pair, "Rahul 100000 cash")
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
+    reference = _reference(request)
 
-    result = await handle_reject(f"withdraw {reference}", pair.farida_ctx)
+    result = await handle_reject(reference, pair.farida_ctx)
     assert "🚫 Rejected" in result.reply
     assert await _capital_balance(session_factory, pair.rahul.id) == D("100000.00")
     assert await _cash_balance(session_factory) == D("100000.00")
@@ -285,10 +364,10 @@ async def test_a_rejected_request_cannot_then_be_approved(
     pair: Pair, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
-    await handle_reject(f"withdraw {reference}", pair.farida_ctx)
+    reference = _reference(request)
+    await handle_reject(reference, pair.farida_ctx)
 
-    result = await handle_approve(f"withdraw {reference}", pair.farida_ctx)
+    result = await handle_approve(reference, pair.farida_ctx)
     assert "not found" in result.reply
     assert await _capital_balance(session_factory, pair.rahul.id) == D("0")
 
@@ -296,12 +375,12 @@ async def test_a_rejected_request_cannot_then_be_approved(
 async def test_approving_twice_posts_only_once(
     pair: Pair, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    await handle_capital("Rahul 100000 cash", pair.rahul_ctx)
+    await _fund(pair, "Rahul 100000 cash")
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
+    reference = _reference(request)
 
-    await handle_approve(f"withdraw {reference}", pair.farida_ctx)
-    second = await handle_approve(f"withdraw {reference}", pair.farida_ctx)
+    await handle_approve(reference, pair.farida_ctx)
+    second = await handle_approve(reference, pair.farida_ctx)
 
     assert "not found" in second.reply  # no longer pending
     assert await _capital_balance(session_factory, pair.rahul.id) == D("70000.00")
@@ -311,7 +390,7 @@ async def test_expired_request_is_cancelled_rather_than_approved(
     pair: Pair, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
+    reference = _reference(request)
 
     async with session_factory() as session, session.begin():
         await session.execute(
@@ -321,7 +400,7 @@ async def test_expired_request_is_cancelled_rather_than_approved(
             )
         )
 
-    result = await handle_approve(f"withdraw {reference}", pair.farida_ctx)
+    result = await handle_approve(reference, pair.farida_ctx)
     assert "expired" in result.reply
     assert await _capital_balance(session_factory, pair.rahul.id) == D("0")
 
@@ -352,8 +431,9 @@ async def test_capital_command_redirects_large_withdrawals_to_the_approval_flow(
     below the threshold, but above it must not become a second way to
     move large sums without a signature."""
     result = await handle_capital("Rahul 30000 cash withdrawal", pair.rahul_ctx)
-    assert "dual-approval threshold" in result.reply
     assert "🔒" in result.reply
+    assert "withdrawal" in result.reply
+    assert len(result.notifications) == 1
     assert await _capital_balance(session_factory, pair.rahul.id) == D("0")
 
 
@@ -393,7 +473,7 @@ async def test_dashboard_shows_partner_capital_balances(pair: Pair) -> None:
     this wave -- docs/12_Dashboard.md §2."""
     from backend.api.commands.report_commands import handle_dashboard
 
-    await handle_capital("Rahul 50000 bank", pair.rahul_ctx)
+    await _fund(pair, "Rahul 50000 bank")
     result = await handle_dashboard("", pair.rahul_ctx)
     assert "Partner capital" in result.reply
     assert "Rahul ₹50,000.00" in result.reply
@@ -408,7 +488,7 @@ async def test_expiry_window_follows_settings(
             Setting(org_id=ORG, key="withdrawal_approval_timeout_hours", value=hours_setting)
         )
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
+    reference = _reference(request)
 
     async with session_factory() as session, session.begin():
         await session.execute(
@@ -418,7 +498,7 @@ async def test_expiry_window_follows_settings(
             )
         )
 
-    result = await handle_approve(f"withdraw {reference}", pair.farida_ctx)
+    result = await handle_approve(reference, pair.farida_ctx)
     if hours_setting == 1:
         assert "expired" in result.reply
     else:
@@ -448,9 +528,9 @@ async def test_posted_at_orders_the_chain_not_created_at(
     """A withdrawal requested before a contribution but approved after it
     must land last in the chain -- the reason posted_at exists."""
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
-    await handle_capital("Rahul 100000 cash", pair.rahul_ctx)
-    await handle_approve(f"withdraw {reference}", pair.farida_ctx)
+    reference = _reference(request)
+    await _fund(pair, "Rahul 100000 cash")
+    await handle_approve(reference, pair.farida_ctx)
 
     async with session_factory() as session:
         ordered = (
@@ -475,9 +555,9 @@ async def test_created_at_ordering_would_have_been_wrong(
     created_at the withdrawal comes first, which would make the running
     balance read 70000 -> ... in the wrong order."""
     request = await handle_withdraw("Rahul 30000 cash", pair.rahul_ctx)
-    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
-    await handle_capital("Rahul 100000 cash", pair.rahul_ctx)
-    await handle_approve(f"withdraw {reference}", pair.farida_ctx)
+    reference = _reference(request)
+    await _fund(pair, "Rahul 100000 cash")
+    await handle_approve(reference, pair.farida_ctx)
 
     async with session_factory() as session:
         by_created = (
@@ -502,11 +582,11 @@ async def test_journal_balances_for_every_capital_posting(
     """JournalService refuses unbalanced entries, so this is really a
     check that every path posts one at all -- and the nightly check in
     docs/06_Accounting.md §12.2 expects it to hold table-wide."""
-    await handle_capital("Rahul 100000 cash", pair.rahul_ctx)
+    await _fund(pair, "Rahul 100000 cash")
     await handle_withdraw("Rahul 5000 cash", pair.rahul_ctx)
     request = await handle_withdraw("Rahul 30000 bank", pair.rahul_ctx)
-    reference = request.notifications[0].body.split("approve withdraw ")[1].split('"')[0]
-    await handle_approve(f"withdraw {reference}", pair.farida_ctx)
+    reference = _reference(request)
+    await handle_approve(reference, pair.farida_ctx)
 
     async with session_factory() as session:
         unbalanced = (
@@ -537,7 +617,7 @@ async def test_capital_entries_appear_in_the_cash_ledger(
 ) -> None:
     from backend.api.commands.money_commands import handle_cash
 
-    await handle_capital("Rahul 50000 cash", pair.rahul_ctx)
+    await _fund(pair, "Rahul 50000 cash")
     result = await handle_cash("", pair.rahul_ctx)
     assert "capital_in" in result.reply
     assert "₹50,000.00" in result.reply
@@ -547,7 +627,7 @@ async def test_business_date_is_used_for_entry_date(
     pair: Pair, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     """docs/02_Database.md §8: DATE columns hold the org's local date."""
-    await handle_capital("Rahul 1000 cash", pair.rahul_ctx)
+    await _fund(pair, "Rahul 1000 cash")
     async with session_factory() as session:
         entry_date = (
             await session.execute(

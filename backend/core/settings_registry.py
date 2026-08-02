@@ -102,11 +102,21 @@ _SPECS: tuple[SettingSpec, ...] = (
         description="Withdrawals at or above this need a second partner's approval.",
     ),
     SettingSpec(
+        key="capital_contribution_dual_approval_threshold",
+        kind="money",
+        default=decimal.Decimal("0"),
+        minimum=decimal.Decimal("0"),
+        description=(
+            "Contributions at or above this need a second partner's approval. "
+            "Zero, the default, means every contribution does."
+        ),
+    ),
+    SettingSpec(
         key="withdrawal_approval_timeout_hours",
         kind="int",
         default=48,
         minimum=1,
-        description="How long a pending withdrawal waits before it expires.",
+        description="How long a pending capital request waits before it expires.",
     ),
     SettingSpec(
         key="slow_moving_days",

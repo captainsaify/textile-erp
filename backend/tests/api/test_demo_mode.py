@@ -83,6 +83,29 @@ async def _counts(
         }
 
 
+async def _contributions_post_immediately(
+    session_factory: async_sessionmaker[AsyncSession], org_id: uuid.UUID
+) -> None:
+    """Lift the demo org's contribution threshold.
+
+    Contributions need a second partner by default, and these two tests
+    are about twinning and reset, not about approval — which has its own
+    tests in test_capital_flow.py. Without this they would fail for a
+    reason that has nothing to do with what they check.
+    """
+    from backend.models import Setting
+
+    async with session_factory() as session:
+        session.add(
+            Setting(
+                org_id=org_id,
+                key="capital_contribution_dual_approval_threshold",
+                value="1000000",
+            )
+        )
+        await session.commit()
+
+
 # --------------------------------------------------------------------
 # switching
 # --------------------------------------------------------------------
@@ -261,7 +284,7 @@ async def test_the_demo_has_the_same_partners_so_capital_can_be_demonstrated(
     could show every command except the one the partners most wanted to
     rehearse before using it on their own money."""
     from backend.models import Partner
-    from backend.services.capital_service import CapitalService
+    from backend.services.capital_service import CapitalPosted, CapitalService
 
     async with session_factory() as session:
         session.add_all(
@@ -278,6 +301,7 @@ async def test_the_demo_has_the_same_partners_so_capital_can_be_demonstrated(
         await session.commit()
 
     await handle_login("as test", ctx)
+    await _contributions_post_immediately(session_factory, DEMO_ORG_ID)
 
     async with session_factory() as session:
         names = list(
@@ -298,6 +322,7 @@ async def test_the_demo_has_the_same_partners_so_capital_can_be_demonstrated(
             demo_ctx.user, partner_name="Firoz", amount=D("1000"), via="cash"
         )
         await session.commit()
+    assert isinstance(posted, CapitalPosted)
     assert posted.new_balance == D("1000")
 
     # the real business's Firoz is untouched
@@ -334,6 +359,7 @@ async def test_reset_keeps_the_partners_and_clears_what_they_invested(
         await session.commit()
 
     await handle_login("as test", ctx)
+    await _contributions_post_immediately(session_factory, DEMO_ORG_ID)
     demo_ctx = RequestContext(
         user=as_demo(ctx.user), session_factory=session_factory, message_id="m-demo"
     )

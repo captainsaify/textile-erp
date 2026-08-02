@@ -52,6 +52,7 @@ def test_every_registered_key_is_actually_read_somewhere() -> None:
     services reach it."""
     accessors = {
         "capital_withdrawal_dual_approval_threshold": "withdrawal_dual_approval_threshold",
+        "capital_contribution_dual_approval_threshold": "contribution_dual_approval_threshold",
         "withdrawal_approval_timeout_hours": "withdrawal_approval_timeout_hours",
         "slow_moving_days": "slow_moving_days",
         "purchase_total_mismatch_tolerance": "purchase_total_mismatch_tolerance",

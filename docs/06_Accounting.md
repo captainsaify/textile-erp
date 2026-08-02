@@ -156,19 +156,44 @@ row form — no separate derivation needed beyond grouping and summing).
 - **Contribution**: partner puts cash/bank into the business → credits
   `partner_capital`, debits `cash`/`bank`.
 - **Withdrawal**: partner draws cash/bank out → debits `partner_capital`,
-  credits `cash`/`bank`. **Dual approval for large withdrawals**
-  {#dual-approval-withdrawals}: if `amount >=
-  settings.capital_withdrawal_dual_approval_threshold` (default
-  ₹25,000), the withdrawal is created in a `pending_approval` state
-  (modeled via `partner_capital.approved_by_partner_ids` starting
-  empty) and requires a **second** partner's WhatsApp confirmation
-  before the cash/bank movement is actually posted — this is the one
-  deliberate exception to "either partner's number is fully trusted for
-  everything" from
-  [00_ProjectVision.md §5](00_ProjectVision.md#5-personas), because a
-  large capital draw is exactly the kind of transaction where a
-  compromised phone or an impulsive decision has outsized, hard-to-
-  reverse consequences for the other partner's equity.
+  credits `cash`/`bank`.
+
+### Dual approval, in both directions {#dual-approval-withdrawals}
+
+A capital movement at or above its threshold is created in a
+`pending` state (`partner_capital.approved_by_partner_ids` starting
+empty) and requires a **second** partner's WhatsApp confirmation before
+any money moves. Two thresholds, because the two directions carry
+different risk:
+
+| Direction | Setting | Default |
+|---|---|---|
+| Withdrawal | `capital_withdrawal_dual_approval_threshold` | ₹25,000 |
+| Contribution | `capital_contribution_dual_approval_threshold` | **₹0 — every one** |
+
+Withdrawals were gated first: a large capital draw is exactly the kind
+of transaction where a compromised phone or an impulsive decision has
+outsized, hard-to-reverse consequences for the other partner's equity.
+
+**Money in is gated too, and by default always.** Capital is not just
+cash — it is ownership and profit share. A partner who records a
+contribution nobody else saw has decided how the profit splits, and
+`partners.profit_share_percent` is not what protects against that. The
+partners asked for this directly. Zero is the default so nothing slips
+through on size; a business that finds it heavy for small top-ups can
+raise the threshold without losing the gate on the amounts that matter.
+
+This is the one deliberate exception to "either partner's number is
+fully trusted for everything" from
+[00_ProjectVision.md §5](00_ProjectVision.md#5-personas).
+
+Both directions share one path in `CapitalService._record`, so what
+they check and what they write cannot drift apart, and one pair of
+commands answers either — `approve <id>` / `reject <id>`. The pending
+row records which direction it was, so nobody has to remember what they
+were sent. A partner still cannot approve their own request, in either
+direction, and that is checked server-side rather than assumed because
+it arrived from a different phone.
 - **Profit allocation**: at period close (manually triggered via
   `settings`/dashboard, not automatic — profit isn't "real" for
   allocation purposes until a partner decides to book it), net profit

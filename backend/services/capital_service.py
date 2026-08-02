@@ -1,13 +1,19 @@
 """Partner capital in and out -- docs/06_Accounting.md §8, commands in
 docs/08_WhatsApp.md #capital / #withdraw.
 
-Contributions and small withdrawals post immediately, exactly like
+Below its threshold a capital movement posts immediately, exactly like
 `expense`/`income`: business row + simplified ledger + journal + audit,
-all in one transaction. Withdrawals at or above
-`settings.capital_withdrawal_dual_approval_threshold` instead create a
-*pending* row that moves no money at all until a second partner approves
--- see PartnerCapitalRepository.create_pending for why a pending request
-must stay out of the balance chain.
+all in one transaction. At or above it, a *pending* row is created that
+moves no money at all until a second partner approves -- see
+PartnerCapitalRepository.create_pending for why a pending request must
+stay out of the balance chain.
+
+**Both directions have a threshold.** Money out was always gated; money
+in is now too, and its threshold defaults to zero, so every contribution
+needs a second signature. Capital is not just cash -- it is ownership
+and profit share -- so a partner recording a contribution nobody else
+saw decides how the profit splits. The partners asked for this
+explicitly.
 """
 
 from __future__ import annotations
@@ -51,15 +57,28 @@ class CapitalPosted:
 
 
 @dataclasses.dataclass(frozen=True)
-class WithdrawalPending:
+class CapitalPending:
+    """A capital movement waiting on a second partner -- in either
+    direction, which is why this is no longer named for withdrawals."""
+
     request_id: uuid.UUID
     short_id: str
     partner_name: str
     amount: decimal.Decimal
     via: str
     threshold: decimal.Decimal
+    entry_type: CapitalEntryType
     #: (display_name, whatsapp_number) of partners who may approve
     approvers: list[tuple[str, str]]
+
+    @property
+    def noun(self) -> str:
+        return "contribution" if self.entry_type is CapitalEntryType.CONTRIBUTION else "withdrawal"
+
+    @property
+    def direction(self) -> str:
+        """How a person would say it: money in, or money out."""
+        return "put in" if self.entry_type is CapitalEntryType.CONTRIBUTION else "take out"
 
 
 def _validate_amount(raw: decimal.Decimal) -> decimal.Decimal:
@@ -72,6 +91,11 @@ def _validate_amount(raw: decimal.Decimal) -> decimal.Decimal:
 
 def short_id(request_id: uuid.UUID) -> str:
     return str(request_id)[:8]
+
+
+def _noun_of(row: PartnerCapital) -> str:
+    """What to call a pending row in a message to a person."""
+    return "contribution" if row.entry_type is CapitalEntryType.CONTRIBUTION else "withdrawal"
 
 
 class CapitalService:
@@ -198,66 +222,51 @@ class CapitalService:
         )
         return capital_row.resulting_balance
 
-    async def record_contribution(
+    async def _record(
         self,
         actor: User,
         *,
+        entry_type: CapitalEntryType,
         partner_name: str,
         amount: decimal.Decimal,
         via: str,
-        on: str | None = None,
-        whatsapp_message_id: str | None = None,
-    ) -> CapitalPosted:
+        on: str | None,
+        whatsapp_message_id: str | None,
+    ) -> CapitalPosted | CapitalPending:
+        """Post it, or hold it for a second partner -- one path for both
+        directions, so money in and money out cannot drift apart in what
+        they check or what they write.
+
+        Below this direction's threshold it posts immediately; at or
+        above it, a pending request is created and **nothing moves**
+        (§8). The contribution threshold defaults to zero, so by default
+        every contribution waits.
+        """
         amount = _validate_amount(amount)
+        is_withdrawal = entry_type is CapitalEntryType.WITHDRAWAL
+        noun = "withdrawal" if is_withdrawal else "contribution"
+
         async with self._session.begin():
             today = await entry_day(self._session, actor.org_id, on)
             partner = await self._resolve_partner(actor.org_id, partner_name)
-            balance = await self._post_entry(
-                actor,
-                partner,
-                entry_type=CapitalEntryType.CONTRIBUTION,
-                amount=amount,
-                via=via,
-                today=today,
+            threshold = (
+                await self._settings.withdrawal_dual_approval_threshold(actor.org_id)
+                if is_withdrawal
+                else await self._settings.contribution_dual_approval_threshold(actor.org_id)
             )
-        return CapitalPosted(
-            partner_name=partner.display_name,
-            entry_type=CapitalEntryType.CONTRIBUTION,
-            amount=amount,
-            via=via,
-            new_balance=balance,
-            negative_balance=balance < ZERO,
-        )
-
-    async def record_withdrawal(
-        self,
-        actor: User,
-        *,
-        partner_name: str,
-        amount: decimal.Decimal,
-        via: str,
-        whatsapp_message_id: str | None = None,
-    ) -> CapitalPosted | WithdrawalPending:
-        """Below the threshold this posts immediately; at or above it, a
-        pending request is created and nothing moves (§8)."""
-        amount = _validate_amount(amount)
-        async with self._session.begin():
-            today = await business_today(self._session, actor.org_id)
-            partner = await self._resolve_partner(actor.org_id, partner_name)
-            threshold = await self._settings.withdrawal_dual_approval_threshold(actor.org_id)
 
             if amount < threshold:
                 balance = await self._post_entry(
                     actor,
                     partner,
-                    entry_type=CapitalEntryType.WITHDRAWAL,
+                    entry_type=entry_type,
                     amount=amount,
                     via=via,
                     today=today,
                 )
                 return CapitalPosted(
                     partner_name=partner.display_name,
-                    entry_type=CapitalEntryType.WITHDRAWAL,
+                    entry_type=entry_type,
                     amount=amount,
                     via=via,
                     new_balance=balance,
@@ -267,50 +276,92 @@ class CapitalService:
             approvers = await self._approvers(actor.org_id, partner.id)
             if not approvers:
                 raise ValidationError(
-                    f"A withdrawal of ₹{amount} needs a second partner's approval, but no "
-                    "other partner has a WhatsApp number registered. Add one, or withdraw "
-                    f"less than ₹{threshold}."
+                    f"A {noun} of ₹{amount} needs a second partner's approval, but no "
+                    "other partner has a WhatsApp number registered. Add one, or raise "
+                    f"the threshold above ₹{amount} with 'settings'."
                 )
             pending = await self._capital.create_pending(
                 actor.org_id,
                 partner.id,
-                amount=-amount,
+                amount=-amount if is_withdrawal else amount,
                 settled_via=via,
                 entry_date=today,
                 notes=f"awaiting approval, requested by {actor.full_name}",
                 created_by=actor.id,
+                entry_type=entry_type,
             )
             await self._audit.record(
                 actor.org_id,
                 actor.id,
-                action="capital.withdrawal_requested",
+                action=f"capital.{noun}_requested",
                 entity_type="partner_capital",
                 entity_id=pending.id,
                 after_state={
                     "partner_id": str(partner.id),
-                    "amount": str(-amount),
+                    "amount": str(pending.amount),
                     "settled_via": via,
                     "status": "pending",
                 },
                 whatsapp_message_id=whatsapp_message_id,
             )
-            return WithdrawalPending(
+            return CapitalPending(
                 request_id=pending.id,
                 short_id=short_id(pending.id),
                 partner_name=partner.display_name,
                 amount=amount,
                 via=via,
                 threshold=threshold,
+                entry_type=entry_type,
                 approvers=approvers,
             )
+
+    async def record_contribution(
+        self,
+        actor: User,
+        *,
+        partner_name: str,
+        amount: decimal.Decimal,
+        via: str,
+        on: str | None = None,
+        whatsapp_message_id: str | None = None,
+    ) -> CapitalPosted | CapitalPending:
+        return await self._record(
+            actor,
+            entry_type=CapitalEntryType.CONTRIBUTION,
+            partner_name=partner_name,
+            amount=amount,
+            via=via,
+            on=on,
+            whatsapp_message_id=whatsapp_message_id,
+        )
+
+    async def record_withdrawal(
+        self,
+        actor: User,
+        *,
+        partner_name: str,
+        amount: decimal.Decimal,
+        via: str,
+        on: str | None = None,
+        whatsapp_message_id: str | None = None,
+    ) -> CapitalPosted | CapitalPending:
+        return await self._record(
+            actor,
+            entry_type=CapitalEntryType.WITHDRAWAL,
+            partner_name=partner_name,
+            amount=amount,
+            via=via,
+            on=on,
+            whatsapp_message_id=whatsapp_message_id,
+        )
 
     async def _resolve_request(self, org_id: uuid.UUID, reference: str) -> PartnerCapital:
         matches = await self._capital.find_pending_by_prefix(org_id, reference.strip())
         if not matches:
-            raise NotFoundError("pending withdrawal", reference)
+            raise NotFoundError("pending capital request", reference)
         if len(matches) > 1:
             raise ValidationError(
-                f"'{reference}' matches {len(matches)} pending withdrawals — "
+                f"'{reference}' matches {len(matches)} pending capital requests — "
                 "use more characters of the id."
             )
         return matches[0]
@@ -320,24 +371,28 @@ class CapitalService:
         age = datetime.datetime.now(datetime.UTC) - row.created_at
         return age > datetime.timedelta(hours=hours)
 
-    async def approve_withdrawal(
+    async def approve_request(
         self, actor: User, reference: str, *, whatsapp_message_id: str | None = None
     ) -> CapitalPosted:
+        """Sign off someone else's capital movement, in either
+        direction. The row itself says which it was, so one command
+        answers both and nobody has to remember which they were sent."""
         async with self._session.begin():
             row = await self._resolve_request(actor.org_id, reference)
+            noun = _noun_of(row)
             approver = await self._partners.get_by_user_id(actor.org_id, actor.id)
             if approver is None:
-                raise ValidationError("Only a partner can approve a capital withdrawal.")
+                raise ValidationError(f"Only a partner can approve a capital {noun}.")
             if approver.id == row.partner_id:
                 # §8: the whole point of the second signature
                 raise ValidationError(
-                    "You can't approve your own withdrawal — it needs another partner."
+                    f"You can't approve your own {noun} — it needs another partner."
                 )
             if await self._expired(row):
                 await self._capital.reject_pending(row)
                 hours = await self._settings.withdrawal_approval_timeout_hours(actor.org_id)
                 raise ValidationError(
-                    f"That withdrawal request expired after {hours}h and has been cancelled. "
+                    f"That {noun} request expired after {hours}h and has been cancelled. "
                     "Ask for it to be requested again."
                 )
 
@@ -350,32 +405,34 @@ class CapitalService:
             balance = await self._post_entry(
                 actor,
                 requester,
-                entry_type=CapitalEntryType.WITHDRAWAL,
+                entry_type=row.entry_type,
                 amount=amount,
                 via=via,
                 today=today,
                 source_row=row,
             )
+            entry_type = row.entry_type
         return CapitalPosted(
             partner_name=requester.display_name,
-            entry_type=CapitalEntryType.WITHDRAWAL,
+            entry_type=entry_type,
             amount=amount,
             via=via,
             new_balance=balance,
             negative_balance=balance < ZERO,
         )
 
-    async def reject_withdrawal(
+    async def reject_request(
         self, actor: User, reference: str, *, whatsapp_message_id: str | None = None
-    ) -> tuple[str, decimal.Decimal]:
+    ) -> tuple[str, decimal.Decimal, CapitalEntryType]:
         async with self._session.begin():
             row = await self._resolve_request(actor.org_id, reference)
+            noun = _noun_of(row)
             approver = await self._partners.get_by_user_id(actor.org_id, actor.id)
             if approver is None:
-                raise ValidationError("Only a partner can reject a capital withdrawal.")
+                raise ValidationError(f"Only a partner can reject a capital {noun}.")
             if approver.id == row.partner_id:
                 raise ValidationError(
-                    "You can't reject your own withdrawal — it needs another partner."
+                    f"You can't reject your own {noun} — it needs another partner."
                 )
             requester = await self._session.get(Partner, row.partner_id)
             if requester is None:
@@ -384,10 +441,10 @@ class CapitalService:
             await self._audit.record(
                 actor.org_id,
                 actor.id,
-                action="capital.withdrawal_rejected",
+                action=f"capital.{noun}_rejected",
                 entity_type="partner_capital",
                 entity_id=row.id,
                 after_state={"status": "rejected"},
                 whatsapp_message_id=whatsapp_message_id,
             )
-            return requester.display_name, abs(row.amount)
+            return requester.display_name, abs(row.amount), row.entry_type

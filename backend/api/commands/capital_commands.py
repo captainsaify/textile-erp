@@ -1,6 +1,10 @@
-"""`capital`, `withdraw`, `approve withdraw`, `reject withdraw` --
-docs/08_WhatsApp.md #capital, #withdraw; postings and the dual-approval
-rule in docs/06_Accounting.md §8.
+"""`capital`, `withdraw`, `approve`, `reject` -- docs/08_WhatsApp.md
+#capital, #withdraw; postings and the dual-approval rule in
+docs/06_Accounting.md §8.
+
+Both directions need a second partner. `approve <id>` answers either --
+the pending row says which it was, so nobody has to remember whether
+they were sent a contribution or a withdrawal.
 """
 
 from __future__ import annotations
@@ -16,9 +20,9 @@ from backend.api.interactive import Buttons, Choice
 from backend.core.dates import split_date
 from backend.core.exceptions import DomainError, ValidationError
 from backend.services.capital_service import (
+    CapitalPending,
     CapitalPosted,
     CapitalService,
-    WithdrawalPending,
 )
 
 CAPITAL_USAGE = (
@@ -99,25 +103,32 @@ def _render_posted(posted: CapitalPosted) -> str:
     return reply
 
 
-def _render_pending(pending: WithdrawalPending) -> CommandResult:
+def _render_pending(pending: CapitalPending) -> CommandResult:
+    """The request, and the buttons the *other* partner needs.
+
+    Worded by direction rather than by one word covering both: "wants to
+    put in ₹1,00,000" and "wants to take out ₹1,00,000" are opposite
+    facts, and an approver skimming a phone should not have to work out
+    which one they are signing.
+    """
     waiting_on = ", ".join(name for name, _ in pending.approvers)
     reply = (
-        f"🔒 This withdrawal ({fmt_money(pending.amount)}) needs approval from another "
-        f"partner before it's processed. Waiting on: {waiting_on}."
+        f"🔒 This {pending.noun} ({fmt_money(pending.amount)}) needs approval from another "
+        f"partner before it's recorded. Waiting on: {waiting_on}."
     )
     body = (
-        f"{pending.partner_name} requested a capital withdrawal of "
-        f"{fmt_money(pending.amount)} ({pending.via}).\n"
-        f'Reply "approve withdraw {pending.short_id}" or '
-        f'"reject withdraw {pending.short_id}".'
+        f"{pending.partner_name} wants to {pending.direction} "
+        f"{fmt_money(pending.amount)} ({pending.via}) as capital.\n"
+        f'Reply "approve {pending.short_id}" or "reject {pending.short_id}".'
     )
     approve = Buttons(
         body=(
-            f"{pending.partner_name} wants to withdraw {fmt_money(pending.amount)} ({pending.via})."
+            f"{pending.partner_name} wants to {pending.direction} "
+            f"{fmt_money(pending.amount)} ({pending.via})."
         ),
         choices=(
-            Choice(id=f"approve withdraw {pending.short_id}", title="Approve"),
-            Choice(id=f"reject withdraw {pending.short_id}", title="Reject"),
+            Choice(id=f"approve capital {pending.short_id}", title="Approve"),
+            Choice(id=f"reject capital {pending.short_id}", title="Reject"),
         ),
         footer="Needs a second partner.",
     )
@@ -135,39 +146,24 @@ async def handle_capital(args: str, ctx: RequestContext) -> CommandResult:
         command = parse_capital_command(args, usage=CAPITAL_USAGE)
         async with ctx.session_factory() as session:
             service = CapitalService(session)
-            if command.kind == "contribution":
-                posted = await service.record_contribution(
-                    ctx.user,
-                    partner_name=command.partner_name,
-                    amount=command.amount,
-                    via=command.via,
-                    on=command.on,
-                    whatsapp_message_id=ctx.message_id,
-                )
-                return CommandResult(reply=_render_posted(posted))
-            # `capital ... withdrawal` is shorthand below the threshold and
-            # redirects above it, so the dual-approval path stays the only
-            # way a large withdrawal happens (docs/08_WhatsApp.md #capital)
-            outcome = await service.record_withdrawal(
+            record = (
+                service.record_contribution
+                if command.kind == "contribution"
+                else service.record_withdrawal
+            )
+            outcome = await record(
                 ctx.user,
                 partner_name=command.partner_name,
                 amount=command.amount,
                 via=command.via,
+                on=command.on,
                 whatsapp_message_id=ctx.message_id,
             )
     except DomainError as exc:
         return CommandResult(reply=exc.message)
 
-    if isinstance(outcome, WithdrawalPending):
-        result = _render_pending(outcome)
-        return dataclasses.replace(
-            result,
-            reply=(
-                f"ℹ️ {fmt_money(outcome.amount)} is at or above the "
-                f"{fmt_money(outcome.threshold)} dual-approval threshold, so I've routed "
-                f"it through the 'withdraw' flow.\n{result.reply}"
-            ),
-        )
+    if isinstance(outcome, CapitalPending):
+        return _render_pending(outcome)
     return CommandResult(reply=_render_posted(outcome))
 
 
@@ -180,12 +176,13 @@ async def handle_withdraw(args: str, ctx: RequestContext) -> CommandResult:
                 partner_name=command.partner_name,
                 amount=command.amount,
                 via=command.via,
+                on=command.on,
                 whatsapp_message_id=ctx.message_id,
             )
     except DomainError as exc:
         return CommandResult(reply=exc.message)
 
-    if isinstance(outcome, WithdrawalPending):
+    if isinstance(outcome, CapitalPending):
         return _render_pending(outcome)
     return CommandResult(reply=_render_posted(outcome))
 
@@ -193,7 +190,7 @@ async def handle_withdraw(args: str, ctx: RequestContext) -> CommandResult:
 def _parse_reference(args: str, verb: str) -> str:
     match = _APPROVAL.match(args.strip())
     if match is None:
-        raise ValidationError(f"Usage: {verb} withdraw <id> — the id is in the request message.")
+        raise ValidationError(f"Usage: {verb} <id> — the id is in the request message.")
     return match["ref"]
 
 
@@ -201,7 +198,7 @@ async def handle_approve(args: str, ctx: RequestContext) -> CommandResult:
     try:
         reference = _parse_reference(args, "approve")
         async with ctx.session_factory() as session:
-            posted = await CapitalService(session).approve_withdrawal(
+            posted = await CapitalService(session).approve_request(
                 ctx.user, reference, whatsapp_message_id=ctx.message_id
             )
     except DomainError as exc:
@@ -213,11 +210,12 @@ async def handle_reject(args: str, ctx: RequestContext) -> CommandResult:
     try:
         reference = _parse_reference(args, "reject")
         async with ctx.session_factory() as session:
-            partner_name, amount = await CapitalService(session).reject_withdrawal(
+            partner_name, amount, entry_type = await CapitalService(session).reject_request(
                 ctx.user, reference, whatsapp_message_id=ctx.message_id
             )
     except DomainError as exc:
         return CommandResult(reply=exc.message)
+    noun = "contribution" if entry_type.value == "contribution" else "withdrawal"
     return CommandResult(
-        reply=f"🚫 Rejected — {partner_name}'s {fmt_money(amount)} withdrawal was not processed."
+        reply=f"🚫 Rejected — {partner_name}'s {fmt_money(amount)} {noun} was not recorded."
     )
