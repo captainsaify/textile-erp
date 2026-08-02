@@ -24,7 +24,14 @@ say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 [ -f .env ] || die ".env not found -- run this from the repo root on the old host."
-compose ps --status running --format '{{.Service}}' | grep -qx postgres \
+
+# Captured first, then matched with a herestring rather than a pipe.
+# `grep -q` exits on its first match, and under `pipefail` the writer's
+# SIGPIPE becomes the pipeline's exit status (141) -- so piping into it
+# reports failure *because* the match was found. With `set -e` that
+# aborts the export claiming postgres is down while it is running.
+RUNNING="$(compose ps --status running --format '{{.Service}}' || true)"
+grep -qx postgres <<<"$RUNNING" \
   || die "postgres is not running; start the stack first (docker compose up -d)."
 
 mkdir -p "$STAGE"/{db,volumes,secrets}

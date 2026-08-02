@@ -116,12 +116,20 @@ sched_logs="$(docker compose logs worker-scheduled beat --since 2h 2>/dev/null)"
 # The minute-by-minute sweep proves beat survived the move. The daily
 # check-in fires once, so an absence here means "not yet today", not
 # "broken" -- reported without failing the run.
-printf '%s' "$sched_logs" | grep -q partner_notice_sweep \
-  && ok "partner_notice_sweep is firing" \
-  || bad "partner_notice_sweep has not run in 2h -- beat or the scheduled worker is down"
-printf '%s' "$sched_logs" | grep -q daily_checkin \
-  && ok "daily_checkin has run" \
-  || printf '    daily_checkin not seen yet (it fires once, on the hour)\n'
+# Herestrings, not pipes: `grep -q` exits on its first match, and under
+# `pipefail` the writer's SIGPIPE (141) becomes the pipeline's status.
+# Piped, this reported a perfectly healthy scheduler as down -- and did
+# so *because* it found what it was looking for.
+if grep -q partner_notice_sweep <<<"$sched_logs"; then
+  ok "partner_notice_sweep is firing"
+else
+  bad "partner_notice_sweep has not run in 2h -- beat or the scheduled worker is down"
+fi
+if grep -q daily_checkin <<<"$sched_logs"; then
+  ok "daily_checkin has run"
+else
+  printf '    daily_checkin not seen yet (it fires once, on the hour)\n'
+fi
 
 printf '\n\033[1m%s passed, %s failed\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
