@@ -26,6 +26,11 @@ from backend.api.commands.correction_commands import (
     handle_edit,
     handle_undo,
 )
+from backend.api.commands.demo_commands import (
+    handle_demo,
+    handle_login,
+    handle_reset_demo,
+)
 from backend.api.commands.money_commands import (
     handle_bank,
     handle_cash,
@@ -400,6 +405,30 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.OWNER,
         handler=handle_restore,
         help_text="Replace all data with a backup's contents. Requires double confirmation.",
+    ),
+    # Demo mode -- docs/29_DemoMode.md. Owner-only: it changes which
+    # business every following message writes to, which is not a
+    # decision to leave with someone who cannot see both sets of books.
+    "login": CommandSpec(
+        name="login",
+        syntax="login as test  |  login as real",
+        min_role=UserRole.OWNER,
+        handler=handle_login,
+        help_text="Switch between your real business and a throwaway demo one.",
+    ),
+    "demo": CommandSpec(
+        name="demo",
+        syntax="demo  |  demo on  |  demo off",
+        min_role=UserRole.OWNER,
+        handler=handle_demo,
+        help_text="Which books you're writing to, and what's in the demo.",
+    ),
+    "reset": CommandSpec(
+        name="reset",
+        syntax="reset demo",
+        min_role=UserRole.OWNER,
+        handler=handle_reset_demo,
+        help_text="Empty the demo business so the next demonstration starts clean.",
     ),
     "help": CommandSpec(
         name="help",

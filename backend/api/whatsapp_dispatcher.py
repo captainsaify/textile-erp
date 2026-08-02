@@ -39,10 +39,24 @@ from backend.core.security import normalize_whatsapp_number, role_at_least
 from backend.models import User
 from backend.repositories.user_repository import UserRepository
 from backend.schemas.whatsapp import WebhookMedia, WebhookMessage, WebhookPayload
+from backend.services.demo_service import DEMO_BANNER, as_demo
 from backend.services.whatsapp_bridge_client import get_bridge_sender
 from backend.services.whatsapp_client import SupportsSendText, get_whatsapp_client
 
 logger = get_logger(__name__)
+
+
+def _marked(result: CommandResult, demo: bool) -> CommandResult:
+    """Every demo reply says so, on its first line.
+
+    Prefixed rather than appended: on a long reply a footer scrolls out
+    of view, and someone glancing at a stock figure has to be able to
+    tell at once whose stock it is.
+    """
+    if not demo or not result.reply:
+        return result
+    return dataclasses.replace(result, reply=f"{DEMO_BANNER}\n\n{result.reply}")
+
 
 _DEDUP_TTL_SECONDS = 24 * 60 * 60  # docs/08_WhatsApp.md §3, transport layer
 _RATE_WINDOW_SECONDS = 60
@@ -146,6 +160,16 @@ class WhatsAppDispatcher:
             )
             return
 
+        # Which books this message writes to, decided once, here. The
+        # user row is detached by now -- the session that loaded it is
+        # closed -- so overriding org_id changes what every service
+        # scopes to and is never written back. No repository or query
+        # needs to know demo mode exists, because none of them ever
+        # stopped filtering by org (docs/29_DemoMode.md).
+        demo = await self._in_demo(sender)
+        if demo:
+            as_demo(user)
+
         if await self._over_rate_limit(sender):
             if await self._first_throttle_notice(sender):
                 await self._client.send_text(message.reply_to, THROTTLE_REPLY)
@@ -164,8 +188,21 @@ class WhatsAppDispatcher:
             await self._client.send_text(message.reply_to, BUSY_REPLY)
             return
         if reply is not None:
-            await self._deliver(message.reply_to, reply)
+            await self._deliver(message.reply_to, _marked(reply, demo))
             await self._notify(reply)
+
+    @staticmethod
+    async def _in_demo(sender: str) -> bool:
+        """Never lets a Redis problem silently route a demo message into
+        the real books -- but a *real* message into the demo is harmless,
+        so the failure direction is chosen deliberately."""
+        from backend.api.commands.demo_commands import is_demo
+
+        try:
+            return await is_demo(sender)
+        except Exception:  # noqa: BLE001
+            logger.error("demo_mode_check_failed", sender=sender, exc_info=True)
+            return True
 
     async def _deliver(self, to_number: str, result: CommandResult) -> None:
         """`reply` always goes out; the interactive payload follows only
@@ -233,6 +270,10 @@ class WhatsAppDispatcher:
             )
             return
 
+        demo = await self._in_demo(media.sender_number)
+        if demo:
+            as_demo(user)
+
         from backend.api.commands.ocr_commands import process_purchase_photo
 
         context = RequestContext(
@@ -251,7 +292,7 @@ class WhatsAppDispatcher:
         result = await process_purchase_photo(
             media.data, media.mime_type, media.message_id, context
         )
-        await self._deliver(media.reply_to, result)
+        await self._deliver(media.reply_to, _marked(result, demo))
 
     async def _handle(self, message: InboundMessage, user: User) -> CommandResult | None:
         if message.kind != "text" or message.text is None:

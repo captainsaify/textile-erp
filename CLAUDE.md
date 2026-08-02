@@ -152,7 +152,7 @@ Full syntax/examples/errors/permissions for every command:
 `withdraw` · `received` · `paid` · `dashboard` · `summary` · `stock` ·
 `stock CODE` · `supplier NAME` · `customer NAME` · `ledger` · `profit` ·
 `cash` · `bank` · `search` · `edit` · `undo` · `delete` · `export` ·
-`backup` · `restore` · `settings` · `help`
+`backup` · `restore` · `settings` · `login as test` · `demo` · `reset demo` · `help`
 
 ## Intelligent behaviors (this is the point of the system)
 
@@ -201,6 +201,7 @@ trigger, threshold, and message copy in the linked doc.
 | [docs/26_RateChanges.md](docs/26_RateChanges.md) | Correcting the price on a confirmed bill |
 | [docs/27_Documents.md](docs/27_Documents.md) | A sheet for every purchase, sale and payment, rebuilt on request |
 | [docs/28_SheetsEverywhere.md](docs/28_SheetsEverywhere.md) | Making a correction visible on the sheet, and a download on every page |
+| [docs/29_DemoMode.md](docs/29_DemoMode.md) | A second, throwaway business to demonstrate in |
 
 ## Coding Standards (summary — full detail in [`docs/17_CodingStandards.md`](docs/17_CodingStandards.md))
 
