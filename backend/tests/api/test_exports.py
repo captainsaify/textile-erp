@@ -214,3 +214,66 @@ async def test_the_cashbook_shows_reversals_and_does_not_count_them(
     # ... and neither is in the totals
     assert totals[3] == 0 and totals[4] == 0
     assert "2 cancelled row(s) excluded" in str(totals[2])
+
+
+async def test_a_backdated_row_does_not_break_the_balance_column(
+    client: AsyncClient, auth: dict[str, str], session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A payment to Iqbal Bhai dated 20-07 was entered on 01-08. The
+    sheet prints rows in date order but read `resulting_balance`, which
+    is written in *insertion* order -- so that row sat between 22-07 and
+    18-07 carrying the balance from the end of the book, and the BALANCE
+    column stopped reconciling with the IN and OUT columns beside it.
+
+    The balance must be the running total of the rows as printed.
+    """
+    async with session_factory() as session, session.begin():
+        actor = (await session.execute(sa.select(User).where(User.org_id == ORG))).scalars().first()
+        assert actor is not None
+        session.add_all(
+            [
+                CashLedger(  # entered first, dated later
+                    org_id=ORG,
+                    entry_date=datetime.date(2026, 7, 20),
+                    entry_type=LedgerEntryType.SALE_RECEIPT,
+                    amount=D("1000"),
+                    resulting_balance=D("1000"),
+                    notes="received early",
+                    source_type="customer_payment",
+                    source_id=uuid.uuid4(),
+                    created_by=actor.id,
+                ),
+                CashLedger(  # entered second, dated *earlier* -- the trap
+                    org_id=ORG,
+                    entry_date=datetime.date(2026, 7, 10),
+                    entry_type=LedgerEntryType.PURCHASE_PAYMENT,
+                    amount=D("-400"),
+                    resulting_balance=D("600"),
+                    notes="backdated payment",
+                    source_type="supplier_payment",
+                    source_id=uuid.uuid4(),
+                    created_by=actor.id,
+                ),
+            ]
+        )
+
+    response = await client.get("/api/v1/exports/cashbook.xlsx?account=cash", headers=auth)
+    assert response.status_code == 200, response.text
+    sheet = load_workbook(io.BytesIO(response.content))["Cash"]
+    rows = [[cell.value for cell in row] for row in sheet.iter_rows(min_row=3)]
+    body, totals = rows[:-1], rows[-1]
+
+    # printed in date order: the backdated payment comes first
+    assert [row[0] for row in body] == ["10-07-2026", "20-07-2026"]
+    # and the balance column follows *that* order, not the insertion one
+    assert body[0][5] == -400.0, "the backdated row kept its insertion-order balance"
+    assert body[1][5] == 600.0
+
+    # every row's balance is the previous one plus in, minus out
+    running = 0.0
+    for row in body:
+        running += (row[3] or 0) - (row[4] or 0)
+        assert row[5] == running, f"balance column breaks at {row[0]}"
+
+    # and the total row agrees with the columns above it
+    assert totals[5] == totals[3] - totals[4] == 600.0

@@ -9,6 +9,7 @@ adapters, not calculations.
 from __future__ import annotations
 
 import datetime
+import decimal
 import uuid
 from typing import Annotated, Any
 
@@ -126,14 +127,27 @@ async def ledger(
     # twice an amount that never moved.
     cancelled = LedgerRepository.cancelled_ids(entries)
     references = await _payment_references(session, user.org_id, entries)
+    # The dashboard sorts these by date before drawing them, so the
+    # balance column has to run in date order too. `resulting_balance`
+    # runs in insertion order and stops agreeing the moment an entry is
+    # backdated -- which is how a payment dated 20-07 came to sit
+    # mid-page carrying the balance from the end of the book.
+    closing = await repo.balance(user.org_id, ledger)
+    in_date_order = sorted(entries, key=lambda row: (row.entry_date, row.created_at, row.id))
+    moved = sum(
+        (row.amount for row in in_date_order if row.id not in cancelled), decimal.Decimal("0")
+    )
+    balances = LedgerRepository.running_balances(
+        in_date_order, cancelled=cancelled, opening=closing - moved
+    )
     return {
-        "balance": money_str(await repo.balance(user.org_id, ledger)),
+        "balance": money_str(closing),
         "entries": [
             {
                 "date": entry.entry_date.isoformat(),
                 "type": entry.entry_type.value,
                 "amount": money_str(entry.amount),
-                "resulting_balance": money_str(entry.resulting_balance),
+                "resulting_balance": money_str(balances[entry.id]),
                 "notes": entry.notes,
                 "cancelled": entry.id in cancelled,
                 # A settlement's handle, so the row can offer its

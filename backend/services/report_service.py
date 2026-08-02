@@ -288,6 +288,18 @@ class ReportService:
         for account in accounts:
             entries = await repository.entries_between(job.org_id, account, start, end)
             cancelled = LedgerRepository.cancelled_ids(entries)
+            # Computed over these rows in the order they are about to be
+            # printed, rather than read off `resulting_balance`, which
+            # runs in insertion order and so disagrees with the page the
+            # moment anything is backdated.
+            opening = (
+                await repository.balance_before(job.org_id, account, start)
+                if job.period_start is not None
+                else ZERO
+            )
+            balances = LedgerRepository.running_balances(
+                entries, cancelled=cancelled, opening=opening
+            )
             by_account[account.capitalize()] = [
                 CashbookRow(
                     entry_date=entry.entry_date,
@@ -295,7 +307,7 @@ class ReportService:
                     details=entry.notes or "",
                     money_in=entry.amount if entry.amount > ZERO else ZERO,
                     money_out=-entry.amount if entry.amount < ZERO else ZERO,
-                    balance=entry.resulting_balance,
+                    balance=balances[entry.id],
                     cancelled=entry.id in cancelled,
                 )
                 for entry in entries

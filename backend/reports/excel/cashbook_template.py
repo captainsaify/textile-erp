@@ -111,7 +111,17 @@ def _write_account(
     live = [row for row in rows if not row.cancelled]
     total_in = sum((row.money_in for row in live), ZERO)
     total_out = sum((row.money_out for row in live), ZERO)
-    closing = rows[-1].balance if rows else ZERO
+    # The closing balance is what the columns above it add up to. It used
+    # to be the last row's own balance, which is a different number the
+    # moment a period has an opening balance or a row is cancelled --
+    # and it read as the sheet contradicting itself.
+    if not rows:
+        opening = ZERO
+    elif rows[0].cancelled:
+        opening = rows[0].balance  # a cancelled row never moved it
+    else:
+        opening = rows[0].balance - rows[0].money_in + rows[0].money_out
+    closing = opening + total_in - total_out
     write_row(
         sheet,
         len(rows) + 3,

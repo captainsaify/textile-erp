@@ -107,6 +107,52 @@ class LedgerRepository:
         rows = (await self._session.execute(stmt)).scalars()
         return cast("list[CashLedger | BankLedger]", list(rows))
 
+    @staticmethod
+    def running_balances(
+        entries: list[CashLedger | BankLedger],
+        *,
+        cancelled: frozenset[uuid.UUID] | set[uuid.UUID] = frozenset(),
+        opening: decimal.Decimal = decimal.Decimal("0"),
+    ) -> dict[uuid.UUID, decimal.Decimal]:
+        """The balance after each row, computed **in the order given**.
+
+        `resulting_balance` on the row cannot answer this. It is a
+        snapshot of the balance when the row was *written*, so it runs in
+        insertion order -- while a cashbook is read in date order. Those
+        two agree only until something is backdated.
+
+        A payment to Iqbal Bhai dated 20-07 but entered on 01-08 made
+        them disagree: on the sheet it sat between 22-07 and 18-07
+        carrying a balance from the end of the book, so the BALANCE
+        column stopped reconciling with the IN and OUT columns beside it.
+
+        A cancelled row does not move the balance. It is still shown --
+        nothing is hidden -- but it is already excluded from money in and
+        money out, and a balance that stepped over it would disagree with
+        those totals.
+        """
+        balances: dict[uuid.UUID, decimal.Decimal] = {}
+        balance = opening
+        for entry in entries:
+            if entry.id not in cancelled:
+                balance += entry.amount
+            balances[entry.id] = balance
+        return balances
+
+    async def balance_before(
+        self, org_id: uuid.UUID, ledger: str, before: datetime.date
+    ) -> decimal.Decimal:
+        """What the account held before a period opened.
+
+        A period-filtered cashbook whose running balance starts at zero
+        describes a business that began on the first of the month.
+        """
+        model = _LEDGERS[ledger]
+        stmt = select(func.coalesce(func.sum(model.amount), 0)).where(
+            model.org_id == org_id, model.entry_date < before
+        )
+        return decimal.Decimal(str((await self._session.execute(stmt)).scalar_one()))
+
     async def entries_between(
         self,
         org_id: uuid.UUID,
