@@ -254,3 +254,72 @@ async def test_the_two_sweeps_keep_separate_places_in_the_log(
         # "start from now"
         group = await read_watermark(session, ORG, WATERMARK_KEY)
     assert group > moment
+
+
+async def test_the_start_point_is_written_down_not_recomputed(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The bug this exists to prevent, in full.
+
+    `read_watermark` answers "now" when no row exists, and the row was
+    only written after a successful delivery. So every sweep asked for
+    activity after *this instant*, the window `(now, now]` was empty,
+    nothing was delivered, no row was written — and a minute later it
+    did exactly the same thing. The fan-out ran for hours reporting
+    `notices: 0` while purchases were being recorded.
+
+    Claiming pins the origin, so the second sweep can see what happened
+    between the two.
+    """
+    import asyncio
+
+    from backend.services.broadcast_service import claim_watermark
+
+    async with session_factory() as session, session.begin():
+        first = await claim_watermark(session, ORG, notices.WATERMARK_KEY)
+
+    await asyncio.sleep(0.05)
+
+    async with session_factory() as session, session.begin():
+        second = await claim_watermark(session, ORG, notices.WATERMARK_KEY)
+
+    assert second == first, "the origin moved, so the window is empty again"
+
+    # ...and it is genuinely persisted, not just memoised in a session
+    async with session_factory() as session:
+        stored = (
+            await session.execute(
+                sa.text("SELECT value FROM settings WHERE org_id = :org AND key = :key").bindparams(
+                    org=ORG, key=notices.WATERMARK_KEY
+                )
+            )
+        ).scalar_one()
+    assert first.isoformat() in str(stored)
+
+
+async def test_claiming_still_never_replays_history(
+    session_factory: async_sessionmaker[AsyncSession], owner_user: User
+) -> None:
+    """Pinning the origin must not turn "start from now" into "send
+    everything that ever happened"."""
+    from backend.services.broadcast_service import claim_watermark
+
+    async with session_factory() as session, session.begin():
+        session.add(
+            AuditLog(
+                org_id=ORG,
+                actor_user_id=owner_user.id,
+                action="purchase.confirmed",
+                entity_type="purchase_headers",
+                entity_id=uuid.uuid4(),
+                after_state={"invoice_no": "OLD-1", "grand_total": "1000"},
+                channel="whatsapp",
+            )
+        )
+
+    async with session_factory() as session, session.begin():
+        since = await claim_watermark(session, ORG, notices.WATERMARK_KEY)
+
+    async with session_factory() as session:
+        pending, _ = await notices.pending_notices(session, ORG, since)
+    assert pending == [], "activity from before the first sweep was replayed"

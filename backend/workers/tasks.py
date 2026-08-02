@@ -349,8 +349,8 @@ def group_broadcast_sweep() -> dict[str, Any]:
     async def _run() -> dict[str, Any]:
         from backend.models import Organization
         from backend.services.broadcast_service import (
+            claim_watermark,
             pending_lines,
-            read_watermark,
             write_watermark,
         )
         from backend.services.group_relay import get_group_relay
@@ -365,8 +365,11 @@ def group_broadcast_sweep() -> dict[str, Any]:
 
         sent = 0
         for org_id in org_ids:
+            # see partner_notice_sweep: a start point that is recomputed
+            # each tick makes the window permanently empty
+            async with factory() as session, session.begin():
+                since = await claim_watermark(session, org_id)
             async with factory() as session:
-                since = await read_watermark(session, org_id)
                 lines, newest = await pending_lines(session, org_id, since)
             if not lines or newest is None:
                 continue
@@ -475,7 +478,7 @@ def partner_notice_sweep() -> dict[str, Any]:
     """
 
     async def _run() -> dict[str, Any]:
-        from backend.services.broadcast_service import read_watermark, write_watermark
+        from backend.services.broadcast_service import claim_watermark, write_watermark
         from backend.services.partner_notice_service import (
             WATERMARK_KEY,
             pending_notices,
@@ -486,8 +489,12 @@ def partner_notice_sweep() -> dict[str, Any]:
         factory = get_session_factory()
         sent = 0
         for org_id in await _org_ids():
+            # `claim`, not `read`: the start point is written on first
+            # sight, or every sweep asks for activity after *this
+            # instant* and nothing is ever the first thing sent.
+            async with factory() as session, session.begin():
+                since = await claim_watermark(session, org_id, WATERMARK_KEY)
             async with factory() as session:
-                since = await read_watermark(session, org_id, WATERMARK_KEY)
                 notices, newest = await pending_notices(session, org_id, since)
             if not notices or newest is None:
                 continue

@@ -159,6 +159,10 @@ async def read_watermark(
     docs/22_GroupBroadcast.md §7) and must keep its own place in it --
     one shared watermark would let whichever swept first swallow the
     other's activity.
+
+    Read-only. Use `claim_watermark` from a sweep: a start point that is
+    recomputed rather than recorded never lets anything be the first
+    thing sent.
     """
     from backend.models import Setting
 
@@ -172,6 +176,44 @@ async def read_watermark(
     except ValueError:
         logger.warning("broadcast_watermark_unreadable", key=key, value=str(row.value))
         return datetime.datetime.now(datetime.UTC)
+
+
+async def claim_watermark(
+    session: AsyncSession, org_id: uuid.UUID, key: str = WATERMARK_KEY
+) -> datetime.datetime:
+    """Where this sweep starts, **written down** the first time it asks.
+
+    "Start from now" has to be recorded, not recomputed. A watermark
+    saved only after a successful delivery leaves every sweep computing
+    `since = now()`, so the window `(now, now]` is empty, nothing is
+    delivered, no watermark is written -- and the next sweep does the
+    same thing a minute later. Nothing can ever be the first thing sent.
+
+    That is not hypothetical: the partner fan-out ran every minute for
+    hours reporting `notices: 0` while purchases were being recorded,
+    and the settings table held no watermark row at all.
+
+    Pinning the origin on first sight gives later sweeps a fixed point
+    to measure from, while still never replaying history.
+    """
+    from backend.models import Setting
+
+    row = (
+        await session.execute(select(Setting).where(Setting.org_id == org_id, Setting.key == key))
+    ).scalar_one_or_none()
+    if row is not None and row.value:
+        try:
+            return datetime.datetime.fromisoformat(str(row.value))
+        except ValueError:
+            logger.warning("broadcast_watermark_unreadable", key=key, value=str(row.value))
+
+    started = datetime.datetime.now(datetime.UTC)
+    if row is None:
+        session.add(Setting(org_id=org_id, key=key, value=started.isoformat()))
+    else:
+        row.value = started.isoformat()
+    logger.info("broadcast_watermark_started", key=key, org_id=str(org_id), at=started.isoformat())
+    return started
 
 
 async def write_watermark(
