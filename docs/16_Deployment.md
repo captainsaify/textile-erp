@@ -316,6 +316,15 @@ be over-engineering for this deployment's actual availability
 requirements. Scaling `api` to 2+ replicas behind Nginx (documented
 lever, not built now) is the natural next step if that changes.
 
+## 6b. Moving host {#moving-host}
+
+Migrating the whole stack to another machine is
+[30_VpsMigration.md](30_VpsMigration.md), with three scripts under
+`scripts/`. The short version: the database travels as a `pg_dump`
+rather than as its volume (the on-disk format is architecture-specific),
+the tunnel credentials carry the public hostname so DNS never changes,
+and Redis is deliberately left behind.
+
 ## 7. Backup & restore {#backup-restore}
 
 - **Backup**: automated nightly (§ [11_BackgroundWorkers.md §5](11_BackgroundWorkers.md#nightly-backup)),

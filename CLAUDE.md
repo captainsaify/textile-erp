@@ -202,6 +202,7 @@ trigger, threshold, and message copy in the linked doc.
 | [docs/27_Documents.md](docs/27_Documents.md) | A sheet for every purchase, sale and payment, rebuilt on request |
 | [docs/28_SheetsEverywhere.md](docs/28_SheetsEverywhere.md) | Making a correction visible on the sheet, and a download on every page |
 | [docs/29_DemoMode.md](docs/29_DemoMode.md) | A second, throwaway business to demonstrate in |
+| [docs/30_VpsMigration.md](docs/30_VpsMigration.md) | Moving the whole thing to a VPS, and what deliberately stays behind |
 
 ## Coding Standards (summary — full detail in [`docs/17_CodingStandards.md`](docs/17_CodingStandards.md))
 
