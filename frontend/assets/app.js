@@ -479,15 +479,76 @@
           },
         ],
         rows,
+        { onRowClick: (row) => loadMovements(row) },
       ),
     );
   }
 
   async function loadStock() {
     slot("dl-stock", "/exports/stock.xlsx", "stock.xlsx");
+    $("stock-detail").hidden = true;
     const payload = await api("/inventory?limit=200");
     stockRows = rowsOf(payload);
     renderStock($("stock-search").value);
+  }
+
+  /* Where the stock actually went. A balance answers "how much"; only
+   * the movements answer "why", which is the question someone opens
+   * this page with when a number looks wrong. */
+  async function loadMovements(product) {
+    const payload = await api(`/inventory/${product.id}/movements?limit=200`);
+    const rows = rowsOf(payload);
+    const panel = $("stock-detail");
+    panel.replaceChildren();
+
+    const head = document.createElement("div");
+    head.className = "detail-head";
+    const brand = product.brand ? ` · ${text(product.brand)}` : "";
+    head.innerHTML = `
+      <div>
+        <h2>${text(product.code)}${brand}</h2>
+        <p class="muted">${text(product.description)} — ${text(product.qty_on_hand)} ${text(
+          product.unit,
+        )} on hand @ ${money(product.avg_cost)} avg</p>
+      </div>
+      <button class="link" id="close-stock">Close</button>`;
+    panel.append(head);
+
+    const wrap = document.createElement("div");
+    wrap.className = "table-scroll";
+    wrap.append(
+      table(
+        [
+          { label: "When", render: (row) => text(row.at).slice(0, 16).replace("T", " ") },
+          { label: "What", render: (row) => text(row.type).replace(/_/g, " ") },
+          { label: "From", render: (row) => text(row.origin || row.reason || "") },
+          {
+            // the sign is the whole point: in or out
+            label: "Change",
+            numeric: true,
+            render: (row) =>
+              String(row.qty_delta).startsWith("-")
+                ? `<span style="color:var(--bad)">${text(row.qty_delta)}</span>`
+                : `<span style="color:var(--good)">+${text(row.qty_delta)}</span>`,
+          },
+          { label: "Balance after", numeric: true, render: (row) => text(row.resulting_qty) },
+          {
+            label: "Avg cost after",
+            numeric: true,
+            render: (row) => money(row.resulting_avg_cost),
+          },
+        ],
+        // oldest first: a stock history reads as a story, and the API
+        // returns newest-first for the dashboard's other uses
+        [...rows].reverse(),
+      ),
+    );
+    panel.append(wrap);
+    panel.hidden = false;
+    $("close-stock").addEventListener("click", () => {
+      panel.hidden = true;
+    });
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   // ------------------------------------------------------- purchases

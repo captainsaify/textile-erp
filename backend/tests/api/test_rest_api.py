@@ -834,3 +834,118 @@ async def test_a_missing_document_is_a_404_not_a_broken_file(
         "/api/v1/payments/deadbeef/sheet",
     ):
         assert (await client.get(path, headers=_auth(token))).status_code == 404
+
+
+async def test_stock_rows_carry_the_id_their_history_needs(
+    client: AsyncClient, owner: User
+) -> None:
+    """The dashboard's stock list is clickable, and a code can't be the
+    handle -- it is only unique within a brand."""
+    token = await _token(client, owner)
+    response = await client.get("/api/v1/inventory", headers=_auth(token))
+
+    assert response.status_code == 200, response.text
+    for row in response.json()["items"]:
+        assert row["id"], row
+        assert "unit" in row
+
+
+async def test_a_movement_says_which_bill_it_came_from(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """ "-1200" is a number; "Sale · Hanif Pune" is the thing you opened
+    the history to find."""
+    import datetime
+    import decimal
+    import uuid as uuid_module
+
+    import sqlalchemy as sa
+
+    from backend.models import (
+        Inventory,
+        InventoryMovement,
+        Product,
+        ProductType,
+        PurchaseHeader,
+        PurchaseLine,
+        Supplier,
+    )
+    from backend.models.enums import MovementType
+    from backend.tests.conftest import SEEDED_MAIN_WAREHOUSE_ID
+
+    suffix = uuid_module.uuid4().hex[:5]
+    async with session_factory() as session:
+        product_type = (
+            (await session.execute(sa.select(ProductType).where(ProductType.org_id == ORG)))
+            .scalars()
+            .first()
+        )
+        assert product_type is not None
+        supplier = Supplier(org_id=ORG, name=f"Origin Co {suffix}", created_by=owner.id)
+        product = Product(
+            org_id=ORG,
+            product_type_id=product_type.id,
+            code=f"ORG{suffix.upper()}",
+            description="Origin Test",
+            unit_id=product_type.default_unit_id,
+            created_by=owner.id,
+        )
+        session.add_all([supplier, product])
+        await session.flush()
+        header = PurchaseHeader(
+            org_id=ORG,
+            supplier_id=supplier.id,
+            warehouse_id=uuid_module.UUID(SEEDED_MAIN_WAREHOUSE_ID),
+            invoice_no=f"ORIG-{suffix}",
+            invoice_date=datetime.date.today(),
+            subtotal=decimal.Decimal("1000"),
+            grand_total=decimal.Decimal("1000"),
+            status="confirmed",
+            created_by=owner.id,
+        )
+        session.add(header)
+        await session.flush()
+        line = PurchaseLine(
+            org_id=ORG,
+            purchase_header_id=header.id,
+            line_no=1,
+            product_id=product.id,
+            qty=decimal.Decimal("10"),
+            rate=decimal.Decimal("100"),
+            line_total=decimal.Decimal("1000"),
+        )
+        session.add(line)
+        await session.flush()
+        session.add_all(
+            [
+                Inventory(
+                    org_id=ORG,
+                    product_id=product.id,
+                    warehouse_id=uuid_module.UUID(SEEDED_MAIN_WAREHOUSE_ID),
+                    qty_on_hand=decimal.Decimal("10"),
+                    weighted_avg_cost=decimal.Decimal("100"),
+                ),
+                InventoryMovement(
+                    org_id=ORG,
+                    product_id=product.id,
+                    warehouse_id=uuid_module.UUID(SEEDED_MAIN_WAREHOUSE_ID),
+                    movement_type=MovementType.PURCHASE,
+                    qty_delta=decimal.Decimal("10"),
+                    unit_cost=decimal.Decimal("100"),
+                    resulting_qty_on_hand=decimal.Decimal("10"),
+                    resulting_avg_cost=decimal.Decimal("100"),
+                    source_type="purchase_line",
+                    source_id=line.id,
+                    created_by=owner.id,
+                ),
+            ]
+        )
+        product_id = product.id
+        await session.commit()
+
+    token = await _token(client, owner)
+    response = await client.get(f"/api/v1/inventory/{product_id}/movements", headers=_auth(token))
+
+    assert response.status_code == 200, response.text
+    movement = response.json()["items"][0]
+    assert movement["origin"] == f"Purchase ORIG-{suffix} · Origin Co {suffix}"

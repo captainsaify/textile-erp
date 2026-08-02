@@ -11,11 +11,14 @@ from __future__ import annotations
 import datetime
 import decimal
 import uuid
+from collections.abc import Sequence
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from backend.api.amounts import money_str, qty_str
 from backend.api.deps import CurrentUser, OwnerUser, Paging, Session
@@ -106,6 +109,7 @@ async def list_inventory(
     records = (
         await session.execute(
             select(Product, Inventory, Brand.name)
+            .options(selectinload(Product.unit))
             .join(Inventory, Inventory.product_id == Product.id)
             .outerjoin(Brand, Brand.id == Product.brand_id)
             .where(
@@ -122,9 +126,14 @@ async def list_inventory(
         "total_qty": qty_str(totals.total_qty),
         "items": [
             {
+                # The id travels with the row so the stock list can ask
+                # for this product's movements. A code cannot: it is only
+                # unique within a brand.
+                "id": str(product.id),
                 "code": product.code,
                 "brand": brand,
                 "description": product.description,
+                "unit": product.unit.code if product.unit else "",
                 "qty_on_hand": qty_str(inv.qty_on_hand),
                 "avg_cost": money_str(inv.weighted_avg_cost),
                 "value": money_str(inv.qty_on_hand * inv.weighted_avg_cost),
@@ -145,6 +154,9 @@ async def product_movements(
     movements = await InventoryRepository(session).movement_history(
         user.org_id, pid, limit=paging.limit
     )
+    # What each movement *was*, not just its sign. "-1200" is a number;
+    # "sale to Hanif Pune" is the thing you opened the history to find.
+    origins = await _movement_origins(session, user.org_id, movements)
     return {
         "items": [
             {
@@ -154,11 +166,60 @@ async def product_movements(
                 "resulting_qty": qty_str(m.resulting_qty_on_hand),
                 "resulting_avg_cost": money_str(m.resulting_avg_cost),
                 "reason": m.reason,
+                "origin": origins.get(m.source_id, ""),
             }
             for m in movements
         ],
         "next_cursor": None,
     }
+
+
+async def _movement_origins(
+    session: AsyncSession, org_id: uuid.UUID, movements: Sequence[Any]
+) -> dict[uuid.UUID, str]:
+    """Which bill or sale each movement came from, as one lookup.
+
+    Movements point at a purchase *line* or a sales *line*, so getting
+    to the party means two joins -- done once for the whole page rather
+    than per row.
+    """
+    from backend.models import Customer, PurchaseLine, SalesLine
+
+    ids = {m.source_id for m in movements if m.source_id is not None}
+    if not ids:
+        return {}
+
+    origins: dict[uuid.UUID, str] = {}
+    purchases = (
+        (
+            await session.execute(
+                select(PurchaseLine.id, PurchaseHeader.invoice_no, Supplier.name)
+                .join(PurchaseHeader, PurchaseHeader.id == PurchaseLine.purchase_header_id)
+                .join(Supplier, Supplier.id == PurchaseHeader.supplier_id)
+                .where(PurchaseLine.id.in_(ids), PurchaseHeader.org_id == org_id)
+            )
+        )
+        .tuples()
+        .all()
+    )
+    for line_id, invoice_no, supplier in purchases:
+        origins[line_id] = f"Purchase {invoice_no} · {supplier}"
+
+    sales = (
+        (
+            await session.execute(
+                select(SalesLine.id, SalesHeader.id, Customer.name)
+                .join(SalesHeader, SalesHeader.id == SalesLine.sales_header_id)
+                .join(Customer, Customer.id == SalesHeader.customer_id)
+                .where(SalesLine.id.in_(ids), SalesHeader.org_id == org_id)
+            )
+        )
+        .tuples()
+        .all()
+    )
+    for line_id, sale_id, customer in sales:
+        origins[line_id] = f"Sale {str(sale_id)[:8]} · {customer}"
+    return origins
 
 
 @router.get("/purchases")
