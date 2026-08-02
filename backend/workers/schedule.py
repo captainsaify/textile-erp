@@ -19,6 +19,13 @@ CELERYBEAT_SCHEDULE: dict[str, dict[str, Any]] = {
         "task": "group_broadcast_sweep",
         "schedule": crontab(minute="*"),
     },
+    # Every minute, for the same reason: a partner hears about a sale
+    # while it can still be undone, and no confirmation ever waits on
+    # the fan-out (docs/22 §7).
+    "partner-notice-sweep": {
+        "task": "partner_notice_sweep",
+        "schedule": crontab(minute="*"),
+    },
     "low-stock-scan": {
         "task": "low_stock_scan",
         "schedule": crontab(hour="6", minute="0"),

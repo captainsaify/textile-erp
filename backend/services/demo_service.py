@@ -28,7 +28,15 @@ from typing import Any
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import OcrTemplate, Organization, ProductType, Unit, User, Warehouse
+from backend.models import (
+    OcrTemplate,
+    Organization,
+    Partner,
+    ProductType,
+    Unit,
+    User,
+    Warehouse,
+)
 
 #: Fixed so it survives restarts and can be referred to in logs, and
 #: unmistakable beside the seeded org's ...0001 in a query result.
@@ -70,8 +78,13 @@ _RESET_ORDER = (
     "suppliers",
     "customers",
     "whatsapp_sessions",
-    "partners",
 )
+
+#: `partners` is deliberately *not* in that list. The partners are who
+#: runs the business, like the units and the product types -- part of
+#: the seed, not the books. `partner_capital` is the books and is
+#: cleared, so a reset leaves the same three people with nothing
+#: invested, ready for the capital demonstration to be given again.
 
 
 class DemoService:
@@ -92,12 +105,17 @@ class DemoService:
         literals: the seed is whatever the live business actually has,
         including any product type or OCR template added since. A demo
         that could not read the same sheets would demonstrate nothing.
-        """
-        if await self.exists():
-            return DEMO_ORG_ID
 
-        self._session.add(Organization(id=DEMO_ORG_ID, name=DEMO_ORG_NAME))
-        await self._session.flush()
+        **Runs the copies every time**, not only on creation. `_twin_id`
+        makes every copy's id a function of its original, so a row
+        already seeded is skipped and one added since is picked up. An
+        existing demo therefore gains a new product type -- or, the case
+        that forced this, the partners -- without having to be destroyed
+        and rebuilt.
+        """
+        if not await self.exists():
+            self._session.add(Organization(id=DEMO_ORG_ID, name=DEMO_ORG_NAME))
+            await self._session.flush()
 
         # Kept in dependency order: product_types point at units,
         # ocr_templates at product_types.
@@ -110,6 +128,14 @@ class DemoService:
             remap={"product_type_id": ProductType},
             skip=lambda row: row.supplier_id is not None,
         )
+        # The partners themselves, so `capital` and `withdraw` can be
+        # rehearsed. `user_id` deliberately points at the *real* user
+        # rather than a copy: a withdrawal needs a second partner's
+        # approval, and that approval has to arrive on the phone of
+        # someone who can actually tap it. Nothing about the demo's
+        # books reaches the real org through that link -- the user row
+        # is read for a name and a number, never written.
+        await self._copy(Partner, source_org_id)
         return DEMO_ORG_ID
 
     async def _copy(
@@ -126,6 +152,9 @@ class DemoService:
         copies -- a demo product type referencing the *real* org's KG
         unit would work until someone deleted it, and would quietly make
         the two businesses share a row.
+
+        A row whose twin is already there is skipped, which is what lets
+        `ensure` run on every switch instead of only at creation.
         """
         rows: list[Any] = list(
             (
@@ -136,8 +165,19 @@ class DemoService:
             .scalars()
             .all()
         )
+        present: set[uuid.UUID] = set(
+            (
+                await self._session.execute(
+                    select(model.id).where(model.org_id == DEMO_ORG_ID)  # type: ignore[attr-defined]
+                )
+            )
+            .scalars()
+            .all()
+        )
         for row in rows:
             if skip is not None and skip(row):
+                continue
+            if self._twin_id(row.id) in present:
                 continue
             values = {
                 column.name: getattr(row, column.name)

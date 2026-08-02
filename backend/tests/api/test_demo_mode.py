@@ -42,7 +42,10 @@ async def clean(session_factory: async_sessionmaker[AsyncSession]) -> AsyncItera
         await session.execute(
             sa.text("DELETE FROM ocr_templates WHERE org_id = :org").bindparams(org=DEMO_ORG_ID)
         )
-        for table in ("warehouses", "product_types", "units", "organizations"):
+        # `partners` is seed, not books, so `reset` deliberately leaves
+        # it -- the fixture has to clear it or one test's demo partners
+        # outlive it into the next
+        for table in ("partners", "warehouses", "product_types", "units", "organizations"):
             await session.execute(
                 sa.text(
                     f"DELETE FROM {table} WHERE {'id' if table == 'organizations' else 'org_id'}"
@@ -244,3 +247,153 @@ async def test_demo_reports_which_books_you_are_on(ctx: RequestContext) -> None:
     on = await handle_demo("", ctx)
     assert "demo" in on.reply.lower()
     assert "untouched" in on.reply
+
+
+# --------------------------------------------------------------------
+# the partners come with the demo, so capital can be rehearsed
+# --------------------------------------------------------------------
+
+
+async def test_the_demo_has_the_same_partners_so_capital_can_be_demonstrated(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """`capital` and `withdraw` need partners. Without them the demo
+    could show every command except the one the partners most wanted to
+    rehearse before using it on their own money."""
+    from backend.models import Partner
+    from backend.services.capital_service import CapitalService
+
+    async with session_factory() as session:
+        session.add_all(
+            [
+                Partner(
+                    org_id=ORG,
+                    user_id=ctx.user.id,
+                    display_name="Firoz",
+                    profit_share_percent=D("50"),
+                    created_by=ctx.user.id,
+                ),
+            ]
+        )
+        await session.commit()
+
+    await handle_login("as test", ctx)
+
+    async with session_factory() as session:
+        names = list(
+            (
+                await session.execute(
+                    sa.select(Partner.display_name).where(Partner.org_id == DEMO_ORG_ID)
+                )
+            ).scalars()
+        )
+    assert "Firoz" in names
+
+    # ...and the demo's capital posts against the demo's partner
+    demo_ctx = RequestContext(
+        user=as_demo(ctx.user), session_factory=session_factory, message_id="m-demo"
+    )
+    async with session_factory() as session:
+        posted = await CapitalService(session).record_contribution(
+            demo_ctx.user, partner_name="Firoz", amount=D("1000"), via="cash"
+        )
+        await session.commit()
+    assert posted.new_balance == D("1000")
+
+    # the real business's Firoz is untouched
+    async with session_factory() as session:
+        real = (
+            await session.execute(
+                sa.text(
+                    "SELECT coalesce(sum(c.amount), 0) FROM partner_capital c "
+                    "JOIN partners p ON p.id = c.partner_id WHERE p.org_id = :org"
+                ).bindparams(org=ORG)
+            )
+        ).scalar_one()
+    assert real == 0
+
+
+async def test_reset_keeps_the_partners_and_clears_what_they_invested(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A demonstration is given more than once. The people stay; the
+    money they put in during the last one does not."""
+    from backend.models import Partner
+    from backend.services.capital_service import CapitalService
+
+    async with session_factory() as session:
+        session.add(
+            Partner(
+                org_id=ORG,
+                user_id=ctx.user.id,
+                display_name="Shoyab",
+                profit_share_percent=D("50"),
+                created_by=ctx.user.id,
+            )
+        )
+        await session.commit()
+
+    await handle_login("as test", ctx)
+    demo_ctx = RequestContext(
+        user=as_demo(ctx.user), session_factory=session_factory, message_id="m-demo"
+    )
+    async with session_factory() as session:
+        await CapitalService(session).record_contribution(
+            demo_ctx.user, partner_name="Shoyab", amount=D("5000"), via="cash"
+        )
+        await session.commit()
+
+    await handle_reset_demo("", demo_ctx)
+
+    async with session_factory() as session:
+        partners = (
+            await session.execute(
+                sa.select(sa.func.count()).select_from(Partner).where(Partner.org_id == DEMO_ORG_ID)
+            )
+        ).scalar_one()
+        capital = (
+            await session.execute(
+                sa.text(
+                    "SELECT count(*) FROM partner_capital c JOIN partners p "
+                    "ON p.id = c.partner_id WHERE p.org_id = :org"
+                ).bindparams(org=DEMO_ORG_ID)
+            )
+        ).scalar_one()
+    assert partners == 1, "the partners are seed, not books"
+    assert capital == 0, "what they invested during the last demo is gone"
+
+
+async def test_switching_in_again_picks_up_seed_added_since(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The demo org already existed before partners were part of the
+    seed, and `ensure` returned early when it did — so an existing demo
+    could never gain anything new."""
+    from backend.models import Partner
+
+    await handle_login("as test", ctx)  # creates the demo with no partners yet
+
+    async with session_factory() as session:
+        session.add(
+            Partner(
+                org_id=ORG,
+                user_id=ctx.user.id,
+                display_name="Added Later",
+                profit_share_percent=D("50"),
+                created_by=ctx.user.id,
+            )
+        )
+        await session.commit()
+
+    await handle_login("as real", ctx)
+    await handle_login("as test", ctx)
+
+    async with session_factory() as session:
+        names = list(
+            (
+                await session.execute(
+                    sa.select(Partner.display_name).where(Partner.org_id == DEMO_ORG_ID)
+                )
+            ).scalars()
+        )
+    assert names == ["Added Later"]

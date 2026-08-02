@@ -111,3 +111,82 @@ broadcasts.
 - **No per-partner filtering.** The group is the audience; anyone in it
   sees everything sent to it.
 - **No retry of a delivered message.** Once posted, it is posted.
+
+## 7. Telling each partner directly {#partner-notices}
+
+The group in §1–§6 is one chat that everyone reads. This is different:
+**each partner gets their own message, and it carries the sheet.**
+
+Three people run this business and any of them can record a purchase, a
+sale or a payment from their own phone. The one who typed it gets the
+confirmation and the bill; the other two got nothing until somebody
+opened the dashboard. So every recorded transaction now reaches the
+partners who did not record it, with the same sheet the person who did
+received.
+
+Not a digest at the end of the day. A sale that shouldn't have happened
+is worth hearing about while it can still be undone.
+
+### Why a second sweep, not the same one
+
+Same mechanism as §3 — a Celery beat sweep over `audit_logs`, every
+minute — for the same three reasons: only committed facts, nothing waits
+on it, one list rather than a call added to thirty services by hand.
+
+But it is a **separate sweep with its own watermark**
+(`partner_notice_watermark`). One shared watermark would let whichever
+ran first swallow the other's activity. It is also **not collapsed** the
+way a group post is: a group channel is skimmed and twenty lines bury
+each other, whereas this is one message per transaction *because* each
+one carries that transaction's sheet, and a sheet with no transaction
+beside it is unreadable.
+
+### Who hears it
+
+**Owners with a WhatsApp number, minus the actor.**
+
+Not the `partners` table: that is the capital-accounting entity, and the
+question here is which people to tell. An owner without a partner row
+still runs the business; a partner row with no linked user has no phone
+to reach. A retired number — Firoz's old 9977250571 — is soft-deleted,
+so it stops receiving without being erased from the record.
+
+Excluding the actor matters more than it looks. They already have the
+confirmation and the sheet in their own chat, and a duplicate arriving a
+minute later reads as a second transaction.
+
+### What it announces
+
+`NOTIFIABLE` in `backend/services/partner_notice_service.py`, **read off
+the live `audit_logs` table rather than written from memory.** §3's
+`BROADCAST_ACTIONS` was not: it lists `sale.confirmed`,
+`expense.recorded` and `capital.contributed`, none of which this system
+has ever written — the real names are `sale.created`, `expense.created`
+and `capital.contribution`. It would have announced almost nothing, and
+nobody noticed because group broadcasting has never been switched on.
+
+`product.created` and `supplier.created` stay off the list for §3's
+reason: one photographed sheet creates 26 products as part of a purchase
+that is itself announced.
+
+### The sheet
+
+Built from the row at send time, not from the message — so a bill whose
+rate was corrected twice arrives as it stands now, not as it stood when
+the correction was typed. Corrections are on the list as much as
+originals, because the whole point is that the other two hold the
+current bill rather than an old copy of it.
+
+| Action | Sheet |
+|---|---|
+| `purchase.confirmed`, `purchase.rate_corrected`, `purchase.returned` | that bill |
+| `purchase.receipt_corrected` | the bill the corrected **line** sits on |
+| `sale.created`, `sale.returned` | that sale |
+| `payment.paid`, `payment.received` | the receipt, keyed by the audit id |
+| everything else | none — the headline is the whole message |
+
+The text is sent **first and on its own**. A document that fails to
+build or upload still leaves the partner knowing what happened, and only
+a failure to send the *text* holds the watermark back. On a transport
+with no file channel (the web.js bridge) the headline goes and the sheet
+is silently skipped, rather than the notice failing.

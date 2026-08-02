@@ -385,3 +385,135 @@ def group_broadcast_sweep() -> dict[str, Any]:
         return {"lines": sent}
 
     return run_async(_run())
+
+
+def _notice_client() -> Any:
+    """Whichever transport this deployment actually sends on."""
+    from backend.core.config import get_settings
+    from backend.services.whatsapp_bridge_client import get_bridge_sender
+    from backend.services.whatsapp_client import get_whatsapp_client
+
+    if get_settings().whatsapp_transport == "webjs":
+        return get_bridge_sender()
+    return get_whatsapp_client()
+
+
+async def _notice_document(org_id: uuid.UUID, reference: Any) -> Any:
+    """Build the sheet a notice carries, from the row rather than from
+    the message -- so a bill corrected twice arrives as it stands now."""
+    from backend.services.document_service import DocumentService
+
+    factory = get_session_factory()
+    async with factory() as session:
+        service = DocumentService(session)
+        if reference.kind == "purchase":
+            return await service.purchase(org_id, uuid.UUID(reference.reference))
+        if reference.kind == "sale":
+            return await service.sale(org_id, uuid.UUID(reference.reference))
+        return await service.payment(org_id, reference.reference)
+
+
+async def _send_notice(client: Any, org_id: uuid.UUID, number: str, notice: Any) -> bool:
+    """One partner, one transaction, and its sheet if it has one.
+
+    The text goes first and on its own: a document that fails to build
+    or upload must still leave the partner knowing what happened.
+    Returning False means nothing reached them at all, which is what
+    holds the watermark back.
+    """
+    from backend.services.partner_notice_service import caption_for
+
+    try:
+        if not await client.send_text(number, notice.body):
+            return False
+    except Exception as exc:  # noqa: BLE001 -- a send failure is never fatal
+        logger.error("partner_notice_text_failed", to=number, error=str(exc))
+        return False
+
+    send_document = getattr(client, "send_document", None)
+    if notice.document is None or send_document is None:
+        # no sheet for this kind of change, or a transport with no file
+        # channel. Either way the headline already went.
+        return True
+
+    try:
+        document = await _notice_document(org_id, notice.document)
+        await send_document(
+            number,
+            document.path,
+            filename=document.path.name,
+            caption=caption_for(notice)[:1024],
+        )
+    except Exception as exc:  # noqa: BLE001 -- see the docstring
+        logger.warning(
+            "partner_notice_document_failed",
+            kind=notice.document.kind,
+            reference=notice.document.reference,
+            error=str(exc),
+        )
+    return True
+
+
+@celery_app.task(
+    name="partner_notice_sweep",
+    soft_time_limit=120,
+    time_limit=180,
+    max_retries=0,
+)
+def partner_notice_sweep() -> dict[str, Any]:
+    """Tell the partners who did not record it what was recorded
+    (docs/22_GroupBroadcast.md §7).
+
+    A sweep over committed audit rows, like the group broadcast and for
+    the same three reasons — but per person rather than to a chat, and
+    carrying the transaction's own sheet, because a partner who is told
+    about a bill and cannot see it has been told half of something.
+
+    No retries. The watermark advances only over notices that actually
+    went out, so a missed sweep is picked up by the next one; retrying
+    would risk telling someone twice, which reads as two transactions.
+    """
+
+    async def _run() -> dict[str, Any]:
+        from backend.services.broadcast_service import read_watermark, write_watermark
+        from backend.services.partner_notice_service import (
+            WATERMARK_KEY,
+            pending_notices,
+            recipients,
+        )
+
+        client = _notice_client()
+        factory = get_session_factory()
+        sent = 0
+        for org_id in await _org_ids():
+            async with factory() as session:
+                since = await read_watermark(session, org_id, WATERMARK_KEY)
+                notices, newest = await pending_notices(session, org_id, since)
+            if not notices or newest is None:
+                continue
+
+            delivered_through: datetime.datetime | None = None
+            for notice in notices:
+                async with factory() as session:
+                    people = await recipients(session, org_id, exclude_user_id=notice.actor_user_id)
+                if not people:
+                    # nobody else to tell -- still counts as handled, or
+                    # a one-owner org would re-read it every minute
+                    delivered_through = notice.at
+                    continue
+                results = [
+                    await _send_notice(client, org_id, person.number, notice) for person in people
+                ]
+                if not any(results):
+                    # nothing reached anyone: stop here so the next sweep
+                    # resumes from this notice rather than skipping it
+                    break
+                delivered_through = notice.at
+                sent += sum(results)
+
+            if delivered_through is not None:
+                async with factory() as session, session.begin():
+                    await write_watermark(session, org_id, delivered_through, WATERMARK_KEY)
+        return {"notices": sent}
+
+    return run_async(_run())

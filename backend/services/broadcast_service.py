@@ -145,40 +145,47 @@ async def pending_lines(
     return lines, newest
 
 
-async def read_watermark(session: AsyncSession, org_id: uuid.UUID) -> datetime.datetime:
+async def read_watermark(
+    session: AsyncSession, org_id: uuid.UUID, key: str = WATERMARK_KEY
+) -> datetime.datetime:
     """Where the last sweep got to.
 
     A missing watermark means "start from now", not "replay everything":
     switching broadcasting on should not dump the entire history into
     the group.
+
+    `key` is a parameter because a second sweep reads the same audit log
+    for a different audience (the partner fan-out,
+    docs/22_GroupBroadcast.md §7) and must keep its own place in it --
+    one shared watermark would let whichever swept first swallow the
+    other's activity.
     """
     from backend.models import Setting
 
     row = (
-        await session.execute(
-            select(Setting).where(Setting.org_id == org_id, Setting.key == WATERMARK_KEY)
-        )
+        await session.execute(select(Setting).where(Setting.org_id == org_id, Setting.key == key))
     ).scalar_one_or_none()
     if row is None or not row.value:
         return datetime.datetime.now(datetime.UTC)
     try:
         return datetime.datetime.fromisoformat(str(row.value))
     except ValueError:
-        logger.warning("broadcast_watermark_unreadable", value=str(row.value))
+        logger.warning("broadcast_watermark_unreadable", key=key, value=str(row.value))
         return datetime.datetime.now(datetime.UTC)
 
 
 async def write_watermark(
-    session: AsyncSession, org_id: uuid.UUID, moment: datetime.datetime
+    session: AsyncSession,
+    org_id: uuid.UUID,
+    moment: datetime.datetime,
+    key: str = WATERMARK_KEY,
 ) -> None:
     from backend.models import Setting
 
     row = (
-        await session.execute(
-            select(Setting).where(Setting.org_id == org_id, Setting.key == WATERMARK_KEY)
-        )
+        await session.execute(select(Setting).where(Setting.org_id == org_id, Setting.key == key))
     ).scalar_one_or_none()
     if row is None:
-        session.add(Setting(org_id=org_id, key=WATERMARK_KEY, value=moment.isoformat()))
+        session.add(Setting(org_id=org_id, key=key, value=moment.isoformat()))
     else:
         row.value = moment.isoformat()

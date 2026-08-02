@@ -196,7 +196,7 @@ trigger, threshold, and message copy in the linked doc.
 | [docs/19_InteractiveMessages.md](docs/19_InteractiveMessages.md) | WhatsApp buttons and list menus, and their limits |
 | [docs/20_ConversationalIntake.md](docs/20_ConversationalIntake.md) | Photo → intent → gap analysis → one question at a time |
 | [docs/21_WebDashboard.md](docs/21_WebDashboard.md) | Read-heavy dashboard, chart forms, deployment on the domain |
-| [docs/22_GroupBroadcast.md](docs/22_GroupBroadcast.md) | Posting to the partners' group via an outbound-only relay |
+| [docs/22_GroupBroadcast.md](docs/22_GroupBroadcast.md) | Posting to the partners' group, and telling each partner directly with the sheet |
 | [docs/23_ReceiptCorrections.md](docs/23_ReceiptCorrections.md) | When fewer bales arrive than were billed |
 | [docs/26_RateChanges.md](docs/26_RateChanges.md) | Correcting the price on a confirmed bill |
 | [docs/27_Documents.md](docs/27_Documents.md) | A sheet for every purchase, sale and payment, rebuilt on request |

@@ -71,6 +71,22 @@ the two businesses share a row.
 Supplier-specific OCR templates are **not** copied: they name real
 suppliers.
 
+**The partners are copied too**, and their `user_id` deliberately points
+at the *real* user rather than a twin. A withdrawal needs a second
+partner's approval, and that approval has to arrive on the phone of
+someone who can actually tap it. Nothing about the demo's books reaches
+the real org through that link — the user row is read for a name and a
+number, never written. Without this the demo could show every command
+except `capital` and `withdraw`, which are the two the partners most
+want to rehearse before using them on their own money.
+
+`ensure` runs the copies on **every** switch, not only at creation.
+Because `_twin_id` makes each copy's id a function of its original, a
+row already seeded is skipped and one added since is picked up — so an
+existing demo gains new seed without being destroyed and rebuilt. That
+was not academic: the demo org already existed before the partners were
+part of the seed, and `ensure` returned early whenever it did.
+
 ## 4. Telling them apart
 
 Every reply while the mode is on is prefixed:
@@ -101,7 +117,32 @@ this system that does. There is no audit trail worth keeping for a
 business that was never real. It refuses outside demo mode, and checks
 `ctx.user.org_id == DEMO_ORG_ID` a second time before deleting anything.
 
-## 6. What is *not* covered
+It clears `partner_capital` but **not** `partners`. The partners are who
+runs the business, like the units and the product types — seed, not
+books. So a reset leaves the same people with nothing invested, ready
+for the capital demonstration to be given again.
+
+## 6. Rehearsing a withdrawal, two phones {#two-phones}
+
+The one flow that needs more than one person. Both partners switch first
+— an approval typed on real books cannot find a demo request:
+
+1. Both send **`login as test`**.
+2. One sends **`capital Firoz 100000 cash`** — capital in, no approval
+   needed.
+3. The same person sends **`withdraw Firoz 30000 cash`**. Withdrawals at
+   or above **₹25,000** (`capital_withdrawal_dual_approval_threshold`)
+   need a second partner, so this one is held.
+4. The *other* partner's phone gets the request with **Approve** /
+   **Reject** buttons. Either works; approving posts the withdrawal,
+   rejecting leaves the capital where it was.
+5. **`reset demo`** clears what was invested and leaves the people, so
+   it can be run again.
+
+Every reply throughout carries the 🧪 DEMO banner, and the real books do
+not move.
+
+## 7. What is *not* covered
 
 The **web dashboard always shows the real business.** It authenticates
 against `users.org_id` in the database, which demo mode deliberately
@@ -109,7 +150,7 @@ never writes to. Demonstrating the dashboard therefore shows real
 figures. If a demonstration needs the dashboard on demo data too, that
 is a separate change: an org claim in the JWT and a switcher in the UI.
 
-## 7. Tests
+## 8. Tests
 
 `backend/tests/api/test_demo_mode.py`. The property under test is not
 "demo mode works" but that **a demo message cannot reach the real
