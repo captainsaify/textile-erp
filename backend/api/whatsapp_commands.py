@@ -41,6 +41,7 @@ from backend.api.commands.ocr_commands import handle_details
 from backend.api.commands.ops_commands import handle_backup, handle_export, handle_restore
 from backend.api.commands.purchase_commands import handle_purchase
 from backend.api.commands.report_commands import (
+    handle_activity,
     handle_customer,
     handle_dashboard,
     handle_ledger,
@@ -358,6 +359,18 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         min_role=UserRole.STAFF,
         handler=handle_ledger,
         help_text="Statement of invoices/payments for a party, or movement history for a product.",
+        shareable=True,
+    ),
+    "activity": CommandSpec(
+        name="activity",
+        syntax="activity [how many]",
+        min_role=UserRole.STAFF,
+        handler=handle_activity,
+        help_text=(
+            "The last 10 things recorded, whoever recorded them. The pull half of the "
+            "partner fan-out: a message missed, or one WhatsApp could not deliver, "
+            "should never mean asking someone else what changed."
+        ),
         shareable=True,
     ),
     "edit": CommandSpec(

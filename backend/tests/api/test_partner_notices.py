@@ -323,3 +323,98 @@ async def test_claiming_still_never_replays_history(
     async with session_factory() as session:
         pending, _ = await notices.pending_notices(session, ORG, since)
     assert pending == [], "activity from before the first sweep was replayed"
+
+
+# --------------------------------------------------------------------
+# the pull half: `activity`
+# --------------------------------------------------------------------
+
+
+async def test_activity_returns_the_last_ten_newest_first(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A push that depends on WhatsApp reaching a phone sometimes will
+    not. The same record has to be available on demand."""
+    actor = await _owner(session_factory, "Firoz", number="+919000000001")
+    for index in range(12):
+        await _audit(
+            session_factory,
+            actor_id=actor,
+            action="payment.paid",
+            after={"amount": str(100 + index), "name": f"Supplier {index}"},
+        )
+
+    async with session_factory() as session:
+        lines = await notices.recent_activity(session, ORG, limit=10)
+
+    assert len(lines) == 10
+    assert "Supplier 11" in lines[0].body, "newest first"
+    assert lines[0].at >= lines[-1].at
+
+
+async def test_activity_shows_only_what_the_fan_out_would_have_sent(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """One list, not two. If `activity` showed rows the notices leave
+    out, the two would disagree about what happened."""
+    actor = await _owner(session_factory, "Shoyab", number="+919000000002")
+    await _audit(session_factory, actor_id=actor, action="sale.created", after={"amount": "500"})
+    # 26 of these arrive with one photographed sheet; deliberately not
+    # notifiable, so deliberately not here either
+    await _audit(session_factory, actor_id=actor, action="product.created", after={"code": "TRP"})
+
+    async with session_factory() as session:
+        lines = await notices.recent_activity(session, ORG, limit=10)
+
+    assert len(lines) == 1
+    assert "Sale recorded" in lines[0].body
+
+
+async def test_activity_names_who_did_it(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Three people record into one set of books; "who" is half the
+    information."""
+    actor = await _owner(session_factory, "Firoz", number="+919000000003")
+    await _audit(session_factory, actor_id=actor, action="expense.created", after={"amount": "250"})
+
+    async with session_factory() as session:
+        lines = await notices.recent_activity(session, ORG, limit=10)
+
+    assert "Firoz" in lines[0].body
+
+
+async def test_the_daily_checkin_asks_for_a_reply_and_says_why(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The reply is the point -- it re-opens WhatsApp's 24-hour window
+    so the day's notices can be delivered at all. A message that didn't
+    earn a reply would leave the window shut."""
+    from backend.workers.tasks import _checkin_body
+
+    actor = await _owner(session_factory, "Firoz", number="+919000000004")
+    await _audit(
+        session_factory,
+        actor_id=actor,
+        action="purchase.confirmed",
+        after={"invoice_no": "002", "grand_total": "28644"},
+    )
+    async with session_factory() as session:
+        lines = await notices.recent_activity(session, ORG, limit=5)
+
+    body = _checkin_body(datetime.date(2026, 8, 3), lines)
+
+    assert "Reply to this message" in body
+    assert "activity" in body
+    assert "002" in body, "it carries real figures, or it is not worth replying to"
+
+
+def test_the_checkin_says_so_when_nothing_happened() -> None:
+    """Silence and 'nothing happened' are different, and only one of
+    them tells you the bot is still alive."""
+    from backend.workers.tasks import _checkin_body
+
+    body = _checkin_body(datetime.date(2026, 8, 3), [])
+
+    assert "Nothing new" in body
+    assert "Reply to this message" in body

@@ -190,3 +190,84 @@ build or upload still leaves the partner knowing what happened, and only
 a failure to send the *text* holds the watermark back. On a transport
 with no file channel (the web.js bridge) the headline goes and the sheet
 is silently skipped, rather than the notice failing.
+
+### The watermark has to be written down {#watermark-origin}
+
+A missing watermark means *start from now*, never *replay everything*.
+That intent was right and the implementation was not: `read_watermark`
+**computed** `now()` on a miss, and the row was only written after a
+delivery succeeded. So every sweep asked for activity created after
+*this instant*, found the window `(now, now]` empty, delivered nothing,
+wrote nothing — and repeated a minute later. Nothing could ever be the
+first thing sent.
+
+It ran that way for hours, once a minute, logging `notices: 0` while
+purchases were being recorded seconds earlier, and `settings` held no
+watermark row at all. Three separate "he never got it" reports came out
+of it.
+
+`claim_watermark` writes the origin the first time it is asked, so
+later sweeps have a fixed point to measure from — while still never
+replaying history, because the claimed origin is now rather than the
+beginning of the log. Both sweeps use it; the group broadcast had the
+same latent bug and had simply never been switched on to reveal it.
+
+## 8. When WhatsApp won't deliver {#delivery}
+
+Two limits sit outside this codebase and neither announces itself.
+
+**The 24-hour window.** A business may only send a free-form message to
+someone who messaged it within the last 24 hours. A partner who spends
+a day not typing falls outside it and every notice aimed at them is
+refused.
+
+**The allowed list.** While the sender is a Meta *test* number it can
+only reach up to five numbers registered against it. A recipient who is
+not on that list is refused with `131030` — and a **message template
+does not bypass this**, which was worth establishing before building
+templates to work around the wrong problem.
+
+### Failures are read, not assumed {#delivery-receipts}
+
+Meta returns a message id for a send it has merely *accepted*. Whether
+it arrived comes back minutes later as a delivery receipt, and those
+were parsed into `WebhookValue.statuses` and then never read — the
+field was commented "acknowledged, never processed". An undelivered
+notice was therefore indistinguishable from a delivered one.
+
+`WhatsAppDispatcher._record_delivery` now logs every failure with the
+recipient, Meta's error code and its explanation. Only failures: every
+message also produces sent/delivered/read receipts, and logging those
+would bury the one line worth reading.
+
+### The daily check-in {#daily-checkin}
+
+One message a day to each owner, at `settings.daily_checkin_hour`
+(default 9, in the **org's** timezone — the task fires hourly and each
+org acts only on its own hour, so the time is a setting rather than a
+redeploy).
+
+Replying to it re-opens the 24-hour window, which is what makes the
+rest of the day's notices deliverable. So it has to be worth replying
+to: it carries the last five updates and real figures, not a bare
+"please reply". A message that earns no reply leaves the window shut,
+which is the whole failure it exists to prevent.
+
+**Missing one costs delivery, never the record.** The same list is
+always available on demand — see `activity` below.
+
+## 9. The pull half: `activity` {#activity}
+
+`activity` returns the last ten things recorded, whoever recorded them,
+each with how long ago in words a person uses — "20 min ago",
+"yesterday" — because the question being asked is *has this gone in
+yet*, not *at what o'clock*. `activity 20` widens it, capped at 30.
+
+It reads the **same** `NOTIFIABLE` list the fan-out sends, so the push
+and the pull cannot disagree about what happened. If `activity` showed
+rows the notices leave out, one of them would be lying.
+
+This is the answer to every delivery limit above. A partner outside the
+window, a number not on the allowed list, a message lost in a busy
+chat, a phone left on a shelf — none of it ends with someone asking
+another partner what changed.

@@ -266,6 +266,30 @@ somehow accessible from one number); a request expires after 48h
 
 ---
 
+---
+
+### `activity` {#activity}
+
+**Syntax:** `activity [how many]`
+**Example:** `activity` · `activity 20`
+**Success:**
+```
+🕘 Last 10 update(s)
+• 🧾 Purchase recorded: ₹28,64,400.00 · 002 — Firoz — 20 min ago
+• 💸 Paid a supplier: ₹1,65,000.00 · Iqbal Bhai — Sarfaraz — 3h ago
+...
+Reply to this message any time to record something or ask for a sheet.
+```
+**Notes:** the pull half of the partner fan-out
+([22 §9](22_GroupBroadcast.md#activity)). Reads the same list the
+notices push, so the two cannot disagree. Default 10, capped at 30.
+Times are relative — the question is "has it gone in yet", not "at what
+o'clock".
+**Permissions:** staff and above.
+**Edge cases:** an empty log says so rather than returning nothing.
+
+---
+
 ### `received` {#received}
 
 **Syntax:** `received Customer: <name> <amount> <cash|bank> [against <invoice-ref>] [on <DD-MM-YYYY>]`

@@ -524,3 +524,86 @@ def partner_notice_sweep() -> dict[str, Any]:
         return {"notices": sent}
 
     return run_async(_run())
+
+
+@celery_app.task(
+    name="daily_checkin",
+    soft_time_limit=120,
+    time_limit=180,
+    max_retries=0,
+)
+def daily_checkin() -> dict[str, Any]:
+    """One message a day to each owner, at a fixed hour.
+
+    WhatsApp only lets a business send a free-form message to someone
+    who messaged it in the last 24 hours. Partners who spend a day not
+    typing anything fall outside that window, and every notification
+    aimed at them is refused -- silently, until delivery receipts were
+    being read.
+
+    So the day opens with one predictable message carrying the last few
+    updates. Replying to it re-opens the window for the next 24 hours,
+    which is what makes the rest of the day's notices deliverable. It is
+    fine to miss one: the same list is always available on demand with
+    `activity`, and missing it costs delivery, never the record.
+
+    Fires hourly and sends only to orgs whose configured hour it is, so
+    the time is a setting rather than a redeploy.
+    """
+
+    async def _run() -> dict[str, Any]:
+        from backend.repositories.accounting_repository import business_now
+        from backend.repositories.settings_repository import SettingsRepository
+        from backend.services.partner_notice_service import recent_activity, recipients
+
+        client = _notice_client()
+        factory = get_session_factory()
+        sent = 0
+
+        for org_id in await _org_ids():
+            async with factory() as session:
+                # the org's own clock, not the server's: "9 in the
+                # morning" is a fact about the business, not about UTC
+                now = await business_now(session, org_id)
+                if await SettingsRepository(session).daily_checkin_hour(org_id) != now.hour:
+                    continue
+                lines = await recent_activity(session, org_id, limit=DAILY_CHECKIN_LINES)
+                people = await recipients(session, org_id, exclude_user_id=None)
+
+            body = _checkin_body(now.date(), lines)
+            for person in people:
+                try:
+                    if await client.send_text(person.number, body):
+                        sent += 1
+                except Exception as exc:  # noqa: BLE001 -- never fatal
+                    logger.error("daily_checkin_failed", to=person.number, error=str(exc))
+        return {"sent": sent}
+
+    return run_async(_run())
+
+
+#: Enough to show the day was covered without becoming a report nobody
+#: reads. `activity` is there for the full list.
+DAILY_CHECKIN_LINES = 5
+
+
+def _checkin_body(today: datetime.date, lines: list[Any]) -> str:
+    """Worth replying to, or it will be ignored and the window stays
+    shut. So it carries yesterday's actual figures rather than a bare
+    'please reply' -- the reply is a side effect of it being useful."""
+    from backend.api.formatting import fmt_date
+
+    rendered = [f"☀️ Good morning — {fmt_date(today)}"]
+    if lines:
+        rendered.append("")
+        rendered.append("Since you last looked:")
+        rendered.extend(f"• {line.body}" for line in lines)
+    else:
+        rendered.append("")
+        rendered.append("Nothing new was recorded yesterday.")
+    rendered.append("")
+    rendered.append(
+        "Reply to this message — even just 'ok' — so the day's updates can reach you. "
+        "Send 'activity' any time for the last 10."
+    )
+    return "\n".join(rendered)

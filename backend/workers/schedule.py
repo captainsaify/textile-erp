@@ -26,6 +26,14 @@ CELERYBEAT_SCHEDULE: dict[str, dict[str, Any]] = {
         "task": "partner_notice_sweep",
         "schedule": crontab(minute="*"),
     },
+    # Hourly, but each org only acts on it when its own configured hour
+    # has come round (docs/22 §8). One message a day, at a predictable
+    # time, whose reply is what keeps WhatsApp's 24-hour window open.
+    "daily-checkin": {
+        "task": "daily_checkin",
+        "schedule": crontab(minute="0"),
+        "options": {"queue": "scheduled"},
+    },
     "low-stock-scan": {
         "task": "low_stock_scan",
         "schedule": crontab(hour="6", minute="0"),

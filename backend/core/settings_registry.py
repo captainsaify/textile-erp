@@ -112,6 +112,17 @@ _SPECS: tuple[SettingSpec, ...] = (
         ),
     ),
     SettingSpec(
+        key="daily_checkin_hour",
+        kind="int",
+        default=9,
+        minimum=0,
+        maximum=23,
+        description=(
+            "Hour (business time) the daily check-in goes out. Replying to it is what "
+            "keeps WhatsApp's 24-hour window open for the day's notifications."
+        ),
+    ),
+    SettingSpec(
         key="withdrawal_approval_timeout_hours",
         kind="int",
         default=48,

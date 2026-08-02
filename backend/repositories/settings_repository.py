@@ -95,6 +95,9 @@ class SettingsRepository:
     async def contribution_dual_approval_threshold(self, org_id: uuid.UUID) -> decimal.Decimal:
         return await self.get_decimal(org_id, "capital_contribution_dual_approval_threshold")
 
+    async def daily_checkin_hour(self, org_id: uuid.UUID) -> int:
+        return await self.get_int(org_id, "daily_checkin_hour")
+
     async def withdrawal_approval_timeout_hours(self, org_id: uuid.UUID) -> int:
         return await self.get_int(org_id, "withdrawal_approval_timeout_hours")
 

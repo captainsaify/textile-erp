@@ -1,10 +1,11 @@
 """`dashboard`, `summary`, `profit`, `supplier NAME`, `customer NAME`,
-`ledger` -- docs/08_WhatsApp.md #dashboard, #summary, #profit,
-#supplier-name, #customer-name, #ledger.
+`ledger`, `activity` -- docs/08_WhatsApp.md #dashboard, #summary,
+#profit, #supplier-name, #customer-name, #ledger, #activity.
 """
 
 from __future__ import annotations
 
+import datetime
 import re
 
 from backend.api.command_types import CommandResult, RequestContext
@@ -298,3 +299,60 @@ async def _handle_product_ledger(code: str, ctx: RequestContext) -> CommandResul
             f"→ {fmt_qty(movement.resulting_qty_on_hand)} {unit} on hand"
         )
     return CommandResult(reply="\n".join(lines))
+
+
+#: Ten fits a phone screen without scrolling past the point, and covers
+#: a normal day's trading in this business.
+ACTIVITY_LIMIT = 10
+
+
+async def handle_activity(args: str, ctx: RequestContext) -> CommandResult:
+    """`activity` -- the last ten things that happened, whoever did them.
+
+    The pull half of the partner fan-out (docs/22 §7). Pushing depends
+    on WhatsApp reaching a phone, and sometimes it does not: a number
+    outside the sender's allowed list, a message lost in a busy chat, a
+    partner who was away for the morning. None of that should end with
+    someone asking another partner what changed, so the same record is
+    always one word away.
+    """
+    from backend.services.partner_notice_service import recent_activity
+
+    requested = ACTIVITY_LIMIT
+    token = args.strip()
+    if token.isdigit():
+        # `activity 20` when a day has been busier than usual; capped so
+        # one command can't return a month of history to a phone
+        requested = max(1, min(int(token), 30))
+
+    async with ctx.session_factory() as session:
+        lines = await recent_activity(session, ctx.user.org_id, limit=requested)
+
+    if not lines:
+        return CommandResult(
+            reply="Nothing recorded yet. Once a purchase, sale or payment goes in, it shows here."
+        )
+
+    now = datetime.datetime.now(datetime.UTC)
+    rendered = [f"🕘 Last {len(lines)} update(s)"]
+    for line in lines:
+        rendered.append(f"• {line.body} — {_ago(now - line.at)}")
+    rendered.append("")
+    rendered.append("Reply to this message any time to record something or ask for a sheet.")
+    return CommandResult(reply="\n".join(rendered), shareable=True)
+
+
+def _ago(delta: datetime.timedelta) -> str:
+    """ "20 minutes ago" beats a timestamp on a phone: the question being
+    asked is "has this happened yet", not "at what o'clock"."""
+    seconds = int(delta.total_seconds())
+    if seconds < 90:
+        return "just now"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} min ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h ago"
+    days = hours // 24
+    return "yesterday" if days == 1 else f"{days} days ago"

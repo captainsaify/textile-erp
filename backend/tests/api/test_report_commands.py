@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.api.command_types import RequestContext
 from backend.api.commands.report_commands import (
+    handle_activity,
     handle_customer,
     handle_dashboard,
     handle_ledger,
@@ -497,3 +498,48 @@ async def test_payables_total_matches_supplier_outstanding(
         total, count = await ReportRepository(session).payables_total(ORG)
     assert total == D("2500.00")
     assert count == 1
+
+
+async def test_activity_lists_recent_entries_with_how_long_ago(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """`activity` is what someone sends when they think they missed
+    something — so it has to answer "has it gone in yet", which is a
+    question about *when*, not about o'clock."""
+    from backend.api.commands.report_commands import handle_activity
+    from backend.models import AuditLog
+
+    async with session_factory() as session, session.begin():
+        session.add(
+            AuditLog(
+                org_id=ORG,
+                actor_user_id=ctx.user.id,
+                action="purchase.confirmed",
+                entity_type="purchase_headers",
+                entity_id=uuid.uuid4(),
+                after_state={"invoice_no": "002", "grand_total": "28644"},
+                channel="whatsapp",
+            )
+        )
+
+    result = await handle_activity("", ctx)
+
+    assert "Last 1 update" in result.reply
+    assert "002" in result.reply
+    assert "just now" in result.reply
+    assert result.shareable
+
+
+async def test_activity_is_honest_about_an_empty_log(ctx: RequestContext) -> None:
+    result = await handle_activity("", ctx)
+    assert "Nothing recorded yet" in result.reply
+
+
+def test_how_long_ago_reads_like_a_person_would_say_it() -> None:
+    from backend.api.commands.report_commands import _ago
+
+    assert _ago(datetime.timedelta(seconds=30)) == "just now"
+    assert _ago(datetime.timedelta(minutes=20)) == "20 min ago"
+    assert _ago(datetime.timedelta(hours=5)) == "5h ago"
+    assert _ago(datetime.timedelta(days=1, hours=2)) == "yesterday"
+    assert _ago(datetime.timedelta(days=4)) == "4 days ago"

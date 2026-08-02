@@ -201,6 +201,36 @@ async def pending_notices(
     return notices, max(notice.at for notice in notices)
 
 
+@dataclasses.dataclass(frozen=True)
+class ActivityLine:
+    at: datetime.datetime
+    body: str
+
+
+async def recent_activity(
+    session: AsyncSession, org_id: uuid.UUID, *, limit: int = 10
+) -> list[ActivityLine]:
+    """The last few things that happened, newest first.
+
+    The same list the fan-out pushes, available to *pull*. A push that
+    depends on WhatsApp reaching a phone will sometimes not: a number
+    outside the sender's allowed list, a message missed in a busy chat,
+    a partner who was away. None of those should leave someone asking
+    another partner what changed, so the record is always one word away.
+    """
+    stmt = (
+        select(AuditLog, User.full_name)
+        .join(User, User.id == AuditLog.actor_user_id, isouter=True)
+        .where(AuditLog.org_id == org_id, AuditLog.action.in_(tuple(NOTIFIABLE)))
+        .order_by(AuditLog.created_at.desc())
+        .limit(limit)
+    )
+    return [
+        ActivityLine(at=entry.created_at, body=headline(entry, actor))
+        for entry, actor in (await session.execute(stmt)).all()
+    ]
+
+
 async def recipients(
     session: AsyncSession, org_id: uuid.UUID, *, exclude_user_id: uuid.UUID | None
 ) -> list[Recipient]:
@@ -237,11 +267,13 @@ def caption_for(notice: Notice) -> str:
 __all__ = [
     "NOTIFIABLE",
     "WATERMARK_KEY",
+    "ActivityLine",
     "DocumentRef",
     "Notice",
     "Recipient",
     "caption_for",
     "headline",
     "pending_notices",
+    "recent_activity",
     "recipients",
 ]
