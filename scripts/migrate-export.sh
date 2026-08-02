@@ -67,9 +67,21 @@ POPULATED=$(awk -F, '$2>0' "$STAGE/db/row-counts.csv" | wc -l | tr -d ' ')
 [ "$POPULATED" -gt 0 ] || die "every table counted zero -- refusing to package an empty database."
 say "  ${POPULATED} populated table(s)"
 
-# --- 2. the volumes that hold real files ----------------------------
-# Not redis, not celery_state: both are caches. See the manifest.
-for volume in attachments reports backups; do
+# --- 2. redis ---------------------------------------------------------
+# Copied, not skipped. It is a cache in the sense that it rebuilds --
+# but `wa:demo:<number>` is what puts a phone on the demo books, and
+# `wa:msg:<id>` is what stops a redelivered webhook being processed
+# twice. Dropping it would land the partners back on the real business
+# mid-demonstration, which is the exact accident demo mode exists to
+# prevent. SAVE first so the snapshot on disk is current.
+say "Snapshotting redis"
+REDIS_PASS="$(grep -E '^REDIS_PASSWORD=' .env | cut -d= -f2- | tr -d '\r\n')"
+compose exec -T redis sh -lc \
+  "redis-cli --no-auth-warning -a '${REDIS_PASS}' SAVE" >/dev/null 2>&1 \
+  || say "  (SAVE refused; the append-only log is still captured)"
+
+# --- 3. the volumes that hold real files ----------------------------
+for volume in attachments reports backups redis_data; do
   say "Archiving volume: ${volume}"
   docker run --rm \
     -v "textile-erp_${volume}:/from:ro" \
@@ -77,7 +89,15 @@ for volume in attachments reports backups; do
     alpine:3.20 tar czf "/to/${volume}.tar.gz" -C /from . 2>/dev/null
 done
 
-# --- 3. secrets and host-specific config ----------------------------
+# Host-side data/ predates the volumes and still holds the manual
+# pg_dumps taken before each destructive change. Losing those would
+# lose the only copies of the books as they stood before a purge.
+say "Archiving host data/ (excluding migration packages)"
+tar czf "$STAGE/volumes/host-data.tar.gz" \
+  --exclude='./migration' --exclude='./migration/*' \
+  -C data . 2>/dev/null || true
+
+# --- 4. secrets and host-specific config ----------------------------
 say "Collecting secrets"
 cp .env "$STAGE/secrets/.env"
 if [ -d docker/cloudflared ]; then
@@ -89,7 +109,7 @@ if [ -d docker/certs ] && [ -n "$(ls -A docker/certs 2>/dev/null)" ]; then
   cp -R docker/certs "$STAGE/secrets/certs"
 fi
 
-# --- 4. the manifest ------------------------------------------------
+# --- 5. the manifest ------------------------------------------------
 say "Writing the manifest"
 GIT_SHA="$(git rev-parse HEAD)"
 GIT_DIRTY="$(git status --porcelain | wc -l | tr -d ' ')"
@@ -113,18 +133,25 @@ INCLUDED
                          link from a bill back to what was photographed
   volumes/reports        generated exports; regenerable, but cheap
   volumes/backups        the nightly backup history
+  volumes/redis_data     sessions, and the demo-mode flag that decides
+                         which set of books a phone writes to. Also the
+                         webhook dedup keys, so a redelivery after the
+                         move is not processed a second time.
+  volumes/host-data      data/ on the old host: the manual pg_dumps
+                         taken before each destructive change, which
+                         are the only copies of the books as they stood
+                         beforehand
   secrets/.env           every credential the stack reads
   secrets/cloudflared    the named tunnel's identity -- the public
                          hostname follows this, so DNS needs no change
   secrets/certs          TLS material, if any was kept locally
 
 DELIBERATELY EXCLUDED
-  redis                  sessions, demo-mode flags and rate-limit
-                         counters. All rebuild themselves. Cost of not
-                         copying it: an unconfirmed draft is lost, and
-                         anyone in demo mode is back on the real books
-                         and must send 'login as test' again.
-  celery_state           scheduler bookkeeping; rebuilt on first tick.
+  celery_state           scheduler bookkeeping; rebuilt on first tick,
+                         and carrying it over would only replay a
+                         schedule the new host recomputes anyway.
+  data/migration         previous packages -- excluded to stop this
+                         archive containing a copy of itself.
   pg_data                the raw volume. Architecture- and build-
                          specific; the dump above is the portable form.
   whatsapp-bridge/session
@@ -136,7 +163,7 @@ DELIBERATELY EXCLUDED
   the code               it is in git. The VPS clones it.
 MANIFEST
 
-# --- 5. seal it -----------------------------------------------------
+# --- 6. seal it -----------------------------------------------------
 say "Sealing the archive"
 tar czf "$ARCHIVE" -C "$OUT_DIR" "textile-erp-${STAMP}"
 rm -rf "$STAGE"

@@ -74,7 +74,14 @@ docker compose exec -T postgres sh -lc \
   < "$STAGE/db/textile_erp.dump" 2>&1 | grep -vE "does not exist, skipping" || true
 
 # --- 4. the file volumes --------------------------------------------
-for volume in attachments reports backups; do
+# redis_data included: it carries the demo-mode flags, so the partners
+# stay on whichever books they were on rather than being silently
+# returned to the real ones. Redis must be down while its volume is
+# replaced, or it will overwrite the restored files on shutdown.
+say "Stopping redis to replace its data"
+docker compose stop redis >/dev/null 2>&1 || true
+
+for volume in attachments reports backups redis_data; do
   archive="$STAGE/volumes/${volume}.tar.gz"
   [ -f "$archive" ] || continue
   say "Restoring volume: ${volume}"
@@ -84,6 +91,16 @@ for volume in attachments reports backups; do
     -v "$(dirname "$(realpath "$archive")"):/from:ro" \
     alpine:3.20 tar xzf "/from/$(basename "$archive")" -C /to
 done
+docker compose up -d redis >/dev/null
+
+# Host-side data/: the manual pg_dumps taken before each destructive
+# change. Merged rather than replaced, so a package restored twice does
+# not discard anything the new host has already written.
+if [ -f "$STAGE/volumes/host-data.tar.gz" ]; then
+  say "Restoring host data/"
+  mkdir -p data
+  tar xzf "$STAGE/volumes/host-data.tar.gz" -C data
+fi
 
 # --- 5. prove it ----------------------------------------------------
 say "Verifying against the source row counts"

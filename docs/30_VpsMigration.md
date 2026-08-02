@@ -24,14 +24,27 @@ one tunnel, start the other.
 
 | | Size | How it travels |
 |---|---|---|
-| Database | 80 MB volume → **396 KB dump** | `pg_dump --format=custom` |
-| Attachments | 1.5 MB | volume tar — **must move** |
-| Reports | 262 KB | volume tar |
-| Backup history | 4.8 MB | volume tar |
+| Database — **both businesses** | 80 MB volume → **396 KB dump** | `pg_dump --format=custom` |
+| Attachments | 1.1 MB | volume tar — **must move** |
+| Redis | 808 KB | volume tar — **carries demo mode** |
+| Host `data/` | 9.9 MB | manual pre-purge backups |
+| Backup history | 2.9 MB | volume tar |
+| Reports | 108 KB | volume tar |
 | `.env` | 2 KB | in the package |
 | Tunnel credentials | 200 B | in the package |
 | TLS certs | — | in the package |
 | Code | — | `git clone` |
+
+**Total: ~15 MB.** The demo business is not a separate anything — it is
+rows in the same database under `org_id 0000…0dbeef`, so the one dump
+carries both sets of books, both sets of partners and both watermarks.
+
+**Redis is copied**, though it looks like a cache. `wa:demo:<number>`
+is what decides which set of books a phone writes to, and both partners'
+phones are on the demo right now. Dropping it would silently return them
+to the real business mid-demonstration — precisely the accident demo
+mode exists to prevent. It also carries the webhook dedup keys, so a
+message Meta redelivers across the cutover is not processed twice.
 
 **Not moved, on purpose:**
 
@@ -40,10 +53,6 @@ one tunnel, start the other.
   `x86_64`, and Postgres will refuse to start on a data directory from
   the other. The dump restores anywhere, which is why the database is
   the one thing that does *not* travel as a volume.
-- **Redis.** Sessions, demo-mode flags and rate-limit counters, all
-  self-rebuilding. The cost of not copying it, stated plainly: an
-  unconfirmed draft is lost, and anyone in demo mode is back on the real
-  books and must send `login as test` again.
 - **`whatsapp-bridge/session/`.** A 228 MB Chromium profile tied to
   this machine and this CPU. Re-scan the QR on the VPS *if* the bridge
   is ever needed — and it is not needed today: `WHATSAPP_TRANSPORT=meta`
