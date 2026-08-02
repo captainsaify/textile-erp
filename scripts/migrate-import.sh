@@ -35,13 +35,32 @@ say "Installing secrets"
 cp "$STAGE/secrets/.env" .env
 chmod 600 .env
 if [ -d "$STAGE/secrets/cloudflared" ]; then
-  mkdir -p docker
-  cp -R "$STAGE/secrets/cloudflared" docker/cloudflared
-  chmod 600 docker/cloudflared/credentials.json 2>/dev/null || true
+  # The trailing `/.` copies the *contents*. `cp -R src dst` nests src
+  # inside dst whenever dst already exists -- and it always does here,
+  # because config.example.yml is tracked and arrives with the clone.
+  # That silently produced docker/cloudflared/cloudflared/config.yml and
+  # a tunnel that restart-looped on "no such file or directory".
+  mkdir -p docker/cloudflared
+  cp -R "$STAGE/secrets/cloudflared/." docker/cloudflared/
+  # A macOS-built archive carries AppleDouble siblings (._config.yml).
+  # Noise on Linux, and enough to keep a stray directory un-rmdir-able.
+  find docker/cloudflared -name '._*' -delete 2>/dev/null || true
+  # cloudflared's image runs as uid 65532, so a 0600 file owned by the
+  # invoking user is unreadable to it. On a laptop the VM's uid
+  # remapping hides this; on a real Linux host the tunnel dies with
+  # "couldn't read tunnel credentials: permission denied".
+  if chown 65532:65532 docker/cloudflared/credentials.json 2>/dev/null ||
+    sudo -n chown 65532:65532 docker/cloudflared/credentials.json 2>/dev/null; then
+    chmod 600 docker/cloudflared/credentials.json
+  else
+    chmod 644 docker/cloudflared/credentials.json
+    say "  note: could not chown credentials.json to uid 65532 -- left world-readable so the tunnel can start"
+  fi
 fi
 if [ -d "$STAGE/secrets/certs" ]; then
-  mkdir -p docker
-  cp -R "$STAGE/secrets/certs" docker/certs
+  mkdir -p docker/certs
+  cp -R "$STAGE/secrets/certs/." docker/certs/
+  find docker/certs -name '._*' -delete 2>/dev/null || true
 fi
 
 # --- 2. datastores up, app down -------------------------------------

@@ -74,7 +74,28 @@ fi
 
 head "Public entrance"
 code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "https://${DOMAIN}/healthz" 2>/dev/null)"
-[ "$code" = "200" ] && ok "https://${DOMAIN}/healthz" || bad "https://${DOMAIN}/healthz returned '${code:-no answer}'"
+if [ "$code" = "200" ]; then
+  ok "https://${DOMAIN}/healthz"
+else
+  # Cloudflare's edge judges the caller, and once this stack lives on a
+  # VPS the caller is a datacenter IP -- which bot/ASN rules can 403
+  # while serving every real browser normally. That is a fact about
+  # where this script is running, not about the site, so ask the origin
+  # directly before calling it a failure. Reported either way: a silent
+  # pass here would hide a genuinely dead entrance.
+  origin="$(docker compose exec -T api sh -lc \
+    'curl -s -o /dev/null -w "%{http_code}" --max-time 10 http://localhost:8000/healthz' \
+    2>/dev/null | tr -d '\r')"
+  if [ "$origin" = "200" ]; then
+    printf "    https://%s/healthz returned '%s' from this host, but the origin\n" \
+      "$DOMAIN" "${code:-no answer}"
+    printf "    answers 200. Cloudflare is filtering this machine's own IP --\n"
+    printf "    confirm from a browser or a phone, not from the server.\n"
+  else
+    bad "https://${DOMAIN}/healthz returned '${code:-no answer}' and the origin
+    itself answered '${origin:-nothing}' -- the entrance is genuinely down."
+  fi
+fi
 
 # One tunnel, not two. Both hosts sharing credentials.json answer, and
 # webhooks land wherever Cloudflare felt like sending them. Probed from
