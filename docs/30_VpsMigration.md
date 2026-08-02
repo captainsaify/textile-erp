@@ -125,19 +125,30 @@ It stops before starting the app, deliberately.
 
 ### The cutover
 
-**Stop the old tunnel first.** Two `cloudflared` instances sharing one
-`credentials.json` will both connect, and Cloudflare will split traffic
-between them — roughly half of Meta's webhooks landing on the host you
-are trying to retire, which looks exactly like an intermittent bot.
+**Stop the whole old stack, not just its tunnel.** Two `cloudflared`
+instances sharing one `credentials.json` will both connect, and
+Cloudflare will split traffic between them — roughly half of Meta's
+webhooks landing on the host you are trying to retire, which looks
+exactly like an intermittent bot. That is the obvious half.
+
+The half that is easy to miss: **beat reaches Meta outbound and does
+not need the tunnel at all.** Leave the old stack running and it keeps
+firing daily check-ins and partner notices at three real phones, from
+books that stopped being true at the cutover. `stop` preserves every
+volume, so this costs nothing in rollback terms.
 
 ```bash
 # old host
-docker compose stop cloudflared
+docker compose stop
 
 # VPS
 docker compose up -d
 ./scripts/migrate-verify.sh
 ```
+
+Build the images *before* stopping the old host — `docker compose build`
+takes about four minutes on 2 vCPU, and there is no reason for it to
+happen inside the outage window.
 
 Then, from a partner's phone: send `help`, then `activity`. The second
 one proves the database came across, because it can only answer from
@@ -225,3 +236,56 @@ Disk is not a constraint at any tier: the whole dataset is 15 MB and
 
 Go to 4 GB only if you plan to run local OCR heavily (PaddleOCR would
 change the arithmetic) or add a second business for real.
+
+## 8. Serving 443 ourselves {#direct-443}
+
+The tunnel was retired on 2026-08-03. It is still configured and can be
+brought back in one command — see the rollback below — but it is not
+what answers the hostname today.
+
+**Why.** Cloudflare's free plan does not serve Indian traffic from
+Indian PoPs. Every request went India → Singapore → back to a Chennai
+or Mumbai edge → the box, and the same in reverse: **~450 ms**, against
+an origin that answers in 3 ms. Serving directly costs ~100 ms, and the
+dashboard is the one part of the system a person sits and waits on.
+
+**What it takes.** An A record for `erp` pointing at the box, with
+proxying **off** — a grey cloud, not orange. Orange keeps the Singapore
+detour and the entire exercise is wasted. Inbound 80 and 443 open on
+the instance's security group; 80 is not optional, ACME renewals
+validate over it.
+
+**What is given up.** The origin IP is public and Cloudflare's WAF and
+DDoS filtering are out of the path. The security group and nginx are
+now the only things in front of the login form — which is why the
+dashboard password stops being a formality (see
+[14 §rbac](14_Security.md#rbac)).
+
+**Issuing the first certificate without downtime.** The 443 server
+block carries its own `/.well-known/acme-challenge/` location, not just
+the :80 block. That looks redundant and is not: while the tunnel still
+fronts the site, its ingress speaks to `https://nginx:443`, so a
+challenge arriving that way never reaches the :80 block and falls
+through to the SPA — which answers **200 with index.html**, so the ACME
+client is cheerfully told the token exists and reads a web page
+instead. With that location present the certificate can be issued
+*through the tunnel*, before DNS is moved, so the hostname never serves
+the self-signed placeholder to Meta or anyone else.
+
+**Renewal** is `scripts/renew-cert.sh`, twice daily from cron. It
+copies out of certbot's volume — a renewal nobody copies out is a
+certificate that expires anyway — and **restarts** nginx rather than
+reloading it. `nginx -s reload` was observed serving the previous chain
+after the files had been replaced underneath it: the container could
+see the new bytes and still presented the old certificate until the
+process came back.
+
+**Rollback**, if the exposure is ever regretted:
+
+```bash
+docker compose up -d cloudflared      # credentials were never removed
+```
+
+then re-add the tunnel's public hostname in Cloudflare, which recreates
+the DNS record. Nothing else changes: the webhook URL is the hostname,
+so Meta needs no reconfiguration in either direction.
