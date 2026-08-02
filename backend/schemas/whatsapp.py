@@ -71,12 +71,45 @@ class WebhookMetadata(_WebhookModel):
     phone_number_id: str = ""
 
 
+class WebhookStatusError(_WebhookModel):
+    code: int = 0
+    title: str = ""
+    message: str = ""
+
+    @property
+    def detail(self) -> str:
+        extra = self.details if isinstance(self.details, str) else ""
+        return extra or self.message or self.title
+
+    details: str = ""
+
+
+class WebhookStatus(_WebhookModel):
+    """A delivery receipt for a message *we* sent.
+
+    Parsed rather than ignored because "Meta accepted it" and "the
+    partner received it" are different facts, and the gap between them
+    is invisible without this: a send to a number the test sender may
+    not reach is accepted with a message id and then fails here, with
+    nothing in between to notice.
+    """
+
+    id: str = ""
+    #: E.164 without the plus, as Meta sends it
+    recipient_id: str = ""
+    status: str = ""
+    errors: list[WebhookStatusError] = []
+
+    @property
+    def failed(self) -> bool:
+        return self.status == "failed" or bool(self.errors)
+
+
 class WebhookValue(_WebhookModel):
     messaging_product: str = ""
     metadata: WebhookMetadata | None = None
     messages: list[WebhookMessage] = []
-    # delivery/read receipts -- acknowledged, never processed
-    statuses: list[dict[str, object]] = []
+    statuses: list[WebhookStatus] = []
 
 
 class WebhookChange(_WebhookModel):

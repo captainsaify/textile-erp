@@ -38,7 +38,13 @@ from backend.core.redis import get_redis
 from backend.core.security import normalize_whatsapp_number, role_at_least
 from backend.models import User
 from backend.repositories.user_repository import UserRepository
-from backend.schemas.whatsapp import WebhookMedia, WebhookMessage, WebhookPayload
+from backend.schemas.whatsapp import (
+    WebhookMedia,
+    WebhookMessage,
+    WebhookPayload,
+    WebhookStatus,
+    WebhookStatusError,
+)
 from backend.services.demo_service import DEMO_BANNER, as_demo
 from backend.services.whatsapp_bridge_client import get_bridge_sender
 from backend.services.whatsapp_client import SupportsSendText, get_whatsapp_client
@@ -108,12 +114,40 @@ class WhatsAppDispatcher:
         """Meta Cloud API entrypoint; 1:1 only, so replies go to the sender."""
         for entry in payload.entry:
             for change in entry.changes:
+                self._record_delivery(change.value.statuses)
                 for message in change.value.messages:
                     media = message.media
                     if media is not None:
                         await self._process_meta_media(message, media)
                         continue
                     await self.process_inbound(_from_meta(message))
+
+    @staticmethod
+    def _record_delivery(statuses: list[WebhookStatus]) -> None:
+        """Say so when a message we sent did not arrive.
+
+        Meta returns a message id for a send it merely *accepted*;
+        whether it reached the recipient comes back minutes later, here.
+        With this unread, a partner notification that Meta then dropped
+        looked identical to one delivered -- which is how three separate
+        "he never got it" reports had nothing to investigate.
+
+        Only failures are logged. Every message produces sent/delivered/
+        read receipts, and logging those would bury the one line worth
+        reading.
+        """
+        for status in statuses:
+            if not status.failed:
+                continue
+            for error in status.errors or [WebhookStatusError()]:
+                logger.error(
+                    "whatsapp_delivery_failed",
+                    to=status.recipient_id,
+                    message_id=status.id,
+                    error_code=error.code,
+                    title=error.title,
+                    detail=error.detail,
+                )
 
     async def _process_meta_media(self, message: WebhookMessage, media: WebhookMedia) -> None:
         """Meta carries media by reference: fetch the bytes, then hand to

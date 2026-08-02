@@ -205,3 +205,77 @@ async def test_free_text_mid_wizard_is_an_answer_not_an_unknown_command(
     assert "What's the invoice number?" in reply
     state = await sessions.get(staff_user.org_id, staff_user.id)
     assert state.context["filled"] == {"supplier": "Wagdia Textiles"}
+
+
+# --------------------------------------------------------------------
+# delivery receipts
+# --------------------------------------------------------------------
+
+
+def _status_payload(status: str, **extra: Any) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "id": "wamid.sent-earlier",
+        "recipient_id": "917000087329",
+        "status": status,
+        **extra,
+    }
+    return {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "0",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {"messaging_product": "whatsapp", "statuses": [entry]},
+                    }
+                ],
+            }
+        ],
+    }
+
+
+async def test_a_failed_delivery_is_logged_not_swallowed(
+    dispatcher: WhatsAppDispatcher, capsys: Any
+) -> None:
+    """Meta returns a message id for a send it merely *accepted*. Whether
+    it arrived comes back minutes later as a receipt, and with those
+    unread an undelivered partner notification looked exactly like a
+    delivered one -- which is how three "he never got it" reports had
+    nothing to investigate."""
+    await _process(
+        dispatcher,
+        _status_payload(
+            "failed",
+            errors=[
+                {
+                    "code": 131047,
+                    "title": "Re-engagement message",
+                    "details": "Message failed to send because more than 24 hours "
+                    "have passed since the customer last replied.",
+                }
+            ],
+        ),
+    )
+
+    logged = capsys.readouterr().out
+    assert "whatsapp_delivery_failed" in logged
+    assert "131047" in logged
+    assert "917000087329" in logged
+
+
+async def test_ordinary_receipts_stay_quiet(dispatcher: WhatsAppDispatcher, capsys: Any) -> None:
+    """Every message produces sent/delivered/read. Logging those would
+    bury the one line worth reading."""
+    for status in ("sent", "delivered", "read"):
+        await _process(dispatcher, _status_payload(status))
+
+    assert "whatsapp_delivery_failed" not in capsys.readouterr().out
+
+
+async def test_a_receipt_never_looks_like_an_inbound_message(
+    dispatcher: WhatsAppDispatcher, fake_sender: FakeSender
+) -> None:
+    """A status callback carries no `messages`, so nothing is replied to."""
+    await _process(dispatcher, _status_payload("delivered"))
+    assert fake_sender.sent == []
