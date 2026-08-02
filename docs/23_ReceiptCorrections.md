@@ -72,9 +72,40 @@ Both are surfaced, never swallowed:
 ## 6. Command {#command}
 
 ```
-receive <invoice> <CODE> <bales actually received>
+receive <invoice> <CODE> <bales actually received> [<CODE> <bales> ...]
 receive 001 35A 9
+receive 001 35A 9 22D 4
 ```
 
 Absolute, not a delta — "9 arrived", not "1 short". Sending it twice
 says "nothing to change" instead of removing two bales.
+
+### One truck is one command
+
+A truck is unloaded once, so several lines are usually short together.
+Every pair after the invoice is another line of the same bill, and all
+of them apply **in one transaction** — half a correction would leave the
+bill disagreeing with the stock behind it.
+
+The reply states the invoice total and the payable once, from the state
+after every line was applied. Quoting them per line would show three
+different "still owed" figures for one bill, two of which were only ever
+true mid-correction.
+
+A code listed twice is refused rather than applied twice: two counts for
+one line are two different claims about what arrived, and the second
+silently winning is not a resolution.
+
+### Said, not remembered {#wizard}
+
+`receive` on its own asks which bill, then offers **the lines that are
+actually on it** — code, bales billed, weight, rate — and loops until
+you say that's all. This is the one command where remembering an invoice
+number *and* a code was the whole difficulty, and both are things the
+system already knows. Past ten lines the menu offers a typed escape;
+several codes typed at once still work.
+
+Unlike a sale, a single count is **never** spread across several codes.
+"35A, 22D" answered "9" would claim nine bales of each — and unlike a
+price, that writes stock movements nobody asked for. Zero *is* a real
+answer: a bale that never turned up is the reason this command exists.

@@ -21,13 +21,14 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import datetime
+import decimal
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from backend.api.amounts import looks_like_amount, parse_amount
 from backend.api.command_types import CommandResult, RequestContext
-from backend.api.formatting import fmt_date, fmt_money
+from backend.api.formatting import fmt_date, fmt_money, fmt_qty
 from backend.api.interactive import (
     Buttons,
     Choice,
@@ -189,6 +190,34 @@ def _rates(value: str) -> str:
     if not parts:
         raise ValidationError("At what rate? e.g. 150")
     return ", ".join(_amount(part) for part in parts)
+
+
+def _counts(value: str) -> str:
+    """Bales counted off a truck: several allowed, and **zero is a real
+    answer** -- a bale that never turned up is the whole reason `receive`
+    exists, so this cannot go through `_quantity`, which refuses it."""
+    parts = _split_list(value)
+    if not parts:
+        raise ValidationError("How many bales actually arrived? e.g. 9")
+    checked: list[str] = []
+    for part in parts:
+        try:
+            count = decimal.Decimal(part.replace(",", ""))
+        except decimal.InvalidOperation:
+            raise ValidationError(f"'{part}' isn't a number of bales I can read.") from None
+        if count < 0:
+            raise ValidationError("A count can't be negative.")
+        checked.append(str(count))
+    return ", ".join(checked)
+
+
+def _line_scope(value: str) -> str:
+    """Which lines of a bill a rate change touches: every one, or a
+    named few."""
+    token = value.strip().lower()
+    if token in {"all", "every", "every line", "all lines", "everything", "whole bill"}:
+        return "all"
+    return _codes(value)
 
 
 def _when(value: str) -> str:
@@ -659,6 +688,81 @@ async def _invoice_menu(ctx: RequestContext, filled: dict[str, str]) -> Interact
     )
 
 
+async def _lines_menu(
+    ctx: RequestContext, filled: dict[str, str], *, whole_bill: bool
+) -> Interactive | None:
+    """The lines of the bill just chosen.
+
+    A correction is about a line that is already on a bill, so the codes
+    are knowable and should not have to be remembered -- especially on a
+    26-line sheet, where recalling which code was short is the actual
+    work. Beyond the menu's ten rows the escape hatch takes a typed
+    code, and several typed at once still work.
+    """
+    from backend.repositories.purchase_repository import InvoiceLine, PurchaseRepository
+
+    invoice = filled.get("invoice", "").strip()
+    if not invoice:
+        return None
+    # one row for "every line", one for the escape hatch (docs/19 §2)
+    room = PARTY_ROWS - 1 if whole_bill else PARTY_ROWS
+    async with ctx.session_factory() as session:
+        lines = await PurchaseRepository(session).invoice_lines(
+            ctx.user.org_id, invoice, limit=room
+        )
+    if not lines:
+        return None
+
+    def described(line: InvoiceLine) -> str:
+        bales = f"{fmt_qty(line.pieces)} bales × " if line.pieces is not None else ""
+        return f"{bales}{fmt_qty(line.qty)} @ {fmt_money(line.rate)} · {line.description}"[:72]
+
+    rows = tuple(
+        Choice(id=f"slot {line.code}", title=line.code[:24], description=described(line))
+        for line in lines
+    )
+    sections: list[Section] = []
+    if whole_bill:
+        sections.append(
+            Section(
+                title="Everything",
+                rows=(
+                    Choice(
+                        id="slot all",
+                        title="Every line",
+                        description="The whole bill moves to the new rate",
+                    ),
+                ),
+            )
+        )
+    sections.append(Section(title=f"On {invoice}", rows=rows))
+    sections.append(
+        Section(
+            title="Or",
+            rows=(
+                Choice(
+                    id="slot new",
+                    title="Another code",
+                    description="You'll type it — several at once is fine",
+                ),
+            ),
+        )
+    )
+    return ListMenu(
+        body=f"Which line{'s' if whole_bill else ''} of {invoice}?",
+        menu_label="Pick line",
+        sections=tuple(sections),
+    )
+
+
+async def _rate_scope_menu(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
+    return await _lines_menu(ctx, filled, whole_bill=True)
+
+
+async def _receive_line_menu(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
+    return await _lines_menu(ctx, filled, whole_bill=False)
+
+
 async def _period_menu(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
     from backend.api.period import period_menu
 
@@ -868,6 +972,105 @@ def _bank_item(filled: dict[str, str]) -> None:
         filled.pop(key, None)
     if filled.get("more") == "add":
         filled.pop("more", None)
+
+
+async def _more_lines_buttons(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
+    counted = len(_items_of(filled)) + len(_split_list(filled.get("code", "")))
+    return Buttons(
+        body=f"{counted} line(s) corrected on {filled.get('invoice', 'this bill')}. Anything else?",
+        choices=(
+            Choice(id="slot add", title="Another line"),
+            Choice(id="slot done", title="That's all"),
+        ),
+    )
+
+
+def _zip_receipts(filled: dict[str, str]) -> list[str]:
+    """One "CODE bales" line per code answered.
+
+    Unlike a sale, a single count is **not** spread across several codes.
+    "35A, 22D" answered "9" would silently claim nine bales of each --
+    and unlike a price, that writes stock movements nobody asked for.
+    """
+    codes = _split_list(filled.get("code", ""))
+    counts = _split_list(filled.get("pieces", ""))
+    if not codes or not counts:
+        return []
+    if len(counts) != len(codes):
+        raise ValidationError(
+            f"{len(codes)} codes but {len(counts)} counts — give one count per code "
+            f"({', '.join(codes)}), in the same order."
+        )
+    return [f"{code} {count}" for code, count in zip(codes, counts, strict=True)]
+
+
+def _check_receipt_counts(filled: dict[str, str]) -> None:
+    _zip_receipts(filled)
+
+
+def _bank_receipt(filled: dict[str, str]) -> None:
+    """The same loop the sale wizard runs, over (code, bales) pairs."""
+    banked = _zip_receipts(filled)
+    if banked:
+        filled["items"] = "\n".join([*_items_of(filled), *banked])
+    for key in ("code", "pieces"):
+        filled.pop(key, None)
+    if filled.get("more") == "add":
+        filled.pop("more", None)
+
+
+def _assemble_receive(filled: dict[str, str]) -> str:
+    return " ".join([filled["invoice"], *_items_of(filled)])
+
+
+def _prefill_receive(args: str) -> dict[str, str]:
+    """`receive 001 35A 9` is complete and runs in one shot; `receive
+    001` knows only the bill and asks the rest."""
+    tokens = args.split()
+    filled: dict[str, str] = {}
+    if not tokens:
+        return filled
+    filled["invoice"] = tokens[0]
+    rest = tokens[1:]
+    pairs = [f"{rest[i].upper()} {rest[i + 1]}" for i in range(0, len(rest) - 1, 2)]
+    if pairs:
+        filled["items"] = "\n".join(pairs)
+    if len(rest) % 2 == 1:
+        # a trailing code with no count: keep it, ask what arrived
+        filled["code"] = rest[-1].upper()
+    elif pairs:
+        filled["more"] = "done"
+    return filled
+
+
+def _rate_question(filled: dict[str, str]) -> tuple[str, str]:
+    scope = filled.get("codes", "all")
+    where = "every line" if scope == "all" else scope
+    return (f"What's the correct rate per unit for {where}?", "e.g. 145")
+
+
+def _assemble_rate(filled: dict[str, str]) -> str:
+    codes = filled.get("codes", "all")
+    tail = "" if codes == "all" else " " + " ".join(_split_list(codes))
+    return f"{filled['invoice']} {filled['rate']}{tail}"
+
+
+def _prefill_rate(args: str) -> dict[str, str]:
+    """`rate 001 145` is complete -- and means every line, which is the
+    typed command's own meaning, so the wizard must not turn it into a
+    question."""
+    tokens = args.split()
+    filled: dict[str, str] = {}
+    if not tokens:
+        return filled
+    filled["invoice"] = tokens[0]
+    if len(tokens) >= 2 and looks_like_amount(tokens[1]):
+        with contextlib.suppress(DomainError):
+            filled["rate"] = _amount(tokens[1])
+    if "rate" in filled:
+        rest = tokens[2:]
+        filled["codes"] = ", ".join(token.upper() for token in rest) if rest else "all"
+    return filled
 
 
 def _assemble_sale(filled: dict[str, str]) -> str:
@@ -1156,6 +1359,75 @@ WIZARDS: dict[str, CommandWizard] = {
         ),
         assemble=_assemble_export,
         prefill=_prefill_export,
+    ),
+    # Corrections to a confirmed bill. Both used to answer a bare command
+    # with a usage line -- the one place where remembering an invoice
+    # number *and* a code was the whole difficulty, and the one place the
+    # system already knows both.
+    "rate": CommandWizard(
+        command="rate",
+        slots=(
+            CommandSlot(
+                name="invoice",
+                question="Which bill has the wrong rate?",
+                choices=_invoice_menu,
+                validate=_nonempty("Invoice"),
+                example="e.g. 001",
+            ),
+            CommandSlot(
+                name="codes",
+                question="Which lines? Tap 'Every line', or name the codes.",
+                choices=_rate_scope_menu,
+                validate=_line_scope,
+                example="e.g. 35A 22D — or 'all'",
+            ),
+            CommandSlot(
+                name="rate",
+                question="What's the correct rate per unit?",
+                question_of=_rate_question,
+                validate=_amount,
+                example="e.g. 145",
+            ),
+        ),
+        assemble=_assemble_rate,
+        prefill=_prefill_rate,
+    ),
+    "receive": CommandWizard(
+        command="receive",
+        slots=(
+            CommandSlot(
+                name="invoice",
+                question="Which bill are you correcting?",
+                choices=_invoice_menu,
+                validate=_nonempty("Invoice"),
+                example="e.g. 001",
+            ),
+            CommandSlot(
+                name="code",
+                question="Which item came in short?",
+                choices=_receive_line_menu,
+                validate=_codes,
+                example="e.g. 35A — or several: 35A, 22D",
+                applies=_still_adding,
+            ),
+            CommandSlot(
+                name="pieces",
+                question="How many bales actually arrived?",
+                validate=_counts,
+                example="e.g. 9 — one count per code, in the same order",
+                after=_check_receipt_counts,
+                applies=_still_adding,
+            ),
+            CommandSlot(
+                name="more",
+                question="Another line on this bill?",
+                choices=_more_lines_buttons,
+                validate=_more_items,
+                after=_bank_receipt,
+            ),
+        ),
+        assemble=_assemble_receive,
+        prefill=_prefill_receive,
     ),
     "supplier": _party_lookup_wizard("supplier", _suppliers),
     "customer": _party_lookup_wizard("customer", _customers),

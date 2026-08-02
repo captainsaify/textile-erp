@@ -138,6 +138,33 @@ def parse_purchase_command(args: str) -> Draft:
 _PER_LINE_HINT_LIMIT = 3
 
 
+def next_step(draft: Draft) -> str:
+    """The one thing this draft is waiting for.
+
+    Read by both the reply text and the buttons, so the two can never
+    ask for different things. They used to be computed separately and a
+    real sheet produced "reply 'create supplier'", "reply *create all
+    products*" and "then reply CONFIRM to save" in a single message --
+    three instructions, of which only one would work, and no way to tell
+    which.
+
+    Order is by what blocks what: the header details make the rest
+    readable; a brand collision is a sharper question than "shall I
+    create these?" and asking it second would create duplicates in one
+    tap; codes must exist before the bill can be saved; and the supplier
+    is asked last because it is the one step that needs no thought.
+    """
+    if not draft.supplier_name or not draft.invoice_no:
+        return "details"
+    if draft.brand_collisions:
+        return "brand"
+    if draft.unresolved_codes:
+        return "codes"
+    if draft.supplier_id is None:
+        return "supplier"
+    return "confirm"
+
+
 def render_preview(draft: Draft) -> str:
     lines = [
         f"✅ Purchase draft ready — {draft.supplier_name}, {draft.invoice_no}, "
@@ -194,26 +221,28 @@ def render_preview(draft: Draft) -> str:
     lines.append(f"Grand total: {fmt_money(draft.grand_total)}")
     if draft.declared_total is not None:
         lines.append(f"Invoice shows: {fmt_money(draft.declared_total)}")
-    if draft.supplier_name and draft.supplier_id is None:
+    step = next_step(draft)
+    if draft.supplier_name and draft.supplier_id is None and step != "supplier":
+        # A statement, not an instruction: something else is being asked
+        # first, and two instructions in one message is one too many.
         warnings.append(
-            f"Supplier '{draft.supplier_name}' not found — reply 'create supplier' to add them."
+            f"Supplier '{draft.supplier_name}' isn't in your list yet — I'll ask about that next."
         )
-    missing_details = not draft.supplier_name or not draft.invoice_no
     if any(line.rate == 0 for line in draft.lines):
         warnings.append("Some lines have no rate yet.")
     lines.extend(f"⚠️ {warning}" for warning in warnings)
-    if missing_details:
+    if step == "details":
         from backend.api.commands.ocr_commands import DETAILS_PROMPT
 
         lines.append(DETAILS_PROMPT)
-    elif draft.unresolved_codes:
+    elif step == "codes":
         # Naming the command matters: `create all products` existed from
         # the start but nothing ever mentioned it, so a first purchase --
         # where *every* code is new -- looked like a dead end.
         lines.append(unresolved_help(draft.unresolved_codes))
-    elif draft.supplier_id is None:
-        lines.append("Resolve the supplier above, then reply CONFIRM to save.")
-    else:
+    elif step == "supplier":
+        lines.append(f"One thing left: *{draft.supplier_name}* isn't in your supplier list yet.")
+    elif step == "confirm":
         lines.append("Reply CONFIRM to save, or send corrections (e.g. 'line 1 qty 90').")
     return "\n".join(lines)
 
@@ -232,25 +261,27 @@ def unresolved_help(codes: list[str]) -> str:
         f"• Reply *create all products* to add them all, using the descriptions "
         f"from the sheet\n"
         f"• Or add them one at a time: *create product {codes[0]} <description>*\n"
-        f"Then reply CONFIRM to save."
+        # Deliberately not "then reply CONFIRM": the bill comes back the
+        # moment they're created, and it will say so itself. Two
+        # instructions in one message leaves the reader picking.
+        f"I'll show you the bill again once they're in."
     )
 
 
 def preview_result(draft: Draft) -> CommandResult:
     """The preview plus whatever decision it is actually asking for.
 
-    Which buttons appear follows the draft's own state, so the offer can
-    never contradict the text: unresolved codes ask to create them,
-    an unknown supplier asks to create it, and only a draft that is
-    ready to save offers CONFIRM.
+    Both the buttons and the reply text branch on `next_step`, so the
+    offer can never contradict the words above it.
     """
     reply = render_preview(draft)
+    step = next_step(draft)
     choices: tuple[Choice, ...]
     # Asked before "these aren't in your catalogue": a collided code is
     # always also an unresolved one, and "are these really different
     # products?" is the sharper question. Getting the bulk-create prompt
     # first would have someone create six duplicates in one tap.
-    if draft.brand_collisions:
+    if step == "brand":
         listed = "\n".join(f"• {entry}" for entry in draft.brand_collisions)
         under = draft.brand_name or "no brand"
         reply = (
@@ -265,7 +296,7 @@ def preview_result(draft: Draft) -> CommandResult:
             Choice(id="fix brand", title="Fix the brand"),
             Choice(id="discard", title="Discard"),
         )
-    elif draft.unresolved_codes:
+    elif step == "codes":
         count = len(draft.unresolved_codes)
         bulk = f"Create all {count}" if count < 100000 else "Create all"
         body = f"{count} item(s) aren't in your catalogue yet."
@@ -274,13 +305,13 @@ def preview_result(draft: Draft) -> CommandResult:
             Choice(id="one by one", title="One by one"),
             Choice(id="discard", title="Discard"),
         )
-    elif draft.supplier_id is None and draft.supplier_name:
-        body = f"Supplier '{draft.supplier_name}' isn't in your list yet."
+    elif step == "supplier":
+        body = f"Add '{draft.supplier_name}' as a supplier?"
         choices = (
             Choice(id="create supplier", title="Add supplier"),
             Choice(id="discard", title="Discard"),
         )
-    elif not draft.supplier_name or not draft.invoice_no:
+    elif step == "details":
         # still waiting on `details`; nothing to decide yet
         return CommandResult(reply=reply)
     else:

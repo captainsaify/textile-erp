@@ -194,6 +194,28 @@ codes apart. It is now captured per row, and the draft's brand is the
 most common label on the sheet — most common rather than first, so a
 single misread cell can't rename a whole purchase.
 
+**A FOLD column is not a brand.** {#fold} That same example sentence —
+"a repeated label like FOLD or TOP" — was teaching the model that FOLD
+*is* a brand. A sheet headed `LOGO :- MKD WINTER`, with columns
+`CODE | ITEM | FOLD | QTY | KG | WEIGHT` and an `F` on all 26 rows, came
+back with every row's brand set to `F`. All 26 codes then collided with
+the same codes under their real brand, and the preview offered to create
+26 duplicate products in one tap. A wrong brand is not a cosmetic
+misread.
+
+Two changes, deliberately in different layers:
+
+1. **The prompt** now says a FOLD column (`F`, `FOLD`, `ROLL`, `OPEN`,
+   `TUBE`) describes how cloth is folded and must leave `label` empty,
+   and it gained a sheet-level `brand` field for a heading that names
+   the brand outright.
+2. **The service** refuses a fold marker as a brand regardless of what
+   comes back (`OcrService._is_brand`), because a prompt is guidance and
+   this is a correctness boundary.
+
+A heading wins over the column: `LOGO :- MKD WINTER` says the brand in
+words, where a column of repeated single letters has to be inferred.
+
 **Sales notes have their own schema** (`SALE_SCHEMA`,
 `read_sale_sheet`). A purchase sheet carries weights where a sales note
 carries a rate and a written line total; one prompt covering both is how

@@ -75,6 +75,37 @@ Full command grammar, error cases, and permission rules are specified
 alongside every other WhatsApp command in
 [08_WhatsApp.md #purchase](08_WhatsApp.md#purchase).
 
+### One instruction at a time {#one-instruction}
+
+A draft can be blocked on several things at once — an unknown supplier,
+unknown codes, a brand collision. It asks about **exactly one**.
+
+A real sheet produced, in a single message: `reply 'create supplier'`,
+`reply *create all products*`, and `then reply CONFIRM to save`. Three
+instructions, of which only one would work, and nothing saying which.
+Two of them silently failed if followed.
+
+`purchase_commands.next_step(draft)` returns that one thing, and both
+the reply text and the buttons branch on it — so the words above the
+buttons can never ask for something different from the buttons. The
+order is by what blocks what:
+
+| Step | Asked when | Offered |
+|---|---|---|
+| `details` | no supplier name or invoice number | nothing yet — the wizard is still collecting |
+| `brand` | codes collide with another brand's | `Yes, separate` · `Fix the brand` · `Discard` |
+| `codes` | codes aren't in the catalogue | `Create all N` · `One by one` · `Discard` |
+| `supplier` | the supplier isn't on file | `Add supplier` · `Discard` |
+| `confirm` | nothing is blocking | `Confirm` · `See as sheet` · `Discard` |
+
+A blocker that is *not* the current step is still **stated**, as a fact
+rather than an instruction: "Supplier 'Iqbal Bhai' isn't in your list
+yet — I'll ask about that next." Hiding it would make the next question
+arrive as a surprise; phrasing it as a command would be the bug again.
+
+Nothing says "then reply CONFIRM" ahead of time. The bill comes back
+after each step and says for itself what is left.
+
 ## 4. Freight and other-charge allocation {#freight-allocation}
 
 `purchase_headers.freight_allocation_method` (default `by_weight`):

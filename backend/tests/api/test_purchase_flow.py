@@ -21,6 +21,7 @@ from backend.api.commands.purchase_commands import (
     parse_purchase_command,
     render_preview,
 )
+from backend.api.interactive import Buttons
 from backend.core.exceptions import ValidationError
 from backend.models import User
 from backend.services.inventory_service import InventoryService
@@ -173,10 +174,12 @@ async def test_full_purchase_session_flow(
     result = await handle_purchase(PURCHASE_TEXT, ctx)
     assert "Purchase draft ready — Shree Textiles, INV-4521" in result.reply
     assert "unknown product" in result.reply
-    assert "Supplier 'Shree Textiles' not found" in result.reply
+    # the missing supplier is stated, but the codes are what's being
+    # asked about first -- one instruction at a time
+    assert "Supplier 'Shree Textiles' isn't in your list yet" in result.reply
 
     result = await _session_reply("create supplier", ctx)
-    assert "Supplier 'Shree Textiles' not found" not in result.reply
+    assert "isn't in your list yet" not in result.reply
 
     result = await _session_reply("create product TRP Trouser Poly", ctx)
     assert "TRP  100.0 KG × ₹150.00 = ₹15,000.00" in result.reply
@@ -326,7 +329,10 @@ def test_unknown_products_tell_the_user_how_to_create_them() -> None:
     text = unresolved_help(["35A", "22D", "CPK"])
     assert "create all products" in text
     assert "create product 35A" in text
-    assert "CONFIRM" in text
+    # ...and only that command. Telling someone to create the products
+    # *and* to reply CONFIRM in the same breath is two instructions of
+    # which only one works, with no way to tell which.
+    assert "CONFIRM" not in text
 
 
 def test_preview_does_not_repeat_a_hint_per_unknown_line() -> None:
@@ -389,3 +395,64 @@ def test_preview_still_gives_per_line_hints_for_a_couple_of_unknowns() -> None:
     text = render_preview(draft)
     assert "create product TRP" in text
     assert "Jogging Pant" in text
+
+
+def _draft(*, supplier_id: uuid.UUID | None, resolved: bool) -> Draft:
+    return Draft(
+        supplier_id=supplier_id,
+        supplier_name="Iqbal Bhai",
+        invoice_no="002",
+        invoice_date=datetime.date(2026, 8, 1),
+        brand_id=None,
+        brand_name=None,
+        lines=[
+            DraftLine(
+                code="028",
+                qty=D("1680"),
+                rate=D("115"),
+                product_id=uuid.uuid4() if resolved else None,
+                resolved_code="028" if resolved else None,
+                unit_code="KG" if resolved else None,
+                description="Children Winter Wear",
+            )
+        ],
+        freight=D("0"),
+        other_charges=D("0"),
+        declared_total=None,
+    )
+
+
+def test_a_preview_asks_for_exactly_one_thing() -> None:
+    """A real sheet produced "reply 'create supplier'", "reply *create
+    all products*" and "then reply CONFIRM to save" in one message —
+    three instructions, of which only one would work, and nothing to
+    say which. The buttons and the words now branch on the same
+    decision, so they cannot ask for different things."""
+    from backend.api.commands.purchase_commands import next_step, preview_result
+
+    # unknown supplier *and* unknown codes: the codes are asked first
+    both = _draft(supplier_id=None, resolved=False)
+    assert next_step(both) == "codes"
+    result = preview_result(both)
+    assert "create all products" in result.reply
+    assert "CONFIRM" not in result.reply
+    assert "reply 'create supplier'" not in result.reply
+    assert isinstance(result.interactive, Buttons)
+    assert result.interactive.choices[0].id == "create all products"
+
+    # codes resolved: now the supplier is the one thing left
+    supplier_only = _draft(supplier_id=None, resolved=True)
+    assert next_step(supplier_only) == "supplier"
+    result = preview_result(supplier_only)
+    assert "One thing left" in result.reply
+    assert "CONFIRM" not in result.reply
+    assert isinstance(result.interactive, Buttons)
+    assert result.interactive.choices[0].id == "create supplier"
+
+    # nothing blocking: CONFIRM is offered, and only now
+    ready = _draft(supplier_id=uuid.uuid4(), resolved=True)
+    assert next_step(ready) == "confirm"
+    result = preview_result(ready)
+    assert "Reply CONFIRM to save" in result.reply
+    assert isinstance(result.interactive, Buttons)
+    assert result.interactive.choices[0].id == "confirm"

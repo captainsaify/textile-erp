@@ -16,6 +16,18 @@ rate 001 145 35A 22D    only those codes
 Several codes at once, because a supplier who revises one price usually
 revises a few.
 
+### Said, not remembered {#wizard}
+
+`rate` on its own asks which bill — from the recent ones — then which
+lines, offering **Every line** beside the codes that are actually on
+that bill, and only then the price. A bare `rate` used to print a usage
+line at the one command where remembering an invoice number *and* a code
+is the difficulty.
+
+`rate 001 145` typed in full still runs in one round trip and still
+means every line. The wizard must not turn a complete command into a
+question, or the typed form becomes the slower one.
+
 ## 2. What moves {#cascade}
 
 | | |

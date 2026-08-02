@@ -154,6 +154,8 @@ arguments should ask instead of printing usage.**
 | `sale` | Usage string | "Which customer?" → list → … |
 | `expense` | Usage string | "What kind?" → list of used categories |
 | `export` | Usage string | "Which report?" → buttons → "Which period?" → list |
+| `rate` | Usage string | "Which bill?" → recent invoices → "Which lines?" → `Every line` + that bill's codes |
+| `receive` | Usage string | "Which bill?" → "Which item came in short?" → that bill's codes → loops |
 
 A **complete** command still executes in one shot, unchanged. This
 matters: the wizard costs one round trip per slot, so for someone who
@@ -256,6 +258,23 @@ stops to ask. Knowing the syntax should not skip the safety step.
 
 This is also why a choice builder now receives the answers so far: the
 field list for `edit` is a function of the record kind just chosen.
+
+**Phase 4 — corrections to a confirmed bill** (2026-08-02): `rate`
+([26 §1](26_RateChanges.md#wizard)) and `receive`
+([23 §6](23_ReceiptCorrections.md#wizard)).
+
+These were the last two commands answering a bare invocation with a
+usage line, and the worst two to leave that way: they are the only
+commands needing an invoice number *and* a product code, both of which
+the system already knows and neither of which anyone remembers. The
+choice builder for the line menu reads the bill just chosen, so the
+codes offered are the codes actually on it.
+
+`receive` also gained the sale wizard's loop, because a truck is
+unloaded once and several lines are usually short together — with the
+one difference that a single count is never spread across several codes.
+Spreading a *rate* prices three items the same; spreading a *count*
+writes stock movements nobody asked for.
 
 **Phase 3 — main menu + handwriting confirmation pass.**
 

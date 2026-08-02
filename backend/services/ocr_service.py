@@ -65,6 +65,27 @@ _HEADER_WORDS = {
     "value",
 }
 
+#: How the cloth is folded, not who made it. These appear in a FOLD
+#: column that sits right beside the brand column on the partners' own
+#: sheets, and reading one as a brand is worse than reading none --
+#: a code is only unique within a brand.
+_FOLD_MARKERS = {
+    "f",
+    "fold",
+    "folded",
+    "fld",
+    "r",
+    "roll",
+    "rolled",
+    "o",
+    "open",
+    "t",
+    "tube",
+    "tubular",
+    "double",
+    "single",
+}
+
 
 @dataclasses.dataclass(frozen=True)
 class ExistingAttachment:
@@ -282,8 +303,8 @@ class OcrService:
             return ZERO
         return value if value > ZERO else ZERO
 
-    @staticmethod
-    def _dominant_label(rows: list[ExtractedRow]) -> str:
+    @classmethod
+    def _dominant_label(cls, rows: list[ExtractedRow]) -> str:
         """The brand the sheet is for.
 
         The most common non-empty label rather than the first: one
@@ -296,11 +317,23 @@ class OcrService:
         labels = Counter(
             field.text.strip()
             for row in rows
-            if (field := row.fields.get("label")) is not None and field.text.strip()
+            if (field := row.fields.get("label")) is not None and cls._is_brand(field.text.strip())
         )
         if not labels:
             return ""
         return labels.most_common(1)[0][0]
+
+    @staticmethod
+    def _is_brand(text: str) -> bool:
+        """A fold marker is not a brand.
+
+        A real sheet carried a FOLD column of F's, and every row's brand
+        came back as "F" -- which then made every code on the bill
+        collide with the same code under its real brand, and offered to
+        create 26 duplicate products. Codes are unique *within* a brand,
+        so a wrong brand is not a cosmetic error.
+        """
+        return bool(text) and text.strip().lower() not in _FOLD_MARKERS
 
     @classmethod
     def _is_noise_row(cls, row: ExtractedRow) -> bool:
@@ -417,6 +450,7 @@ class OcrService:
         invoice_no: str = "",
         invoice_date: datetime.date | None = None,
         brand_id: uuid.UUID | None = None,
+        brand_name: str = "",
     ) -> DraftBuild:
         """ParsedSheet -> the same Draft the typed command produces, so
         both paths share one confirmation flow."""
@@ -485,7 +519,12 @@ class OcrService:
         # brandless -- and a code is only unique *within* a brand, so
         # throwing the brand away is throwing away the thing that tells
         # two identical codes apart.
-        sheet_label = self._dominant_label(sheet.extraction.rows)
+        #
+        # A heading that names the brand outright ("LOGO :- MKD WINTER")
+        # wins over the column: it says the brand in words, where a
+        # column of repeated letters has to be inferred -- and inferring
+        # it from a FOLD column is how every row's brand became "F".
+        sheet_label = brand_name.strip() or self._dominant_label(sheet.extraction.rows)
 
         draft = Draft(
             supplier_id=supplier_id,

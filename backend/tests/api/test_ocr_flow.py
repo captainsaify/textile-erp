@@ -150,7 +150,7 @@ async def test_photo_to_confirmed_purchase(
         ctx,
     )
     assert "Purchase draft ready" in result.reply
-    assert "Supplier 'Shree Textiles' not found" in result.reply
+    assert "Supplier 'Shree Textiles' isn't in your list yet" in result.reply
 
     await _session_reply("create supplier", ctx)
     for code, description in (

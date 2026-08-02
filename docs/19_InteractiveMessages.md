@@ -95,6 +95,9 @@ inside 20 up to `Create all 99999`. Above that the label falls back to
 | `export` type | Purchases · Sales · Stock | |
 | `stock CODE` under several brands | one row per brand | ≤10 brands; beyond that, current text listing |
 | Supplier for a photographed sheet | recent suppliers | ≤10; `Someone else` row falls back to typing |
+| `rate` / `receive` — which bill | recent confirmed invoices | supplier and date in the description |
+| `rate` — which lines | `Every line` + the codes on that bill | bales, weight and rate in the description |
+| `receive` — which line came short | the codes on that bill | `Another code` row takes several typed at once |
 
 Row descriptions (72 chars) carry the detail that makes a row
 self-explanatory — a brand row shows its quantity and average cost, so

@@ -92,3 +92,40 @@ def test_stated_total_kept_when_consistent() -> None:
     q = OcrService._costing_quantity(row(qty="3", weight_kg="10.1", total_weight_kg="30.3"))
     assert q.costing == D("30.3")
     assert q.mismatch is None
+
+
+# --------------------------------------------------------------------
+# which column is the brand
+# --------------------------------------------------------------------
+
+
+def test_the_brand_is_the_label_that_repeats() -> None:
+    assert (
+        OcrService._dominant_label(
+            [row(code="35A", label="TOP"), row(code="22D", label="TOP"), row(code="CPK", label="")]
+        )
+        == "TOP"
+    )
+
+
+def test_a_fold_column_is_not_a_brand() -> None:
+    """A real sheet had CODE | ITEM | FOLD | QTY | KG | WEIGHT, with an
+    F on every row. Every row's brand came back "F", which made all 26
+    codes collide with the same codes under their real brand and offered
+    to create 26 duplicate products. A code is only unique within a
+    brand, so this is not a cosmetic misread."""
+    folded = [row(code="028", label="F"), row(code="55CT", label="F"), row(code="55M", label="F")]
+    assert OcrService._dominant_label(folded) == ""
+
+    for marker in ("FOLD", "fold", "Roll", "OPEN", "Tube"):
+        assert OcrService._dominant_label([row(code="X", label=marker)]) == "", marker
+
+
+def test_a_real_brand_still_wins_over_fold_noise() -> None:
+    """Rejecting fold markers must not reject the brand beside them."""
+    mixed = [
+        row(code="35A", label="MKD"),
+        row(code="22D", label="F"),
+        row(code="CPK", label="MKD"),
+    ]
+    assert OcrService._dominant_label(mixed) == "MKD"

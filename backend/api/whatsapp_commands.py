@@ -206,17 +206,20 @@ COMMAND_REGISTRY: dict[str, CommandSpec] = {
         help_text=(
             "Correct the price on a confirmed bill. `rate 001 145` changes every line; "
             "`rate 001 145 35A 22D` changes only those. The bill, the payable and the "
-            "cost of stock still on hand all follow."
+            "cost of stock still on hand all follow. Say just `rate` to pick the bill "
+            "and the lines from a list."
         ),
     ),
     "receive": CommandSpec(
         name="receive",
-        syntax="receive <invoice> <CODE> <bales received>",
+        syntax="receive <invoice> <CODE> <bales received> [<CODE> <bales> ...]",
         min_role=UserRole.STAFF,
         handler=_receive_handler,
         help_text=(
             "Correct what actually arrived. `receive 001 35A 9` means the invoice said "
-            "10 bales but 9 turned up: the bill, the payable and the stock all follow."
+            "10 bales but 9 turned up: the bill, the payable and the stock all follow. "
+            "Several lines off one truck go in one command — `receive 001 35A 9 22D 4` — "
+            "or just say `receive` and pick them from the bill."
         ),
     ),
     "return": CommandSpec(

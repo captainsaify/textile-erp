@@ -83,8 +83,11 @@ SHEET_SCHEMA: dict[str, Any] = {
                     "label": {
                         "type": "string",
                         "description": (
-                            "The LABEL / BRAND column -- the brand this item is sold under "
-                            "(e.g. TOP, FOLD). Often repeats down the sheet. '' if absent."
+                            "The LABEL / BRAND column -- the brand or logo this item is "
+                            "sold under (e.g. TOP, MKD). Often repeats down the sheet. "
+                            "A FOLD column (F, FOLD, ROLL, OPEN, TUBE) says how the "
+                            "cloth is folded and is NOT a brand -- leave this '' rather "
+                            "than putting a fold marker in it. '' if absent."
                         ),
                     },
                     "rate": {
@@ -115,12 +118,27 @@ SHEET_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": "Invoice date as printed (any format), else ''.",
         },
+        "brand": {
+            "type": "string",
+            "description": (
+                "The brand/logo the whole sheet is for, when a heading names one -- "
+                "'LOGO :- MKD WINTER' means MKD. Give just the brand word, not the "
+                "whole heading. '' if no heading names a brand."
+            ),
+        },
         "unreadable_note": {
             "type": "string",
             "description": "Brief note if parts were unreadable, else ''.",
         },
     },
-    "required": ["rows", "supplier_name", "invoice_no", "invoice_date", "unreadable_note"],
+    "required": [
+        "rows",
+        "supplier_name",
+        "invoice_no",
+        "invoice_date",
+        "brand",
+        "unreadable_note",
+    ],
     "additionalProperties": False,
 }
 
@@ -135,9 +153,12 @@ row, a totals/grand-total row, or a running subtotal.
 digits, and punctuation such as hyphens. Do not expand abbreviations, \
 correct spelling, or tidy wording.
 - Do not map a value into the wrong column. Some sheets carry columns \
-with no header. A column of repeating words like FOLD or TOP is the \
+with no header. A column of repeating words like TOP or MKD is the \
 LABEL/brand column -- put it in `label`, never in `code` or \
 `description`.
+- A FOLD column is not a brand. Headers FOLD/Fold and values F, FOLD, \
+FOLDED, R, ROLL, OPEN, TUBE describe how the cloth is folded. Leave \
+`label` empty rather than putting a fold marker in it.
 - Numbers must be plain number strings with no units, thousands \
 separators, or currency symbols.
 - If a cell is genuinely unreadable, put '?' rather than guessing. A \
@@ -156,6 +177,8 @@ Columns you may see, under varying headers:
 - a total weight column (T.KG, Total KG, Total Weight)
 - a label/brand column (Label, Brand, Mark) -- often the same word on \
 every row
+- a fold column (Fold, or unheaded, holding F / FOLD / ROLL / OPEN / \
+TUBE) -- ignore it entirely; it is not a brand and not a quantity
 - a rate / unit price column, if the sheet has one
 
 Some sheets write a line as "22 x 80 x 75 = 132000": that is bales x \
@@ -164,7 +187,8 @@ rate, and 1760 (22 x 80) in the total weight.
 
 Ignore serial-number columns and running totals. Also capture the \
 supplier, invoice number and invoice date if they appear anywhere on \
-the sheet."""
+the sheet, and the brand if a heading names one (e.g. "LOGO :- MKD \
+WINTER" means the brand is MKD)."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -175,6 +199,10 @@ class VisionSheet:
     invoice_date: str
     unreadable_note: str
     model: str
+    #: The brand a heading names for the whole sheet, which beats the
+    #: label column: "LOGO :- MKD WINTER" is unambiguous, where a column
+    #: of repeated single letters is a guess.
+    brand: str = ""
 
 
 class VisionUnavailableError(Exception):
@@ -455,6 +483,7 @@ class VisionSheetReader:
             invoice_date=str(payload.get("invoice_date", "")),
             unreadable_note=str(payload.get("unreadable_note", "")),
             model=self._model,
+            brand=str(payload.get("brand", "")).strip(),
         )
 
 

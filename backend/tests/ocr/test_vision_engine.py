@@ -95,3 +95,54 @@ def test_the_brand_is_always_asked_when_the_sheet_has_no_label() -> None:
 
     assert "brand" in SLOT_ORDER
     assert SLOT_ORDER.index("brand") == 1, "asked right after the supplier"
+
+
+def test_a_heading_that_names_the_brand_is_read_from_the_sheet() -> None:
+    """A sheet headed "LOGO :- MKD WINTER" says its brand in words. The
+    reader had nowhere to put that, so the brand had to be inferred from
+    a column -- and on that sheet the column beside the codes was FOLD."""
+    from backend.ocr import vision_engine
+
+    schema = vision_engine.SHEET_SCHEMA
+    assert "brand" in schema["properties"]
+    assert "brand" in schema["required"]
+    assert "LOGO" in schema["properties"]["brand"]["description"]
+    # and the prompts stop offering FOLD as an example of a brand
+    assert "TOP, FOLD" not in str(schema)
+    assert "FOLD column is not a brand" in vision_engine.SYSTEM_PROMPT
+
+
+def test_the_reader_returns_the_heading_brand() -> None:
+    from backend.ocr.vision_engine import VisionSheetReader
+
+    class _Response:
+        stop_reason = "end_turn"
+        usage = None
+        content = [
+            type(
+                "Block",
+                (),
+                {
+                    "type": "text",
+                    "text": (
+                        '{"rows": [{"code": "028", "description": "Winter Wear", '
+                        '"qty": "21", "weight_per_unit": "80", "total_weight": "1680", '
+                        '"label": "", "rate": ""}], "supplier_name": "", '
+                        '"invoice_no": "", "invoice_date": "", "brand": "MKD", '
+                        '"unreadable_note": ""}'
+                    ),
+                },
+            )()
+        ]
+
+    class _Messages:
+        def create(self, **kwargs: object) -> _Response:
+            return _Response()
+
+    class _Client:
+        messages = _Messages()
+
+    sheet = VisionSheetReader(client=_Client()).read_sheet(b"not-an-image", "image/jpeg")
+
+    assert sheet.brand == "MKD"
+    assert sheet.rows[0].fields["label"].text == ""

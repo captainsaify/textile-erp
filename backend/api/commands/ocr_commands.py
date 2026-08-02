@@ -304,6 +304,7 @@ async def _cache_vision(attachment_id: uuid.UUID, vision: Any, ctx: RequestConte
                 "supplier": vision.supplier_name,
                 "invoice": vision.invoice_no,
                 "date": vision.invoice_date,
+                "brand": getattr(vision, "brand", ""),
             },
         }
 
@@ -380,6 +381,7 @@ async def read_stored_sheet(attachment_id_text: str, ctx: RequestContext) -> Com
     supplier_hint = ""
     invoice_hint = ""
     date_hint = ""
+    brand_hint = ""
 
     # A photo already read is never read again. Tapping "A purchase" a
     # second time, or re-answering after a crash, used to bill a fresh
@@ -404,6 +406,7 @@ async def read_stored_sheet(attachment_id_text: str, ctx: RequestContext) -> Com
         supplier_hint = hints.get("supplier", "")
         invoice_hint = hints.get("invoice", "")
         date_hint = hints.get("date", "")
+        brand_hint = hints.get("brand", "")
         logger.info("vision_cache_hit", attachment_id=str(attachment_id), rows=len(rows))
 
     # Vision first: it reads the table as a table, so an unnamed column or a
@@ -432,6 +435,7 @@ async def read_stored_sheet(attachment_id_text: str, ctx: RequestContext) -> Com
                     supplier_hint = vision.supplier_name
                     invoice_hint = vision.invoice_no
                     date_hint = vision.invoice_date
+                    brand_hint = vision.brand
             except VisionUnavailableError as exc:
                 logger.warning("vision_read_failed_falling_back", error=str(exc))
 
@@ -465,6 +469,7 @@ async def read_stored_sheet(attachment_id_text: str, ctx: RequestContext) -> Com
                 sheet,
                 supplier_name=supplier_hint,
                 invoice_no=invoice_hint,
+                brand_name=brand_hint,
             )
             build.draft.source_attachment_id = attachment_id
             await service.mark_attachment(

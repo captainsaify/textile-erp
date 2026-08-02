@@ -3,6 +3,7 @@ shape this follows."""
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import decimal
 import uuid
@@ -12,6 +13,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.models import PurchaseHeader
+
+
+@dataclasses.dataclass(frozen=True)
+class InvoiceLine:
+    """One line of a bill, as much of it as a picker needs to show."""
+
+    code: str
+    description: str
+    qty: decimal.Decimal
+    #: None when the sheet gave no per-bale weight -- which is exactly
+    #: when `receive` cannot work in bales, so the picker can say so
+    #: rather than offering a line that will be refused.
+    weight_per_piece: decimal.Decimal | None
+    rate: decimal.Decimal
+
+    @property
+    def pieces(self) -> decimal.Decimal | None:
+        if self.weight_per_piece is None or self.weight_per_piece <= 0:
+            return None
+        return (self.qty / self.weight_per_piece).quantize(decimal.Decimal("0.001"))
 
 
 class PurchaseRepository:
@@ -48,6 +69,49 @@ class PurchaseRepository:
             .limit(limit)
         )
         return [(row[0], row[1], row[2]) for row in (await self._session.execute(stmt)).all()]
+
+    async def invoice_lines(
+        self, org_id: uuid.UUID, invoice_no: str, *, limit: int = 9
+    ) -> list[InvoiceLine]:
+        """What is actually on a bill, so a correction can pick a line
+        instead of recalling a code.
+
+        Bales rather than kilograms: `receive` counts what came off the
+        truck, and quoting the line in the same unit the question is
+        asked in is what stops 10 bales being answered with 800.
+        """
+        from backend.models import Product, PurchaseLine
+
+        stmt = (
+            select(
+                Product.code,
+                PurchaseLine.description,
+                Product.description,
+                PurchaseLine.qty,
+                PurchaseLine.weight_kg,
+                PurchaseLine.rate,
+            )
+            .join(PurchaseHeader, PurchaseHeader.id == PurchaseLine.purchase_header_id)
+            .join(Product, Product.id == PurchaseLine.product_id)
+            .where(
+                PurchaseHeader.org_id == org_id,
+                func.lower(PurchaseHeader.invoice_no) == invoice_no.lower(),
+                PurchaseHeader.deleted_at.is_(None),
+                PurchaseHeader.status == "confirmed",
+            )
+            .order_by(PurchaseLine.line_no)
+            .limit(limit)
+        )
+        return [
+            InvoiceLine(
+                code=row[0],
+                description=(row[1] or row[2] or ""),
+                qty=row[3],
+                weight_per_piece=row[4],
+                rate=row[5],
+            )
+            for row in (await self._session.execute(stmt)).all()
+        ]
 
     async def find_potential_duplicates(
         self,

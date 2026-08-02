@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from backend.api.command_types import CommandResult, RequestContext
 from backend.api.commands import wizards
 from backend.api.interactive import Buttons, ListMenu
+from backend.core.exceptions import ValidationError
 from backend.models import User
 from backend.services.session_service import (
     AWAITING_COMMAND_SLOT,
@@ -736,3 +737,90 @@ async def test_a_quantity_missing_from_the_list_is_refused(ctx: RequestContext) 
     # the rejected answer is not treated as given
     assert "qty" not in context["filled"]
     assert context["queue"][0] == "qty"
+
+
+# --------------------------------------------------------------------
+# corrections to a confirmed bill
+# --------------------------------------------------------------------
+
+
+async def test_rate_asks_which_bill_which_lines_and_the_price(ctx: RequestContext) -> None:
+    """`rate` alone used to print a usage line -- at the one command
+    where remembering an invoice number *and* a code is the difficulty,
+    and where the system already knows both."""
+    result = await begin("rate", "", ctx)
+
+    assert result is not None
+    _, context = await state_of(ctx)
+    assert context["queue"] == ["invoice", "codes", "rate"]
+
+
+async def test_a_complete_rate_command_still_runs_in_one_shot(ctx: RequestContext) -> None:
+    """`rate 001 145` already means every line. Turning that into a
+    question would make the typed form worse than the wizard."""
+    assert await begin("rate", "001 145", ctx) is None
+    assert await begin("rate", "001 145 35A 22D", ctx) is None
+
+
+def test_rate_reassembles_into_the_command_it_came_from() -> None:
+    assert wizards._assemble_rate({"invoice": "001", "codes": "all", "rate": "145.00"}) == (
+        "001 145.00"
+    )
+    assert wizards._assemble_rate({"invoice": "001", "codes": "35A, 22D", "rate": "145.00"}) == (
+        "001 145.00 35A 22D"
+    )
+
+
+def test_every_line_is_a_tap_not_a_word_to_know() -> None:
+    assert wizards._line_scope("Every line") == "all"
+    assert wizards._line_scope("all") == "all"
+    assert wizards._line_scope("35a, 22d") == "35A, 22D"
+
+
+async def test_receive_loops_so_one_truck_is_one_conversation(ctx: RequestContext) -> None:
+    """Several lines short off the same delivery is one event."""
+    filled = {
+        "invoice": "001",
+        "code": wizards._codes("35A, 22D"),
+        "pieces": wizards._counts("9, 4"),
+    }
+    wizards._bank_receipt(filled)
+
+    assert wizards._items_of(filled) == ["35A 9", "22D 4"]
+    assert "code" not in filled and "pieces" not in filled
+    assert wizards._assemble_receive({**filled, "invoice": "001"}) == "001 35A 9 22D 4"
+
+
+async def test_a_count_missing_from_the_list_is_refused(ctx: RequestContext) -> None:
+    """Unlike a price, a single count is never spread across codes --
+    that would claim nine bales of each and write the stock to match."""
+    await begin("receive", "", ctx)
+    await answer("001", ctx)
+    await answer("35a, 22d, cpk", ctx)
+    result = await answer("9", ctx)
+
+    assert "3 codes but 1 counts" in result.reply
+    _, context = await state_of(ctx)
+    assert "pieces" not in context["filled"]
+
+
+def test_nothing_arrived_is_a_real_answer() -> None:
+    """Zero bales is the whole reason the command exists, so it cannot
+    go through the quantity validator, which refuses it."""
+    assert wizards._counts("0") == "0"
+    with pytest.raises(ValidationError):
+        wizards._counts("-1")
+
+
+def test_receive_prefill_keeps_a_trailing_code_and_asks_what_arrived() -> None:
+    assert wizards._prefill_receive("001 35A 9") == {
+        "invoice": "001",
+        "items": "35A 9",
+        "more": "done",
+    }
+    assert wizards._prefill_receive("001 35A 9 22D") == {
+        "invoice": "001",
+        "items": "35A 9",
+        "code": "22D",
+    }
+    assert wizards._prefill_receive("001") == {"invoice": "001"}
