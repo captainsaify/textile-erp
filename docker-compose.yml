@@ -120,7 +120,7 @@ services:
       dockerfile: docker/Dockerfile.worker
     restart: unless-stopped
     <<: *app-env
-    command: ["celery", "-A", "backend.workers.app", "worker", "-Q", "whatsapp", "-c", "8", "--loglevel=info"]
+    command: ["celery", "-A", "backend.workers.app", "worker", "-Q", "whatsapp", "-c", "${CELERY_WHATSAPP_CONCURRENCY:-8}", "--loglevel=info"]
     volumes:
       - attachments:/data/attachments
     depends_on: *app-depends
@@ -133,7 +133,7 @@ services:
     <<: *app-env
     # low concurrency, high per-task CPU/memory: OCR is the opposite
     # shape from message sending
-    command: ["celery", "-A", "backend.workers.app", "worker", "-Q", "ocr", "-c", "2", "--loglevel=info"]
+    command: ["celery", "-A", "backend.workers.app", "worker", "-Q", "ocr", "-c", "${CELERY_OCR_CONCURRENCY:-2}", "--loglevel=info"]
     volumes:
       - attachments:/data/attachments
     depends_on: *app-depends
@@ -148,7 +148,7 @@ services:
       dockerfile: docker/Dockerfile.worker
     restart: unless-stopped
     <<: *app-env
-    command: ["celery", "-A", "backend.workers.app", "worker", "-Q", "scheduled,backup,reports", "-c", "4", "--loglevel=info"]
+    command: ["celery", "-A", "backend.workers.app", "worker", "-Q", "scheduled,backup,reports", "-c", "${CELERY_SCHEDULED_CONCURRENCY:-4}", "--loglevel=info"]
     volumes:
       - attachments:/data/attachments
       - backups:/data/backups

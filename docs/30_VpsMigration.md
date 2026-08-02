@@ -177,3 +177,51 @@ clear that they are unrelated to it:
   a hosting one.
 - The web.js bridge, if group broadcasting is ever switched on, needs
   Chromium and a QR scan on the VPS. It has no session to inherit.
+
+## 7. Sizing the box {#sizing}
+
+Measured on the live stack, not estimated.
+
+| | Default | Tuned for a small host |
+|---|---|---|
+| worker-whatsapp | 371 MB | **128 MB** |
+| worker-scheduled | 294 MB | **127 MB** |
+| worker-ocr | 125 MB | **89 MB** |
+| api | 120 MB | 120 MB |
+| beat · postgres · cloudflared · redis · nginx | 177 MB | 177 MB |
+| **total** | **1086 MB** | **640 MB** |
+
+The difference is entirely Celery prefork children — 14 of them at the
+defaults, each holding its own copy of the app. Those defaults are
+sized for a busy system. This business is three people and a handful of
+messages an hour, so:
+
+```bash
+CELERY_WHATSAPP_CONCURRENCY=2
+CELERY_OCR_CONCURRENCY=1
+CELERY_SCHEDULED_CONCURRENCY=2
+```
+
+Two concurrent WhatsApp tasks is still more parallelism than three
+partners can generate. Nothing is given up.
+
+### So: 2 GB is enough
+
+640 MB of stack plus ~250 MB of Ubuntu leaves roughly **1 GB free** on
+a 2 GB box. Two things make it comfortable rather than merely possible:
+
+- **The images build cheaply.** The dependency set is
+  `opencv-python-headless` and `numpy` — no PaddleOCR, no torch — and
+  both ship prebuilt wheels that `uv` downloads rather than compiles.
+  The build is I/O, not memory.
+- **Swap.** `vps-bootstrap.sh` gives a 2 GB host **4 GB** of swap,
+  because the build is the one tight moment and swap is what stops it
+  being fatal.
+
+Disk is not a constraint at any tier: the whole dataset is 15 MB and
+`pg_data` is 80 MB. Budget ~5 GB for images and 30 GB is generous.
+
+**1 vCPU works.** Builds are slower; nothing else notices.
+
+Go to 4 GB only if you plan to run local OCR heavily (PaddleOCR would
+change the arithmetic) or add a second business for real.

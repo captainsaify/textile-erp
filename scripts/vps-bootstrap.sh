@@ -59,7 +59,13 @@ fi
 # is where the OOM killer takes out postgres mid-migration.
 if [ "$(swapon --show --noheadings | wc -l)" -eq 0 ]; then
   TOTAL_MB=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
-  SWAP_GB=2; [ "$TOTAL_MB" -ge 7000 ] && SWAP_GB=1
+  # Sized against RAM, not a fixed number: on a 2GB box the build is
+  # the tight moment and swap is what stops it being fatal, so that box
+  # gets the most.
+  if   [ "$TOTAL_MB" -lt 2500 ]; then SWAP_GB=4
+  elif [ "$TOTAL_MB" -lt 5000 ]; then SWAP_GB=2
+  else                                SWAP_GB=1
+  fi
   say "Creating ${SWAP_GB}G of swap (RAM is ${TOTAL_MB}MB)"
   fallocate -l "${SWAP_GB}G" /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=$((SWAP_GB*1024))
   chmod 600 /swapfile
@@ -123,6 +129,14 @@ $(say "Ready")
   swap    : $(awk '/SwapTotal/{printf "%.1fGB", $2/1024/1024}' /proc/meminfo)
   disk    : $(df -h / | awk 'NR==2{print $4" free"}')
 
+$(if [ "$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)" -lt 2500 ]; then cat <<'TIP'
+On a 2GB host, set these in .env before starting (docs/30 §7) --
+measured 1086MB at the defaults, 640MB with these:
+  CELERY_WHATSAPP_CONCURRENCY=2
+  CELERY_OCR_CONCURRENCY=1
+  CELERY_SCHEDULED_CONCURRENCY=2
+TIP
+fi)
 Next:
   git clone https://github.com/captainsaify/textile-erp.git
   cd textile-erp
