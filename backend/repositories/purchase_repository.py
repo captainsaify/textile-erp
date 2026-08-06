@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.models import PurchaseHeader
+from backend.models.enums import PurchaseStatus
 
 
 @dataclasses.dataclass(frozen=True)
@@ -42,11 +43,29 @@ class PurchaseRepository:
     async def get_confirmed_by_invoice(
         self, org_id: uuid.UUID, supplier_id: uuid.UUID, invoice_no: str
     ) -> PurchaseHeader | None:
-        stmt = select(PurchaseHeader).where(
-            PurchaseHeader.org_id == org_id,
-            PurchaseHeader.supplier_id == supplier_id,
-            func.lower(PurchaseHeader.invoice_no) == invoice_no.lower(),
-            PurchaseHeader.deleted_at.is_(None),
+        """The *confirmed* bill on this invoice number, if there is one.
+
+        The status filter is the point of the method and was missing.
+        Without it a cancelled bill went on claiming its invoice number
+        for ever, and since an exact duplicate cannot be overridden, the
+        correction this system actually recommends -- undo it and enter
+        it again -- was impossible on any bill that had been entered once.
+        Re-entering invoice 1051 failed for exactly this reason.
+
+        `.limit(1)` because a number can legitimately be cancelled
+        several times before it goes in correctly; `scalar_one_or_none`
+        raised MultipleResultsFound on the second attempt.
+        """
+        stmt = (
+            select(PurchaseHeader)
+            .where(
+                PurchaseHeader.org_id == org_id,
+                PurchaseHeader.supplier_id == supplier_id,
+                func.lower(PurchaseHeader.invoice_no) == invoice_no.lower(),
+                PurchaseHeader.status == PurchaseStatus.CONFIRMED,
+                PurchaseHeader.deleted_at.is_(None),
+            )
+            .limit(1)
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
