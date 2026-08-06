@@ -57,6 +57,38 @@ _CORRECTION = re.compile(
 #: message whose lines are all malformed still gets told so, instead of
 #: falling through to the generic re-prompt and looking like assent.
 _CORRECTION_HINT = re.compile(r"^line\s+\d+", re.IGNORECASE)
+#: Fixing the supplier mid-draft. A bill often prints the *buyer's* name
+#: most prominently -- Iqbal Bhai's book says "FIROZ-PNP", which is the
+#: customer, us -- so whatever is read off the sheet is a guess that has
+#: to be correctable without abandoning the draft.
+_SET_SUPPLIER = re.compile(r"^supplier\s*:?\s+(?P<name>.+)$", re.IGNORECASE)
+#: `freight 500`, `GST: 2240`, `BPK 2100`. Freight has its own column
+#: because it is allocated across lines by weight; everything else is
+#: itemised and summed into other_charges.
+_SET_CHARGE = re.compile(
+    r"^(?P<label>[A-Za-z][\w.+&/-]*)\s*:?\s*(?P<amount>[\d,]+(?:\.\d+)?)$", re.IGNORECASE
+)
+#: Only these words are treated as a charge. Without an allow-list,
+#: `BSQ 800` -- a perfectly ordinary item line -- becomes a charge called
+#: BSQ, and the bill quietly grows ₹800 of nothing.
+_CHARGE_LABELS = {
+    "freight",
+    "transport",
+    "cartage",
+    "other",
+    "charges",
+    "gst",
+    "tax",
+    "packing",
+    "packaging",
+    "bpk",
+    "lbpk",
+    "labour",
+    "labor",
+    "loading",
+    "commission",
+    "discount",
+}
 _CREATE_PRODUCT = re.compile(
     r"^create\s+product\s+(?P<code>[A-Za-z0-9][\w.\-/&]*)(?:\s+(?P<description>.+))?$",
     re.IGNORECASE,
@@ -222,7 +254,15 @@ def render_preview(draft: Draft) -> str:
     if draft.freight:
         lines.append(f"Freight: {fmt_money(draft.freight)} (allocated by weight)")
     if draft.other_charges:
-        lines.append(f"Other charges: {fmt_money(draft.other_charges)}")
+        # Itemised only when there is more than one, so a bill carrying a
+        # single charge doesn't read as "2240 (GST 2240)".
+        itemised = ""
+        if len(draft.charges) > 1:
+            parts = " + ".join(
+                f"{label} {fmt_money(amount)}" for label, amount in draft.charges.items()
+            )
+            itemised = f"  ({parts})"
+        lines.append(f"Other charges: {fmt_money(draft.other_charges)}{itemised}")
     lines.append(f"Grand total: {fmt_money(draft.grand_total)}")
     if draft.declared_total is not None:
         lines.append(f"Invoice shows: {fmt_money(draft.declared_total)}")
@@ -563,6 +603,43 @@ async def handle_purchase_session_reply(
                     line.product_id = product.id
                     line.resolved_code = product.code
                     line.unit_code = unit_code.unit.code if unit_code else "KG"
+        await sessions.set(
+            ctx.user.org_id, ctx.user.id, AWAITING_PURCHASE_CONFIRMATION, draft.to_context()
+        )
+        return preview_result(draft)
+
+    supplier_change = _SET_SUPPLIER.match(text.strip())
+    if supplier_change:
+        draft.supplier_name = " ".join(supplier_change["name"].split())
+        # Cleared so _resolve_draft looks the new name up. Left set, the
+        # draft would show the new name while still billing the old one.
+        draft.supplier_id = None
+        draft = await _resolve_draft(draft, ctx)
+        await sessions.set(
+            ctx.user.org_id, ctx.user.id, AWAITING_PURCHASE_CONFIRMATION, draft.to_context()
+        )
+        return preview_result(draft)
+
+    charge = _SET_CHARGE.match(text.strip())
+    if charge and charge["label"].lower() in _CHARGE_LABELS:
+        label = charge["label"].upper()
+        try:
+            amount = decimal.Decimal(charge["amount"].replace(",", ""))
+        except decimal.InvalidOperation:
+            return CommandResult(reply=f"*{charge['amount']}* is not a number.")
+        if charge["label"].lower() in {"freight", "transport", "cartage"}:
+            # Its own field, not an itemised charge: freight is allocated
+            # across the lines by weight, so it changes each line's
+            # landed cost. The rest only move the grand total.
+            draft.freight = amount
+        else:
+            if charge["label"].lower() in {"other", "charges"}:
+                # A single stated total replaces the itemisation rather
+                # than joining it, or "other 4340" after "GST 2240" bills
+                # the tax twice.
+                draft.charges.clear()
+            draft.charges[label] = amount
+            draft.other_charges = sum(draft.charges.values(), decimal.Decimal("0"))
         await sessions.set(
             ctx.user.org_id, ctx.user.id, AWAITING_PURCHASE_CONFIRMATION, draft.to_context()
         )

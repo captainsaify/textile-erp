@@ -108,6 +108,13 @@ class Draft:
     freight: decimal.Decimal
     other_charges: decimal.Decimal
     declared_total: decimal.Decimal | None
+    #: The non-freight charges, itemised under the name the bill uses --
+    #: {"GST": 2240, "BPK": 2100}. `other_charges` stays the single total
+    #: the books care about; this exists so a bill carrying two charges
+    #: can have each entered and *corrected* separately. Adding them up
+    #: in your head to send one number is exactly the arithmetic this
+    #: system is meant to remove.
+    charges: dict[str, decimal.Decimal] = dataclasses.field(default_factory=dict)
     pending_override: bool = False
     total_resolution: str | None = None  # None | 'calculated' | 'invoice'
     #: the photo this draft was read from, so the confirmed purchase can
@@ -167,6 +174,7 @@ class Draft:
             ],
             "freight": str(self.freight),
             "other_charges": str(self.other_charges),
+            "charges": {label: str(amount) for label, amount in self.charges.items()},
             "declared_total": str(self.declared_total) if self.declared_total else None,
             "pending_override": self.pending_override,
             "total_resolution": self.total_resolution,
@@ -208,6 +216,10 @@ class Draft:
             ],
             freight=decimal.Decimal(context["freight"]),
             other_charges=decimal.Decimal(context["other_charges"]),
+            charges={
+                label: decimal.Decimal(amount)
+                for label, amount in (context.get("charges") or {}).items()
+            },
             declared_total=(
                 decimal.Decimal(context["declared_total"]) if context["declared_total"] else None
             ),

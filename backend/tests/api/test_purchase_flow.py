@@ -286,6 +286,51 @@ async def test_several_corrections_in_one_message(ctx: RequestContext) -> None:
     await _session_reply("discard", ctx)
 
 
+async def test_supplier_and_charges_are_fixable_mid_draft(ctx: RequestContext) -> None:
+    """The most prominent name on a bill is often the *buyer's*.
+
+    Iqbal Bhai's book prints "FIROZ-PNP" across the top -- Firoz,
+    Panipat, the customer, us -- so whatever is read as the supplier is a
+    guess. Neither that nor the charges at the foot of the bill could be
+    changed once a draft existed: `_HEADER` and `_LABELED` are reachable
+    only from the typed `purchase` text, never from the session an OCR
+    draft lives in. The only way out was to discard and start again.
+    """
+    await handle_purchase(PURCHASE_TEXT, ctx)
+    await _session_reply("create supplier", ctx)
+    await _session_reply("create product TRP Trouser Poly", ctx)
+    await _session_reply("create product MJP Micro Jogging Pants Fabric", ctx)
+
+    result = await _session_reply("supplier Iqbal Bhai", ctx)
+    assert "Iqbal Bhai" in result.reply
+
+    result = await _session_reply("GST 2240", ctx)
+    assert "Other charges: ₹2,240.00" in result.reply
+
+    # A second charge joins it, itemised, rather than replacing it.
+    result = await _session_reply("LBPK 2,100", ctx)
+    assert "Other charges: ₹4,340.00" in result.reply
+    assert "GST ₹2,240.00 + LBPK ₹2,100.00" in result.reply
+
+    # Correcting one re-states that charge instead of adding again.
+    result = await _session_reply("GST 2000", ctx)
+    assert "Other charges: ₹4,100.00" in result.reply
+
+    # Freight keeps its own field: it is allocated across lines by
+    # weight, so it changes landed cost rather than only the total.
+    result = await _session_reply("freight 500", ctx)
+    assert "Freight: ₹500.00 (allocated by weight)" in result.reply
+    assert "Other charges: ₹4,100.00" in result.reply
+
+    # An ordinary item line must not be mistaken for a charge, or the
+    # bill quietly grows ₹800 of nothing.
+    result = await _session_reply("BSQ 800", ctx)
+    assert "Reply CONFIRM" in result.reply
+    assert "BSQ" not in result.reply
+
+    await _session_reply("discard", ctx)
+
+
 async def test_exact_duplicate_blocked(
     ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
