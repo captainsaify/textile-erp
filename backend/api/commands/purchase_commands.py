@@ -288,7 +288,19 @@ def render_preview(draft: Draft) -> str:
     elif step == "supplier":
         lines.append(f"One thing left: *{draft.supplier_name}* isn't in your supplier list yet.")
     elif step == "confirm":
-        lines.append("Reply CONFIRM to save, or send corrections (e.g. 'line 1 qty 90').")
+        # The same lesson as `create all products` three branches up, and
+        # it was learned twice. `supplier` and the charge words shipped
+        # and were immediately typed at an *idle* session instead --
+        # because the only thing this prompt had ever named was
+        # `line 1 qty 90`, so that looked like the only thing on offer.
+        # A command nobody names does not exist.
+        lines.append(
+            "Reply CONFIRM to save, or fix anything first:\n"
+            "• *line 1 qty 800* — also *rate*, *code*\n"
+            "• *supplier <name>* — the biggest name on a bill is often "
+            "the buyer's, not the seller's\n"
+            "• *GST 2240*, *packing 2100*, *freight 500* — charges at the foot of the bill"
+        )
     return "\n".join(lines)
 
 
