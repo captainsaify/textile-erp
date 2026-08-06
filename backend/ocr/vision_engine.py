@@ -71,13 +71,25 @@ SHEET_SCHEMA: dict[str, Any] = {
                     "weight_per_unit": {
                         "type": "string",
                         "description": (
-                            "Per-unit weight (the KG column) as a number string; '' if absent."
+                            "Per-unit weight -- the KG column -- as a number string, ONLY "
+                            "when the sheet has two weight columns (a per-unit one and a "
+                            "total). Many handwritten bills have a single weight column "
+                            "(KG, KILO, किलो) holding the weight of the whole line: in "
+                            "that case leave this '' and put the figure in total_weight. "
+                            "'' if absent."
                         ),
                     },
                     "total_weight": {
                         "type": "string",
                         "description": (
-                            "Total weight (the T.KG column) as a number string; '' if absent."
+                            "Total weight for the line (the T.KG column, or the sole "
+                            "weight column when there is only one) as a number string. "
+                            "**Never take this from the rate or amount column.** On a "
+                            "bill reading 10 | 800 | 125 | 1,00,000 the columns are "
+                            "pieces, total kg, rate per kg, and line amount -- so "
+                            "total_weight is 800 and rate is 125, never the reverse. "
+                            "Sanity-check it: total_weight x rate should equal the "
+                            "printed line amount when the sheet shows one. '' if absent."
                         ),
                     },
                     "label": {

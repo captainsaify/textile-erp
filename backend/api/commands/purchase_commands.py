@@ -10,6 +10,7 @@ mismatch resolution, `discard`.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import decimal
 import re
@@ -52,6 +53,10 @@ _LABELED = re.compile(r"^(?P<label>freight|other|total):\s*(?P<amount>[\d.]+)$",
 _CORRECTION = re.compile(
     r"^line\s+(?P<line>\d+)\s+(?P<field>code|qty|rate)\s+(?P<value>.+)$", re.IGNORECASE
 )
+#: "This message was *meant* as corrections." Matched per line, so a
+#: message whose lines are all malformed still gets told so, instead of
+#: falling through to the generic re-prompt and looking like assent.
+_CORRECTION_HINT = re.compile(r"^line\s+\d+", re.IGNORECASE)
 _CREATE_PRODUCT = re.compile(
     r"^create\s+product\s+(?P<code>[A-Za-z0-9][\w.\-/&]*)(?:\s+(?P<description>.+))?$",
     re.IGNORECASE,
@@ -392,6 +397,46 @@ async def _resolve_draft(draft: Draft, ctx: RequestContext) -> Draft:
     return draft
 
 
+async def _apply_correction(
+    draft: Draft, correction: re.Match[str], ctx: RequestContext
+) -> str | None:
+    """Apply one `line N field value` to the draft in place.
+
+    Returns None on success, or a fragment saying what was wrong with
+    that one line -- the caller is applying several and has to report on
+    each, so this cannot raise or return a whole reply.
+    """
+    index = int(correction["line"]) - 1
+    if not 0 <= index < len(draft.lines):
+        return f"there is no line {correction['line']} in this bill"
+    field, value = correction["field"].lower(), correction["value"].strip()
+    line = draft.lines[index]
+    previous_code = line.code
+    try:
+        if field == "qty":
+            line.qty = decimal.Decimal(value)
+        elif field == "rate":
+            line.rate = decimal.Decimal(value)
+        else:
+            line.code = value.upper()
+            line.product_id = None
+            line.resolved_code = None
+            line.unit_code = None
+    except decimal.InvalidOperation:
+        return f"*{value}* is not a number"
+    if field == "code" and previous_code and previous_code != line.code:
+        # the user just told us what that OCR text really meant (§8)
+        async with ctx.session_factory() as session, session.begin():
+            await OcrService(session).record_correction(
+                ctx.user.org_id,
+                field="code",
+                raw_ocr_text=previous_code,
+                corrected_value=line.code,
+                supplier_id=draft.supplier_id,
+            )
+    return None
+
+
 async def handle_purchase(args: str, ctx: RequestContext) -> CommandResult:
     sessions = SessionService(ctx.session_factory)
     current = await sessions.get(ctx.user.org_id, ctx.user.id)
@@ -523,41 +568,46 @@ async def handle_purchase_session_reply(
         )
         return preview_result(draft)
 
-    correction = _CORRECTION.match(text.strip())
-    if correction:
-        index = int(correction["line"]) - 1
-        if not 0 <= index < len(draft.lines):
-            return CommandResult(reply=f"There's no line {correction['line']} in this draft.")
-        field, value = correction["field"].lower(), correction["value"].strip()
-        line = draft.lines[index]
-        previous_code = line.code
-        try:
-            if field == "qty":
-                line.qty = decimal.Decimal(value)
-            elif field == "rate":
-                line.rate = decimal.Decimal(value)
+    # Corrections arrive one per line, and a bill being fixed usually
+    # needs more than one of them. Matching the whole message against
+    # `_CORRECTION` meant a two-line message matched nothing at all --
+    # `$` without re.MULTILINE will not stop at a newline -- so *both*
+    # lines were dropped and the fall-through re-prompt read as
+    # acknowledgement. Observed live: the same pair of corrections sent
+    # five times, silently discarded five times, and the bill confirmed
+    # with the numbers the sender believed they had just changed.
+    raw_lines = [entry.strip() for entry in text.strip().splitlines() if entry.strip()]
+    if any(_CORRECTION_HINT.match(entry) for entry in raw_lines):
+        applied = 0
+        problems: list[str] = []
+        for entry in raw_lines:
+            match = _CORRECTION.match(entry)
+            if match is None:
+                problems.append(f"• *{entry}* — expected *line <n> qty|rate|code <value>*")
+                continue
+            failure = await _apply_correction(draft, match, ctx)
+            if failure is None:
+                applied += 1
             else:
-                line.code = value.upper()
-                line.product_id = None
-                line.resolved_code = None
-                line.unit_code = None
-        except decimal.InvalidOperation:
-            return CommandResult(reply=f"'{value}' is not a valid number.")
-        if field == "code" and previous_code and previous_code != line.code:
-            # the user just told us what that OCR text really meant (§8)
-            async with ctx.session_factory() as session, session.begin():
-                await OcrService(session).record_correction(
-                    ctx.user.org_id,
-                    field="code",
-                    raw_ocr_text=previous_code,
-                    corrected_value=line.code,
-                    supplier_id=draft.supplier_id,
-                )
+                problems.append(f"• *{entry}* — {failure}")
+
+        if not applied:
+            return CommandResult(
+                reply="I didn't change anything:\n" + "\n".join(problems),
+            )
+
         draft = await _resolve_draft(draft, ctx)
         await sessions.set(
             ctx.user.org_id, ctx.user.id, AWAITING_PURCHASE_CONFIRMATION, draft.to_context()
         )
-        return preview_result(draft)
+        result = preview_result(draft)
+        if not problems:
+            return result
+        # The ones that failed go *above* the redrawn bill. Underneath it
+        # they sit below the CONFIRM prompt, and a bill that looks right
+        # is confirmed without the warning ever being read.
+        notice = f"Applied {applied}, but not these:\n" + "\n".join(problems)
+        return dataclasses.replace(result, reply=f"{notice}\n\n{result.reply}")
 
     if lowered in _GUIDANCE:
         # the button said "I'll do it myself" -- say how, don't re-send

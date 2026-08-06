@@ -278,11 +278,29 @@ class EditService:
         return brand
 
     def _guard_transaction(self, entity: str) -> None:
-        if entity in TRANSACTION_ENTITIES:
+        """Confirmed history is corrected, never rewritten.
+
+        The refusal names the cheaper routes first. Told only to undo and
+        re-enter, someone with one wrong price on a twelve-line bill will
+        retype the whole thing -- and `rate` and `receive` exist precisely
+        so they don't have to. Undo is the answer for a bill that was
+        wrong when it was entered, not for the two things that change
+        *after* a bill is correct.
+        """
+        if entity not in TRANSACTION_ENTITIES:
+            return
+        opening = (
+            f"A confirmed {entity} is never changed in place — stock and the average "
+            "cost were already worked out from it."
+        )
+        if entity == "purchase":
             raise RoutedToUndo(
-                f"A confirmed {entity} is never changed in place — the stock and books "
-                f"were already derived from it. Use 'undo {entity} <ref>' and re-enter it."
+                f"{opening}\n"
+                "• Price agreed later or billed wrong — *rate <invoice> <new rate>*\n"
+                "• Fewer arrived than billed — *receive <invoice> <CODE> <bales>*\n"
+                f"• Anything else — *undo purchase <ref>*, then enter it again."
             )
+        raise RoutedToUndo(f"{opening}\nUse *undo {entity} <ref>* and enter it again.")
 
     async def edit(
         self,

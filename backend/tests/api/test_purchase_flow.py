@@ -249,6 +249,43 @@ async def test_full_purchase_session_flow(
     assert state.is_idle
 
 
+async def test_several_corrections_in_one_message(ctx: RequestContext) -> None:
+    """Corrections arrive one per line, and a bill usually needs several.
+
+    Regression. `_CORRECTION` was matched against the whole message, with
+    `$` and no re.MULTILINE, so a two-line message matched nothing at all
+    and *both* corrections were dropped. Worse than dropping them, the
+    fall-through answered "Reply CONFIRM to save this purchase, or tell
+    me what to fix" -- which reads as acknowledgement. Seen live: the
+    same pair sent five times, discarded five times, and the bill then
+    confirmed carrying the numbers the sender believed they had changed.
+    """
+    await handle_purchase(PURCHASE_TEXT, ctx)
+    await _session_reply("create supplier", ctx)
+    await _session_reply("create product TRP Trouser Poly", ctx)
+    await _session_reply("create product MJP Micro Jogging Pants Fabric", ctx)
+
+    result = await _session_reply("line 1 qty 800\nline 2 qty 40", ctx)
+    assert "TRP  800.0 KG" in result.reply
+    assert "MJP  40.0 KG" in result.reply
+
+    # One good, one unusable: apply the good one and name the other,
+    # above the redrawn bill rather than below the CONFIRM prompt.
+    result = await _session_reply("line 1 qty 90\nline 2 qty 8pp", ctx)
+    assert "TRP  90.0 KG" in result.reply
+    assert "8pp" in result.reply
+    assert "is not a number" in result.reply
+    assert result.reply.index("8pp") < result.reply.index("Purchase draft")
+
+    # Nothing usable at all: say so. Re-prompting is what made the
+    # original bug invisible.
+    result = await _session_reply("line 1 quantity 90", ctx)
+    assert "didn't change anything" in result.reply
+    assert "TRP  90.0 KG" not in result.reply
+
+    await _session_reply("discard", ctx)
+
+
 async def test_exact_duplicate_blocked(
     ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
