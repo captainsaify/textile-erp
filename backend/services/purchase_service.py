@@ -298,13 +298,23 @@ class PurchaseService:
         return None
 
     async def resolve_or_create_brand(self, org_id: uuid.UUID, name: str) -> Brand:
+        """The brand of that name, creating it only if it is really new.
+
+        The match lowercases *and trims*, and the name is stored trimmed.
+        Comparing only on case let "TOP " past the lookup and past the
+        unique index, which is on the raw name -- so the catalogue ended
+        up with two brands both displaying as TOP, 26 duplicate products
+        between them, and a brand question that offered the same answer
+        twice because a set of names collapses them.
+        """
         from sqlalchemy import func, select
 
+        name = " ".join(name.split())
         existing = (
             await self._session.execute(
                 select(Brand).where(
                     Brand.org_id == org_id,
-                    func.lower(Brand.name) == name.lower(),
+                    func.lower(func.btrim(Brand.name)) == name.lower(),
                     Brand.deleted_at.is_(None),
                 )
             )

@@ -286,6 +286,40 @@ async def test_several_corrections_in_one_message(ctx: RequestContext) -> None:
     await _session_reply("discard", ctx)
 
 
+async def test_brand_names_match_ignoring_case_and_space(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """ "TOP " and "TOP" are one brand. They were two.
+
+    The lookup compared case but not whitespace, and the unique index was
+    on the raw name, so both slipped past. The catalogue ended up with
+    two brands displaying identically and 26 duplicate products between
+    them -- and worse, the "which brand?" question builds its choices
+    from a *set* of names, so it offered TOP twice and a sale could take
+    the wrong brand's stock without ever really asking.
+    """
+    from backend.services.purchase_service import PurchaseService
+
+    async with session_factory() as session:
+        async with session.begin():
+            first = await PurchaseService(session).resolve_or_create_brand(ctx.user.org_id, "TOP")
+        first_id = first.id
+
+    for variant in ("TOP ", " top", "  ToP  "):
+        async with session_factory() as session:
+            async with session.begin():
+                again = await PurchaseService(session).resolve_or_create_brand(
+                    ctx.user.org_id, variant
+                )
+            assert again.id == first_id, f"{variant!r} created a second brand"
+
+    async with session_factory() as session:
+        rows = (
+            await session.execute(sa.text("SELECT name FROM brands WHERE id = :i"), {"i": first_id})
+        ).scalar_one()
+        assert rows == "TOP"  # stored trimmed, whatever was typed
+
+
 async def test_supplier_and_charges_are_fixable_mid_draft(ctx: RequestContext) -> None:
     """The most prominent name on a bill is often the *buyer's*.
 

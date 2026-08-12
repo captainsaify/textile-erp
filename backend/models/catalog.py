@@ -53,10 +53,16 @@ class ProductCategory(UUIDPkMixin, OrgScopedMixin, Base):
 class Brand(UUIDPkMixin, OrgScopedMixin, Base):
     __tablename__ = "brands"
     __table_args__ = (
+        # On lower(btrim(name)), not the raw name. Two brands displaying
+        # identically is worse than no constraint at all: the catalogue
+        # gained 26 duplicate products, and the "which brand?" question
+        # offered the same answer twice, because a set of names collapses
+        # them. "TOP" and "TOP " slipped past both this index and the
+        # lookup, which compared case but not whitespace.
         Index(
             "brands_org_name_active_uq",
             "org_id",
-            "name",
+            text("lower(btrim(name))"),
             unique=True,
             postgresql_where=text("deleted_at IS NULL"),
         ),
