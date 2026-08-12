@@ -298,9 +298,17 @@ class EditService:
                 f"{opening}\n"
                 "• Price agreed later or billed wrong — *rate <invoice> <new rate>*\n"
                 "• Fewer arrived than billed — *receive <invoice> <CODE> <bales>*\n"
-                f"• Anything else — *undo purchase <ref>*, then enter it again."
+                "• GST or packing left off — *charge <invoice> GST <amount>*\n"
+                "• Anything else — *undo purchase <ref>*, then enter it again."
             )
-        raise RoutedToUndo(f"{opening}\nUse *undo {entity} <ref>* and enter it again.")
+        # Naming `charge` here rather than only in help: this message is
+        # what someone reads at the moment they are trying to do exactly
+        # that, and a command nobody names may as well not exist.
+        raise RoutedToUndo(
+            f"{opening}\n"
+            "• GST or packing left off — *charge <ref> GST <amount>*\n"
+            f"• Anything else — *undo {entity} <ref>*, then enter it again."
+        )
 
     async def edit(
         self,

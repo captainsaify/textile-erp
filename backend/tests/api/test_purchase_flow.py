@@ -699,3 +699,34 @@ async def test_charge_added_to_a_confirmed_bill_lands_in_the_cost(
             )
         ).all()
         assert mismatched == []
+
+
+async def test_charge_is_named_where_someone_would_look_for_it(ctx: RequestContext) -> None:
+    """`edit` on a confirmed bill must mention `charge`.
+
+    That message is what someone reads at the exact moment they are
+    trying to add GST to a bill already saved. This file has recorded
+    the same lesson twice -- `create all products` and the confirm
+    prompt -- so it is worth a test: a command nobody names may as well
+    not exist.
+    """
+    from backend.api.commands.correction_commands import handle_charge, handle_edit
+    from backend.api.commands.wizards import WIZARDS
+
+    await handle_purchase(PURCHASE_TEXT, ctx)
+    await _session_reply("create supplier", ctx)
+    await _session_reply("create product TRP Trouser Poly", ctx)
+    await _session_reply("create product MJP Micro Jogging Pants Fabric", ctx)
+    await _session_reply("CONFIRM", ctx)
+
+    routed = await handle_edit("purchase INV-4521 rate 200", ctx)
+    assert "charge" in routed.reply.lower()
+
+    # And it is a wizard, so `charge` on its own asks rather than
+    # printing usage at someone who does not know the grammar.
+    assert "charge" in WIZARDS
+
+    # The usage text itself names both sides, since a sale is referenced
+    # differently from a bill and guessing costs a round trip.
+    usage = await handle_charge("", ctx)
+    assert "invoice" in usage.reply.lower() and "sale" in usage.reply.lower()

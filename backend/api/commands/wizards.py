@@ -1049,6 +1049,63 @@ def _rate_question(filled: dict[str, str]) -> tuple[str, str]:
     return (f"What's the correct rate per unit for {where}?", "e.g. 145")
 
 
+#: The words a bill actually uses for what it adds on top. Offered as
+#: taps because a free-text label invents a new charge name every time
+#: -- "GST", "gst" and "G.S.T." would be three things on three bills.
+_CHARGE_WORDS = ("GST", "PACKING", "FREIGHT", "LABOUR", "COMMISSION")
+
+
+async def _charge_target_menu(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
+    """Recent bills to charge, purchases and sales together.
+
+    Both are offered from one list because the person adding GST an hour
+    later is not thinking "was this a purchase or a sale", they are
+    thinking of the bill in front of them.
+    """
+    from backend.repositories.purchase_repository import PurchaseRepository
+
+    async with ctx.session_factory() as session:
+        recent = await PurchaseRepository(session).recent_invoices(ctx.user.org_id, limit=5)
+    rows = tuple(
+        Choice(
+            id=f"slot {invoice_no}",
+            title=invoice_no[:24],
+            description=f"{supplier} · {fmt_date(day)}"[:72],
+        )
+        for invoice_no, supplier, day in recent
+    )
+    if not rows:
+        return None
+    return ListMenu(
+        body="Which bill? Or type a sale's reference from its receipt.",
+        menu_label="Pick a bill",
+        sections=(Section(title="Recent bills", rows=rows),),
+    )
+
+
+async def _charge_word_menu(ctx: RequestContext, filled: dict[str, str]) -> Interactive | None:
+    return Buttons(
+        body="What is the charge?",
+        choices=tuple(Choice(id=f"slot {word}", title=word.title()) for word in _CHARGE_WORDS[:3]),
+    )
+
+
+def _assemble_charge(filled: dict[str, str]) -> str:
+    note = filled.get("note", "").strip()
+    tail = f" note: {note}" if note and note.lower() not in {"no", "none", "-", "skip"} else ""
+    return f"{filled['bill']} {filled['label']} {filled['amount']}{tail}"
+
+
+def _prefill_charge(args: str) -> dict[str, str]:
+    """`charge 007 GST 2240` is complete and must not become questions."""
+    tokens = args.split()
+    filled: dict[str, str] = {}
+    for name, index in (("bill", 0), ("label", 1), ("amount", 2)):
+        if len(tokens) > index:
+            filled[name] = tokens[index]
+    return filled
+
+
 def _assemble_rate(filled: dict[str, str]) -> str:
     codes = filled.get("codes", "all")
     tail = "" if codes == "all" else " " + " ".join(_split_list(codes))
@@ -1364,6 +1421,39 @@ WIZARDS: dict[str, CommandWizard] = {
     # with a usage line -- the one place where remembering an invoice
     # number *and* a code was the whole difficulty, and the one place the
     # system already knows both.
+    "charge": CommandWizard(
+        command="charge",
+        slots=(
+            CommandSlot(
+                name="bill",
+                question="Which bill is the charge on?",
+                choices=_charge_target_menu,
+                validate=_nonempty("Bill"),
+                example="e.g. 007, or a sale's reference",
+            ),
+            CommandSlot(
+                name="label",
+                question="What is the charge?",
+                choices=_charge_word_menu,
+                validate=_nonempty("Charge"),
+                example="e.g. GST, packing",
+            ),
+            CommandSlot(
+                name="amount",
+                question="How much?",
+                validate=_amount,
+                example="e.g. 2240",
+            ),
+            CommandSlot(
+                name="note",
+                question="Any note? Say 'no' to skip.",
+                validate=_nonempty("Note"),
+                example="e.g. shared with the Lucknow bill",
+            ),
+        ),
+        assemble=_assemble_charge,
+        prefill=_prefill_charge,
+    ),
     "rate": CommandWizard(
         command="rate",
         slots=(
