@@ -36,6 +36,13 @@ grep -qx postgres <<<"$RUNNING" \
 
 mkdir -p "$STAGE"/{db,volumes,secrets}
 
+# The staging directory holds .env and the TLS private key in the clear
+# before it is sealed. If anything below fails, `set -e` leaves that
+# lying unencrypted in the repo -- so remove it on any exit that did not
+# reach the seal. Only the staging tree is touched; the finished archive
+# is created afterwards and is never in scope here.
+trap 'rm -rf "$STAGE"' EXIT
+
 # --- 1. the database ------------------------------------------------
 # pg_dump, never a copy of pg_data: the volume's on-disk format is tied
 # to the CPU architecture and the exact server build, and this host is
@@ -115,13 +122,39 @@ tar czf "$STAGE/volumes/host-data.tar.gz" \
 # --- 4. secrets and host-specific config ----------------------------
 say "Collecting secrets"
 cp .env "$STAGE/secrets/.env"
+
+# Some of what has to travel is deliberately unreadable to the account
+# running this script. migrate-import.sh chowns credentials.json to uid
+# 65532 -- the distroless cloudflared image's user -- and 0600, because
+# otherwise the tunnel dies on "permission denied". That is correct on
+# the host, and it means the *next* export cannot read the file back.
+# Without this fallback the migration works exactly once, and fails on
+# the second hop having already written every other secret to disk.
+copy_secret_dir() {
+  local src="$1" dst="$2"
+  cp -R "$src" "$dst" 2>/dev/null && return 0
+  if sudo -n cp -R "$src" "$dst" 2>/dev/null; then
+    sudo -n chown -R "$(id -u):$(id -g)" "$dst" 2>/dev/null || true
+    return 0
+  fi
+  return 1
+}
+
 if [ -d docker/cloudflared ]; then
-  # the tunnel's identity: the public hostname follows these files, so
-  # no DNS change is needed -- and two hosts must never run them at once
-  cp -R docker/cloudflared "$STAGE/secrets/cloudflared"
+  # the tunnel's identity. It is not what serves the hostname today
+  # (docs/30 §8) but it is kept as a working fallback, and two hosts
+  # must never run it at once.
+  copy_secret_dir docker/cloudflared "$STAGE/secrets/cloudflared" \
+    || say "  note: docker/cloudflared is unreadable even with sudo -- skipped.
+       The tunnel is not what serves today; if it is ever needed again,
+       re-download credentials.json from the Cloudflare dashboard."
 fi
 if [ -d docker/certs ] && [ -n "$(ls -A docker/certs 2>/dev/null)" ]; then
-  cp -R docker/certs "$STAGE/secrets/certs"
+  # privkey.pem is 0600, and renew-cert.sh chowns it back to the
+  # invoking user -- but a host where that was ever run as someone else
+  # would fail here for the same reason as above.
+  copy_secret_dir docker/certs "$STAGE/secrets/certs" \
+    || die "docker/certs is unreadable -- the new host would serve no TLS."
 fi
 
 # --- 5. the manifest ------------------------------------------------
