@@ -137,6 +137,22 @@ if [ -f "$STAGE/volumes/host-data.tar.gz" ]; then
   tar xzf "$STAGE/volumes/host-data.tar.gz" -C data
 fi
 
+# --- 4b. the schedule that keeps TLS alive --------------------------
+# A crontab is host state, not repository state, so nothing else in
+# this package carries it -- and its absence is silent. The stack
+# terminates TLS itself, the certificate arrives valid, every check
+# passes, and roughly 80 days later the site stops answering because
+# nothing ever ran renew-cert.sh. Installed here, idempotently, for the
+# same reason the letsencrypt volume travels.
+say "Installing the certificate renewal schedule"
+CRON_LINE="17 3,15 * * * cd $(pwd) && ./scripts/renew-cert.sh >> \$HOME/renew-cert.log 2>&1"
+if crontab -l 2>/dev/null | grep -q renew-cert.sh; then
+  say "  already scheduled"
+else
+  { crontab -l 2>/dev/null; echo "$CRON_LINE"; } | crontab -
+  say "  twice daily; Let's Encrypt only acts inside the last 30 days"
+fi
+
 # --- 5. prove it ----------------------------------------------------
 say "Verifying against the source row counts"
 docker compose exec -T postgres sh -lc \
