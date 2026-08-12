@@ -41,6 +41,10 @@ if [ -d "$STAGE/secrets/cloudflared" ]; then
   # That silently produced docker/cloudflared/cloudflared/config.yml and
   # a tunnel that restart-looped on "no such file or directory".
   mkdir -p docker/cloudflared
+  # A previous run of this script left credentials.json owned by uid
+  # 65532 and unwritable by us, so the copy below fails outright on a
+  # second import of the same host. Take ownership back first.
+  sudo -n chown -R "$(id -u):$(id -g)" docker/cloudflared 2>/dev/null || true
   cp -R "$STAGE/secrets/cloudflared/." docker/cloudflared/
   # A macOS-built archive carries AppleDouble siblings (._config.yml).
   # Noise on Linux, and enough to keep a stray directory un-rmdir-able.
@@ -49,9 +53,15 @@ if [ -d "$STAGE/secrets/cloudflared" ]; then
   # invoking user is unreadable to it. On a laptop the VM's uid
   # remapping hides this; on a real Linux host the tunnel dies with
   # "couldn't read tunnel credentials: permission denied".
+  #
+  # Set the mode *before* handing the file over. The other order cannot
+  # work: the chown succeeds via sudo, and the chmod then runs as a user
+  # who no longer owns the file, fails EPERM, and takes the whole import
+  # down under `set -e` -- after .env has already been installed.
+  chmod 600 docker/cloudflared/credentials.json 2>/dev/null || true
   if chown 65532:65532 docker/cloudflared/credentials.json 2>/dev/null ||
     sudo -n chown 65532:65532 docker/cloudflared/credentials.json 2>/dev/null; then
-    chmod 600 docker/cloudflared/credentials.json
+    :
   else
     chmod 644 docker/cloudflared/credentials.json
     say "  note: could not chown credentials.json to uid 65532 -- left world-readable so the tunnel can start"
