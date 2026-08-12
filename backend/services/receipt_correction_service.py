@@ -485,3 +485,304 @@ class RateChangeService:
             now_overpaid=header.amount_paid > header.grand_total,
             partly_sold=partly_sold,
         )
+
+
+@dataclasses.dataclass(frozen=True)
+class ChargeAdded:
+    kind: str  # 'purchase' | 'sale'
+    reference: str
+    party: str
+    label: str
+    amount: decimal.Decimal
+    other_charges: decimal.Decimal
+    old_total: decimal.Decimal
+    new_total: decimal.Decimal
+    outstanding_after: decimal.Decimal
+    partly_sold: list[str]
+
+
+class ChargeService:
+    """Put a charge on a bill that is already confirmed.
+
+    Charges can be typed while a draft is open, and a draft closes the
+    moment it is confirmed -- which for sales is immediately, since they
+    auto-confirm when nothing looks wrong. So the words worked exactly
+    when a sale was *problematic* and were unreachable when it was
+    clean. GST that arrives with the paperwork an hour later had nowhere
+    to go, and was being recorded as a separate operating expense: money
+    the customer owes, filed on the side of the books where money leaves.
+
+    A purchase charge is not the mirror of a sale charge:
+
+    * On a purchase it is part of what the goods cost, so it is spread
+      across the lines by value and the stock still on hand is restated.
+      Goods already sold are left alone -- their cost went into COGS
+      when they went out, and reaching back through every later sale
+      would rewrite profit the partners have already seen.
+    * On a sale it is not revenue. It credits OTHER_INCOME, so the
+      revenue line and the gross margin stay about the goods.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._inventory = InventoryService(session)
+        self._journal = JournalService(session)
+        self._audit = AuditService(session)
+
+    async def add(
+        self,
+        actor: User,
+        *,
+        reference: str,
+        label: str,
+        amount: decimal.Decimal,
+        note: str | None = None,
+        whatsapp_message_id: str | None = None,
+    ) -> ChargeAdded:
+        if amount <= ZERO:
+            raise ValidationError("A charge has to be more than zero.")
+        label = " ".join(label.split()).upper()
+
+        # One transaction around the lookup *and* the work. Opening it
+        # after the lookup raises "a transaction is already begun" -- the
+        # select autobegins one (HANDOFF.md §5) -- and opening none at
+        # all silently discards the change on session close.
+        async with self._session.begin():
+            header = await self._find_purchase(actor.org_id, reference)
+            if header is not None:
+                return await self._on_purchase(
+                    actor, header, label, amount, note, whatsapp_message_id
+                )
+            sale = await self._find_sale(actor.org_id, reference)
+            if sale is not None:
+                return await self._on_sale(actor, sale, label, amount, note, whatsapp_message_id)
+            raise NotFoundError("bill", reference)
+
+    async def _find_purchase(self, org_id: uuid.UUID, reference: str) -> PurchaseHeader | None:
+        return (
+            (
+                await self._session.execute(
+                    select(PurchaseHeader).where(
+                        PurchaseHeader.org_id == org_id,
+                        func.lower(PurchaseHeader.invoice_no) == reference.lower(),
+                        PurchaseHeader.status == "confirmed",
+                        PurchaseHeader.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+    async def _find_sale(self, org_id: uuid.UUID, reference: str) -> object | None:
+        from sqlalchemy import String, cast
+
+        from backend.models import SalesHeader
+
+        return (
+            (
+                await self._session.execute(
+                    select(SalesHeader).where(
+                        SalesHeader.org_id == org_id,
+                        SalesHeader.status == "confirmed",
+                        SalesHeader.deleted_at.is_(None),
+                        cast(SalesHeader.id, String).like(f"{reference.lower()}%"),
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+    async def _on_sale(
+        self,
+        actor: User,
+        sale: object,
+        label: str,
+        amount: decimal.Decimal,
+        note: str | None,
+        whatsapp_message_id: str | None,
+    ) -> ChargeAdded:
+        from backend.models import Customer
+
+        org_id = actor.org_id
+        if True:  # noqa: SIM108 - keeps the body's indentation stable
+            customer = await self._session.get(Customer, sale.customer_id)  # type: ignore[attr-defined]
+            party = customer.name if customer is not None else ""
+            old_total = sale.grand_total  # type: ignore[attr-defined]
+            sale.other_charges = (sale.other_charges + amount).quantize(TWO)  # type: ignore[attr-defined]
+            sale.grand_total = (  # type: ignore[attr-defined]
+                sale.subtotal + sale.freight + sale.other_charges  # type: ignore[attr-defined]
+            ).quantize(TWO)
+            if note:
+                sale.notes = note  # type: ignore[attr-defined]
+            # Paid in full before the charge, and now short of it.
+            if sale.amount_paid < sale.grand_total:  # type: ignore[attr-defined]
+                sale.payment_status = (  # type: ignore[attr-defined]
+                    "partial" if sale.amount_paid > ZERO else "unpaid"  # type: ignore[attr-defined]
+                )
+
+            # Not revenue: the goods are what was sold. Folding a tax
+            # into revenue inflates the gross margin with money never
+            # earned on them.
+            await self._journal.post(
+                org_id,
+                entry_date=sale.sale_date,  # type: ignore[attr-defined]
+                description=f"{label} added to sale for {party}",
+                source_type="sales_header_charge",
+                source_id=sale.id,  # type: ignore[attr-defined]
+                created_by=actor.id,
+                debits=[(AccountCode.ACCOUNTS_RECEIVABLE, amount)],
+                credits=[(AccountCode.OTHER_INCOME, amount)],
+            )
+            await self._audit.record(
+                org_id,
+                actor.id,
+                action="sale.charge_added",
+                entity_type="sales_headers",
+                entity_id=sale.id,  # type: ignore[attr-defined]
+                whatsapp_message_id=whatsapp_message_id,
+                before_state={"grand_total": str(old_total)},
+                after_state={
+                    "label": label,
+                    "amount": str(amount),
+                    "grand_total": str(sale.grand_total),  # type: ignore[attr-defined]
+                    **({"note": note} if note else {}),
+                },
+            )
+            return ChargeAdded(
+                kind="sale",
+                reference=str(sale.id)[:8],  # type: ignore[attr-defined]
+                party=party,
+                label=label,
+                amount=amount,
+                other_charges=sale.other_charges,  # type: ignore[attr-defined]
+                old_total=old_total,
+                new_total=sale.grand_total,  # type: ignore[attr-defined]
+                outstanding_after=(
+                    sale.grand_total - sale.amount_paid  # type: ignore[attr-defined]
+                ).quantize(TWO),
+                partly_sold=[],
+            )
+
+    async def _on_purchase(
+        self,
+        actor: User,
+        header: PurchaseHeader,
+        label: str,
+        amount: decimal.Decimal,
+        note: str | None,
+        whatsapp_message_id: str | None,
+    ) -> ChargeAdded:
+        from backend.models import Inventory
+
+        org_id = actor.org_id
+        if True:  # noqa: SIM108 - keeps the body's indentation stable
+            supplier = await self._session.get(Supplier, header.supplier_id)
+            lines = list(
+                (
+                    await self._session.execute(
+                        select(PurchaseLine)
+                        .where(PurchaseLine.purchase_header_id == header.id)
+                        .order_by(PurchaseLine.line_no)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not lines:
+                raise ValidationError(f"Invoice {header.invoice_no} has no lines to charge.")
+
+            old_total = header.grand_total
+            old_landed = {line.id: (line.landed_cost_per_unit or ZERO) for line in lines}
+            header.other_charges = (header.other_charges + amount).quantize(TWO)
+
+            # Spread by line value, the same basis a bill uses when it is
+            # first confirmed -- so a charge added later lands where it
+            # would have landed had it been typed at the time.
+            freight_shares = allocate(header.freight, [row.qty for row in lines])
+            other_shares = allocate(header.other_charges, [row.line_total for row in lines])
+            for index, row in enumerate(lines):
+                row.freight_allocated = freight_shares[index]
+                row.landed_cost_per_unit = (
+                    (row.line_total + freight_shares[index] + other_shares[index]) / row.qty
+                ).quantize(FOUR)
+
+            header.grand_total = (header.subtotal + header.freight + header.other_charges).quantize(
+                TWO
+            )
+            if header.amount_paid < header.grand_total:
+                header.payment_status = "partial" if header.amount_paid > ZERO else "unpaid"
+            if note:
+                header.notes = note
+
+            partly_sold: list[str] = []
+            for line in lines:
+                delta = (line.landed_cost_per_unit or ZERO) - old_landed[line.id]
+                if delta == ZERO:
+                    continue
+                product = await self._session.get(Product, line.product_id)
+                stock = (
+                    await self._session.execute(
+                        select(Inventory).where(
+                            Inventory.org_id == org_id,
+                            Inventory.product_id == line.product_id,
+                            Inventory.warehouse_id == header.warehouse_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                on_hand = stock.qty_on_hand if stock is not None else ZERO
+                if on_hand < line.qty and product is not None:
+                    # Its cost went into COGS when it went out. Restating
+                    # that means rewriting profit already reported.
+                    partly_sold.append(product.code)
+                if on_hand <= ZERO:
+                    continue
+                await self._inventory.restate_cost(
+                    org_id,
+                    product_id=line.product_id,
+                    warehouse_id=header.warehouse_id,
+                    value_delta=(delta * min(on_hand, line.qty)).quantize(TWO),
+                    source_id=line.id,
+                    created_by=actor.id,
+                    reason=f"{label} added to {header.invoice_no}",
+                )
+
+            # The goods cost more and the supplier is owed more.
+            await self._journal.post(
+                org_id,
+                entry_date=header.invoice_date,
+                description=f"{label} added to {header.invoice_no}",
+                source_type="purchase_header",
+                source_id=header.id,
+                created_by=actor.id,
+                debits=[(AccountCode.INVENTORY, amount)],
+                credits=[(AccountCode.ACCOUNTS_PAYABLE, amount)],
+            )
+            await self._audit.record(
+                org_id,
+                actor.id,
+                action="purchase.charge_added",
+                entity_type="purchase_headers",
+                entity_id=header.id,
+                whatsapp_message_id=whatsapp_message_id,
+                before_state={"grand_total": str(old_total)},
+                after_state={
+                    "label": label,
+                    "amount": str(amount),
+                    "grand_total": str(header.grand_total),
+                    **({"note": note} if note else {}),
+                },
+            )
+            return ChargeAdded(
+                kind="purchase",
+                reference=header.invoice_no,
+                party=supplier.name if supplier else "",
+                label=label,
+                amount=amount,
+                other_charges=header.other_charges,
+                old_total=old_total,
+                new_total=header.grand_total,
+                outstanding_after=(header.grand_total - header.amount_paid).quantize(TWO),
+                partly_sold=partly_sold,
+            )

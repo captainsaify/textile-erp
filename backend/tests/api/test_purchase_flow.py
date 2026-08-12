@@ -631,3 +631,71 @@ def test_a_preview_asks_for_exactly_one_thing() -> None:
     assert "Reply CONFIRM to save" in result.reply
     assert isinstance(result.interactive, Buttons)
     assert result.interactive.choices[0].id == "confirm"
+
+
+async def test_charge_added_to_a_confirmed_bill_lands_in_the_cost(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """GST on a supplier's bill is part of what the goods cost.
+
+    Iqbal Bhai's 1051 carried BPK 2,100 and GST 2,240 at the foot, which
+    the intake never read. With no way to add them afterwards they were
+    entered as standalone operating expenses -- so the month looked
+    worse while the stock looked cheaper than it was, and the margin on
+    those goods was wrong in both directions at once.
+    """
+    from backend.api.commands.correction_commands import handle_charge
+
+    await handle_purchase(PURCHASE_TEXT, ctx)
+    await _session_reply("create supplier", ctx)
+    await _session_reply("create product TRP Trouser Poly", ctx)
+    await _session_reply("create product MJP Micro Jogging Pants Fabric", ctx)
+    await _session_reply("CONFIRM", ctx)
+
+    async with session_factory() as session:
+        before = (
+            await session.execute(
+                sa.text(
+                    "SELECT weighted_avg_cost FROM inventory i JOIN products p "
+                    "ON p.id = i.product_id WHERE p.code = 'TRP'"
+                )
+            )
+        ).scalar_one()
+
+    result = await handle_charge("INV-4521 GST 2240", ctx)
+    assert "GST ₹2,240.00 added to bill INV-4521" in result.reply
+    assert "₹24,000.00 → ₹26,240.00" in result.reply
+    assert "Now payable: ₹26,240.00" in result.reply
+
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                sa.text("SELECT other_charges, grand_total FROM purchase_headers")
+            )
+        ).one()
+        assert (row.other_charges, row.grand_total) == (D("2340.00"), D("26240.00"))
+
+        after = (
+            await session.execute(
+                sa.text(
+                    "SELECT weighted_avg_cost FROM inventory i JOIN products p "
+                    "ON p.id = i.product_id WHERE p.code = 'TRP'"
+                )
+            )
+        ).scalar_one()
+        # The stock on hand now carries its share of the charge.
+        assert after > before
+
+        # Stock quantity is untouched: the restatement moves value only,
+        # so the nightly reconciliation still holds.
+        mismatched = (
+            await session.execute(
+                sa.text(
+                    "SELECT p.code FROM products p JOIN inventory i ON i.product_id = p.id "
+                    "LEFT JOIN inventory_movements m ON m.product_id = p.id "
+                    "GROUP BY p.id, p.code, i.qty_on_hand "
+                    "HAVING i.qty_on_hand <> coalesce(sum(m.qty_delta), 0)"
+                )
+            )
+        ).all()
+        assert mismatched == []

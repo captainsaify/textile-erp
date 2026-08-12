@@ -512,3 +512,66 @@ def test_a_customer_named_with_on_keeps_it() -> None:
 
     assert draft.customer_name == "Hands on Traders"
     assert draft.on is None
+
+
+async def test_charge_can_be_added_after_a_sale_is_confirmed(
+    ctx: RequestContext,
+    stocked: dict[str, uuid.UUID],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """GST that turns up an hour after the goods did.
+
+    Charges could only be typed while a draft was open, and a sale's
+    draft closes the instant it confirms -- which is immediately unless
+    something looks wrong. So the words were reachable exactly when a
+    sale was *problematic* and unreachable when it was clean, and a
+    charge arriving later was being booked as an operating expense:
+    money the customer owes, filed where money leaves.
+    """
+    from backend.api.commands.correction_commands import handle_charge
+
+    await handle_sale("Customer: ABC\nTRP 20 165", ctx)
+    await _reply("confirm", ctx)
+
+    async with session_factory() as session:
+        sale_id = (
+            await session.execute(sa.text("SELECT id FROM sales_headers LIMIT 1"))
+        ).scalar_one()
+
+    result = await handle_charge(
+        f"{str(sale_id)[:8]} GST 594 note: shared with the Lucknow bill", ctx
+    )
+    assert "GST ₹594.00 added to sale" in result.reply
+    assert "₹3,300.00 → ₹3,894.00" in result.reply
+    assert "Now owes: ₹3,894.00" in result.reply
+
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                sa.text(
+                    "SELECT subtotal, other_charges, grand_total, payment_status, notes "
+                    "FROM sales_headers"
+                )
+            )
+        ).one()
+        assert (row.subtotal, row.other_charges, row.grand_total) == (
+            D("3300.00"),
+            D("594.00"),
+            D("3894.00"),
+        )
+        assert row.notes == "shared with the Lucknow bill"
+        # Not revenue: the goods are what was sold.
+        rows = (
+            await session.execute(
+                sa.text(
+                    "SELECT account_code, sum(credit) AS total FROM journal_lines "
+                    "WHERE credit > 0 GROUP BY account_code"
+                )
+            )
+        ).all()
+        credits: dict[str, decimal.Decimal] = {row.account_code: row.total for row in rows}
+        assert credits["sales_revenue"] == D("3300.00")
+        assert credits["other_income"] == D("594.00")
+
+    # Unknown bill says so rather than failing quietly.
+    assert "bill" in (await handle_charge("nosuchbill GST 100", ctx)).reply.lower()

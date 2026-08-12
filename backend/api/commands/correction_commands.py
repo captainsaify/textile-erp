@@ -9,9 +9,14 @@ history routes to `undo`, which reverses by compensating entry.
 
 from __future__ import annotations
 
+import decimal
+import re
+
 from backend.api.command_types import CommandResult, RequestContext
+from backend.api.formatting import fmt_money
 from backend.core.exceptions import DomainError, ValidationError
 from backend.services.edit_service import EDITABLE, EditService, RoutedToUndo
+from backend.services.receipt_correction_service import ChargeService
 from backend.services.undo_service import UndoResult, UndoService
 
 EDIT_USAGE = "Usage: edit <product|supplier|customer|brand> <ref> <field> <value>"
@@ -168,3 +173,58 @@ async def run_undo(entity: str | None, reference: str | None, ctx: RequestContex
     except DomainError as exc:
         return CommandResult(reply=exc.message)
     return CommandResult(reply=render_undo(result))
+
+
+CHARGE_USAGE = (
+    "Usage: *charge <bill> <what> <amount>*\n"
+    "e.g. *charge 007 GST 2240* — a supplier's bill by its invoice number\n"
+    "e.g. *charge 8125c274 packing 1137* — a sale by the reference on its receipt\n"
+    "Add *note: ...* at the end to say why."
+)
+
+_CHARGE = re.compile(
+    r"^(?P<ref>\S+)\s+(?P<label>[A-Za-z][\w.+&/-]*)\s+(?P<amount>[\d,]+(?:\.\d+)?)"
+    r"(?:\s+note:\s*(?P<note>.+))?$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+async def handle_charge(args: str, ctx: RequestContext) -> CommandResult:
+    """Put a charge on a bill that is already confirmed.
+
+    The charge words work while a draft is open, and a sale's draft
+    closes the instant it is confirmed -- which is immediately, unless
+    something looked wrong. So they were reachable exactly when a sale
+    was problematic and unreachable when it was clean, and GST arriving
+    with the paperwork an hour later had nowhere to go.
+    """
+    match = _CHARGE.match(args.strip())
+    if match is None:
+        return CommandResult(reply=CHARGE_USAGE)
+    amount = decimal.Decimal(match["amount"].replace(",", ""))
+    try:
+        async with ctx.session_factory() as session:
+            result = await ChargeService(session).add(
+                ctx.user,
+                reference=match["ref"],
+                label=match["label"],
+                amount=amount,
+                note=(match["note"] or "").strip() or None,
+                whatsapp_message_id=ctx.message_id,
+            )
+    except DomainError as exc:
+        return CommandResult(reply=exc.message)
+
+    owed = "owes" if result.kind == "sale" else "payable"
+    lines = [
+        f"✏️ {result.label} {fmt_money(result.amount)} added to "
+        f"{'sale' if result.kind == 'sale' else 'bill'} {result.reference} — {result.party}",
+        f"Total: {fmt_money(result.old_total)} → {fmt_money(result.new_total)}",
+        f"Now {owed}: {fmt_money(result.outstanding_after)}",
+    ]
+    if result.partly_sold:
+        # Named rather than silently skipped: their cost went into COGS
+        # when they were sold, and restating that would rewrite profit
+        # the partners have already been shown.
+        lines.append("⚠️ Already sold, so their cost is unchanged: " + ", ".join(result.partly_sold))
+    return CommandResult(reply="\n".join(lines))
