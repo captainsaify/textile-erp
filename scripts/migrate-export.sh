@@ -130,13 +130,25 @@ cp .env "$STAGE/secrets/.env"
 # the host, and it means the *next* export cannot read the file back.
 # Without this fallback the migration works exactly once, and fails on
 # the second hop having already written every other secret to disk.
+# The retry below is why this copies *contents* into a directory it
+# makes itself, rather than `cp -R src dst`. The first attempt fails
+# partway -- it reads config.yml fine and only then hits the unreadable
+# credentials.json -- so by the time sudo retries, dst exists, and
+# `cp -R src dst` onto an existing dst nests: secrets/cloudflared/
+# cloudflared/credentials.json. That is the same nesting that once left
+# the tunnel restart-looping on "no such file or directory"; it is
+# written down in migrate-import.sh and was reintroduced here anyway.
 copy_secret_dir() {
   local src="$1" dst="$2"
-  cp -R "$src" "$dst" 2>/dev/null && return 0
-  if sudo -n cp -R "$src" "$dst" 2>/dev/null; then
+  [ -n "$dst" ] || return 1          # rm -rf "" below, if this ever slips
+  rm -rf "$dst" && mkdir -p "$dst"
+  cp -R "$src/." "$dst/" 2>/dev/null && return 0
+  rm -rf "$dst" && mkdir -p "$dst"
+  if sudo -n cp -R "$src/." "$dst/" 2>/dev/null; then
     sudo -n chown -R "$(id -u):$(id -g)" "$dst" 2>/dev/null || true
     return 0
   fi
+  rm -rf "$dst"
   return 1
 }
 
@@ -156,6 +168,11 @@ if [ -d docker/certs ] && [ -n "$(ls -A docker/certs 2>/dev/null)" ]; then
   copy_secret_dir docker/certs "$STAGE/secrets/certs" \
     || die "docker/certs is unreadable -- the new host would serve no TLS."
 fi
+
+# AppleDouble siblings (._config.yml, ._privkey.pem) from the archive
+# that first put these files on a Linux host. The import deletes them,
+# but dropping them here stops them being copied forward on every hop.
+find "$STAGE/secrets" -name '._*' -delete 2>/dev/null || true
 
 # --- 5. the manifest ------------------------------------------------
 say "Writing the manifest"
