@@ -223,6 +223,68 @@ async def test_cash_sale_posts_ledger_inflow(
         assert status == "paid"
 
 
+async def test_sale_charges_bill_the_customer_without_inflating_revenue(
+    ctx: RequestContext,
+    stocked: dict[str, uuid.UUID],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """GST and packing belong on the bill, not in revenue.
+
+    Sales had no charge columns at all, so anything recovered from a
+    customer on top of the goods was being written down as a separate
+    operating *expense* -- money coming in, recorded on the side of the
+    books where money goes out.
+
+    They are credited to OTHER_INCOME rather than SALES_REVENUE. Folding
+    a tax into revenue would inflate the revenue line and the gross
+    margin with money never earned on the goods, and gross margin is the
+    figure these partners actually steer by.
+    """
+    await handle_sale("Customer: ABC\nTRP 20 165", ctx)
+
+    result = await _reply("GST 594", ctx)
+    assert "Goods: ₹3,300.00" in result.reply
+    assert "Total: ₹3,894.00" in result.reply
+
+    # A second charge joins it, itemised; re-sending one re-states it.
+    result = await _reply("packing 100", ctx)
+    assert "Other charges: ₹694.00  (GST ₹594.00 + PACKING ₹100.00)" in result.reply
+    result = await _reply("GST 500", ctx)
+    assert "Other charges: ₹600.00" in result.reply
+    assert "Total: ₹3,900.00" in result.reply
+
+    # An item line is not a charge, or the bill grows silently.
+    result = await _reply("TRP 800", ctx)
+    assert "Total: ₹3,900.00" not in result.reply or "Sale draft" not in result.reply
+
+    result = await _reply("confirm", ctx)
+    assert "✅ Sale recorded" in result.reply
+
+    async with session_factory() as session:
+        header = (
+            await session.execute(
+                sa.text("SELECT subtotal, other_charges, grand_total FROM sales_headers")
+            )
+        ).one()
+        assert (header.subtotal, header.other_charges, header.grand_total) == (
+            D("3300.00"),
+            D("600.00"),
+            D("3900.00"),
+        )
+        # Revenue is the goods alone; the charges sit in other_income.
+        posted = (
+            await session.execute(
+                sa.text(
+                    "SELECT account_code, sum(credit) AS credit FROM journal_lines "
+                    "WHERE credit > 0 GROUP BY account_code ORDER BY account_code"
+                )
+            )
+        ).all()
+        by_code = {row.account_code: row.credit for row in posted}
+        assert by_code["sales_revenue"] == D("3300.00")
+        assert by_code["other_income"] == D("600.00")
+
+
 async def test_below_cost_warning_blocks_staff_and_owner_confirms(
     ctx: RequestContext, owner_ctx: RequestContext, stocked: dict[str, uuid.UUID]
 ) -> None:

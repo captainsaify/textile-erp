@@ -70,6 +70,17 @@ class SalesHeader(UUIDPkMixin, OrgScopedMixin, Base):
     subtotal: Mapped[decimal.Decimal] = mapped_column(
         MONEY, nullable=False, server_default=text("0")
     )
+    #: Charges recovered from the customer on top of the goods -- GST,
+    #: packing, delivery. They are *not* revenue: revenue is what the
+    #: goods sold for, and folding a tax into it overstates both the
+    #: revenue line and the gross margin. They post to OTHER_INCOME, so
+    #: gross profit stays honest while net profit still counts them.
+    freight: Mapped[decimal.Decimal] = mapped_column(
+        MONEY, nullable=False, server_default=text("0")
+    )
+    other_charges: Mapped[decimal.Decimal] = mapped_column(
+        MONEY, nullable=False, server_default=text("0")
+    )
     grand_total: Mapped[decimal.Decimal] = mapped_column(
         MONEY, nullable=False, server_default=text("0")
     )

@@ -14,6 +14,7 @@ import decimal
 import re
 
 from backend.api.command_types import CommandResult, RequestContext
+from backend.api.commands.charges import apply_charge, describe, parse_charge
 from backend.api.commands.documents import attach_document
 from backend.api.formatting import fmt_money, fmt_qty
 from backend.api.interactive import (
@@ -180,8 +181,22 @@ def _sale_preview(draft: SaleDraft) -> CommandResult:
             f"{line.resolved_code or line.code}  {fmt_qty(line.qty)} {unit} × "
             f"{fmt_money(line.rate)} = {fmt_money(line.line_total)}".replace("  ", " ")
         )
+    if draft.freight or draft.other_charges:
+        lines.append(f"Goods: {fmt_money(draft.subtotal)}")
+        if draft.freight:
+            lines.append(f"Delivery: {fmt_money(draft.freight)}")
+        if draft.other_charges:
+            parts = describe(draft)
+            lines.append(
+                f"Other charges: {fmt_money(draft.other_charges)}"
+                + (f"  ({parts})" if parts else "")
+            )
     lines.append(f"Total: {fmt_money(draft.grand_total)}")
-    lines.append("Reply CONFIRM to save, 'sheet' to see it as a spreadsheet, or 'discard'.")
+    lines.append(
+        "Reply CONFIRM to save, or add what the bill charges on top:\n"
+        "• *GST 2240*, *packing 500*, *freight 300*\n"
+        "Also 'sheet' to see it as a spreadsheet, or 'discard'."
+    )
     return CommandResult(
         reply="\n".join(lines),
         interactive=Buttons(
@@ -445,6 +460,17 @@ async def handle_sale_session_reply(
             ctx.user.org_id, ctx.user.id, AWAITING_SALE_CONFIRMATION, draft.to_context()
         )
         return await _continue_after_resolution(draft, ctx)
+
+    # Checked before `create customer` and the confirm vocabulary, but
+    # after the brand question, which owns its own reply: a brand called
+    # "TAX" would otherwise be read as a charge.
+    charge = parse_charge(text)
+    if charge is not None and draft.needs_brand is None:
+        apply_charge(draft, charge)
+        await sessions.set(
+            ctx.user.org_id, ctx.user.id, AWAITING_SALE_CONFIRMATION, draft.to_context()
+        )
+        return _sale_preview(draft)
 
     if lowered == "create customer":
         if draft.customer_id is not None:

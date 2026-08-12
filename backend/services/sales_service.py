@@ -105,14 +105,34 @@ class SaleDraft:
     idempotency_key: str | None = None
     allow_negative_stock: bool = False
     warnings_acknowledged: bool = False
+    #: Recovered from the customer on top of the goods. Kept apart from
+    #: the line totals because they are not revenue -- see SalesHeader.
+    freight: decimal.Decimal = ZERO
+    other_charges: decimal.Decimal = ZERO
+    #: Itemised under the name the bill uses, {"GST": 2240}. The books
+    #: only need the total in `other_charges`; this exists so each one
+    #: can be entered and corrected on its own rather than the sender
+    #: adding them up and then having to subtract to fix one.
+    charges: dict[str, decimal.Decimal] = dataclasses.field(default_factory=dict)
     #: The day the goods went out, when it isn't today. Raw text, like
     #: every other money command's `on`: only the org's business date
     #: can resolve "today", and that is read inside the transaction.
     on: str | None = None
 
     @property
-    def grand_total(self) -> decimal.Decimal:
+    def subtotal(self) -> decimal.Decimal:
+        """What the goods came to. This is the revenue figure."""
         return sum((line.line_total for line in self.lines), ZERO)
+
+    @property
+    def grand_total(self) -> decimal.Decimal:
+        """What the customer owes. Goods plus anything recovered on top.
+
+        Everything that asks "how much is this sale" -- the receivable,
+        the payment, the credit-limit check, duplicate detection -- wants
+        this, not the subtotal, so the name stays on the larger figure.
+        """
+        return self.subtotal + self.freight + self.other_charges
 
     @property
     def total_cogs(self) -> decimal.Decimal:
@@ -141,6 +161,9 @@ class SaleDraft:
             "allow_negative_stock": self.allow_negative_stock,
             "warnings_acknowledged": self.warnings_acknowledged,
             "on": self.on,
+            "freight": str(self.freight),
+            "other_charges": str(self.other_charges),
+            "charges": {label: str(amount) for label, amount in self.charges.items()},
             "lines": [
                 {
                     "code": line.code,
@@ -168,6 +191,12 @@ class SaleDraft:
             allow_negative_stock=context.get("allow_negative_stock", False),
             warnings_acknowledged=context.get("warnings_acknowledged", False),
             on=context.get("on") or None,
+            freight=decimal.Decimal(context.get("freight") or "0"),
+            other_charges=decimal.Decimal(context.get("other_charges") or "0"),
+            charges={
+                label: decimal.Decimal(amount)
+                for label, amount in (context.get("charges") or {}).items()
+            },
             lines=[
                 SaleDraftLine(
                     code=line["code"],
@@ -432,7 +461,9 @@ class SalesService:
                 warehouse_id=warehouse.id,
                 sale_date=today,
                 payment_type=draft.payment_type,
-                subtotal=draft.grand_total,
+                subtotal=draft.subtotal,
+                freight=draft.freight,
+                other_charges=draft.other_charges,
                 grand_total=draft.grand_total,
                 amount_paid=draft.grand_total if paid_immediately else ZERO,
                 payment_status="paid" if paid_immediately else "unpaid",
@@ -509,8 +540,17 @@ class SalesService:
 
             # revenue + COGS in one balanced entry -- docs/06_Accounting.md §3
             cogs = draft.total_cogs
+            # The customer owes the whole bill, so the debit is the grand
+            # total. The credit splits: only the goods are revenue.
+            # Crediting GST and packing to SALES_REVENUE would inflate
+            # both the revenue line and the gross margin with money that
+            # was never earned on the goods -- and gross margin is the
+            # number these two partners actually steer by.
+            charges = draft.freight + draft.other_charges
             debits = [(money_account, draft.grand_total)]
-            credits = [(AccountCode.SALES_REVENUE, draft.grand_total)]
+            credits = [(AccountCode.SALES_REVENUE, draft.subtotal)]
+            if charges > ZERO:
+                credits.append((AccountCode.OTHER_INCOME, charges))
             if cogs > ZERO:
                 debits.append((AccountCode.COGS, cogs))
                 credits.append((AccountCode.INVENTORY, cogs))
