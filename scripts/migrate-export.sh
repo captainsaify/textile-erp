@@ -88,7 +88,15 @@ compose exec -T redis sh -lc \
   || say "  (SAVE refused; the append-only log is still captured)"
 
 # --- 3. the volumes that hold real files ----------------------------
-for volume in attachments reports backups redis_data; do
+# `letsencrypt` is in this list for a failure that would not show up
+# until months after a "successful" migration. secrets/certs carries
+# the certificate itself, so the new host serves TLS immediately and
+# every check passes -- but the ACME account key and the renewal config
+# live in this volume, and without them `certbot renew` has nothing to
+# renew. renew-cert.sh then fails at the copy step, twice a day, into a
+# log nobody reads, until the certificate simply expires and the site
+# stops answering. Carrying the volume keeps renewal a no-op.
+for volume in attachments reports backups redis_data letsencrypt; do
   say "Archiving volume: ${volume}"
   docker run --rm \
     -v "textile-erp_${volume}:/from:ro" \
@@ -144,6 +152,10 @@ INCLUDED
                          which set of books a phone writes to. Also the
                          webhook dedup keys, so a redelivery after the
                          move is not processed a second time.
+  volumes/letsencrypt    the ACME account key and renewal config. The
+                         certificate itself is in secrets/certs and is
+                         what nginx serves; this is what lets it be
+                         renewed rather than expiring in ~90 days.
   volumes/host-data      data/ on the old host: the manual pg_dumps
                          taken before each destructive change, which
                          are the only copies of the books as they stood

@@ -8,17 +8,26 @@ VPS will not get from `docker compose up`.
 
 Two facts make the cutover far less frightening than it sounds:
 
-- **The public hostname follows the tunnel credentials, not the host.**
-  `erp.captainsresearch.co.in` is served through a *named* Cloudflare
-  Tunnel ([16 §11](16_Deployment.md#tunnel)). Move
-  `docker/cloudflared/credentials.json` and the same hostname answers
-  from the VPS. **No DNS change, no propagation wait.**
+- **The public hostname follows the Elastic IP, not the host.**
+  `erp.captainsresearch.co.in` is an A record pointing at an Elastic
+  IP, and the stack serves 443 directly ([16 §11](16_Deployment.md#tunnel)).
+  Re-associate that address with the new instance and the same hostname
+  answers from it. **No DNS change, no propagation wait.**
+
+  > This used to be true for a different reason. The site was fronted
+  > by a *named* Cloudflare Tunnel, and the hostname followed
+  > `credentials.json` rather than any IP. That was dropped because
+  > Cloudflare's free plan routes Indian traffic via Singapore, which
+  > cost ~350 ms on every request. The export still carries the tunnel
+  > credentials, so the old arrangement remains available as a
+  > fallback — but it is not what serves today.
+
 - **Meta needs no reconfiguration.** The webhook URL is that hostname,
   so the app secret, verify token, phone number id and the recipient
   allowed list all stay exactly as they are.
 
 The whole migration is therefore: copy the data, copy the secrets, stop
-one tunnel, start the other.
+the old stack, move one IP address.
 
 ## 2. What moves, and what deliberately does not {#inventory}
 
@@ -33,11 +42,20 @@ one tunnel, start the other.
 | `.env` | 2 KB | in the package |
 | Tunnel credentials | 200 B | in the package |
 | TLS certs | — | in the package |
+| Let's Encrypt state | ~200 KB | volume tar — **or TLS cannot renew** |
 | Code | — | `git clone` |
 
 **Total: ~15 MB.** The demo business is not a separate anything — it is
 rows in the same database under `org_id 0000…0dbeef`, so the one dump
 carries both sets of books, both sets of partners and both watermarks.
+
+**The Let's Encrypt volume is copied**, and it is the one item here
+whose absence is invisible. `secrets/certs` carries the certificate
+nginx actually serves, so a host without this volume passes every check
+on cutover day and serves TLS perfectly — while `certbot renew` has no
+account key and no renewal config, fails silently twice a day into a
+log nobody reads, and the site stops answering the day the certificate
+expires. `migrate-verify.sh` checks for it by name for that reason.
 
 **Redis is copied**, though it looks like a cache. `wa:demo:<number>`
 is what decides which set of books a phone writes to, and both partners'
@@ -49,10 +67,12 @@ message Meta redelivers across the cutover is not processed twice.
 **Not moved, on purpose:**
 
 - **`pg_data` as a raw volume.** Its on-disk format is tied to the CPU
-  architecture and server build. This laptop is `arm64`; most VPSes are
-  `x86_64`, and Postgres will refuse to start on a data directory from
-  the other. The dump restores anywhere, which is why the database is
-  the one thing that does *not* travel as a volume.
+  architecture and server build, and Postgres will refuse to start on a
+  data directory written by the other. This has now mattered in both
+  directions: `arm64` laptop → `x86_64` EC2 on the first move, and
+  `x86_64` → `arm64` on the move to Graviton. The dump restores
+  anywhere, which is why the database is the one thing that does *not*
+  travel as a volume.
 - **`whatsapp-bridge/session/`.** A 228 MB Chromium profile tied to
   this machine and this CPU. Re-scan the QR on the VPS *if* the bridge
   is ever needed — and it is not needed today: `WHATSAPP_TRANSPORT=meta`
@@ -91,8 +111,13 @@ than a bare tick — including the stale-app-secret trap that silently
 
 - A VPS with Docker and the compose plugin. 2 GB RAM is comfortable;
   the whole dataset is under 100 MB.
-- Ports 80/443 need **not** be public — the tunnel dials out. Leaving
-  them closed is the better posture.
+- **Ports 80/443 must be open to the world**, and 22 only to you. The
+  stack serves TLS itself now, and 80 is not optional — Let's Encrypt's
+  HTTP-01 challenge is what renews the certificate.
+- **Match the AMI to the instance architecture.** A Graviton (`t4g`,
+  `m7g`, …) instance needs an `arm64` image; the `x86_64` one will not
+  boot, and this is also why the old root volume cannot simply be
+  detached and re-attached.
 - Push the code first: the VPS clones from `origin`.
 
 ```bash
@@ -125,30 +150,34 @@ It stops before starting the app, deliberately.
 
 ### The cutover
 
-**Stop the whole old stack, not just its tunnel.** Two `cloudflared`
-instances sharing one `credentials.json` will both connect, and
-Cloudflare will split traffic between them — roughly half of Meta's
-webhooks landing on the host you are trying to retire, which looks
-exactly like an intermittent bot. That is the obvious half.
-
-The half that is easy to miss: **beat reaches Meta outbound and does
-not need the tunnel at all.** Leave the old stack running and it keeps
+**Stop the whole old stack, not just its front door.** Moving the
+Elastic IP stops anything *reaching* the old host, which makes it
+tempting to leave it running as a warm rollback. Don't: **beat reaches
+Meta outbound and needs no inbound route at all.** Left up, it keeps
 firing daily check-ins and partner notices at three real phones, from
-books that stopped being true at the cutover. `stop` preserves every
-volume, so this costs nothing in rollback terms.
+books that stopped being true at the cutover — and the partners have no
+way to tell those from the live ones. `stop` preserves every volume, so
+stopping costs nothing in rollback terms.
 
 ```bash
 # old host
 docker compose stop
 
-# VPS
+# then, in the AWS console: re-associate the Elastic IP
+
+# new host
 docker compose up -d
 ./scripts/migrate-verify.sh
 ```
 
-Build the images *before* stopping the old host — `docker compose build`
-takes about four minutes on 2 vCPU, and there is no reason for it to
-happen inside the outage window.
+**Build the images before stopping the old host.** `docker compose
+build` takes about four minutes on 2 vCPU — longer on a cold cache —
+and there is no reason for it to happen inside the outage window.
+
+The address moves in seconds, but a client that resolved the hostname
+before the switch may hold the old IP for the rest of its TTL. Nothing
+answers there once the old stack is stopped, so the failure mode is a
+brief refusal rather than a wrong answer — which is the right way round.
 
 Then, from a partner's phone: send `help`, then `activity`. The second
 one proves the database came across, because it can only answer from
@@ -289,3 +318,63 @@ docker compose up -d cloudflared      # credentials were never removed
 then re-add the tunnel's public hostname in Cloudflare, which recreates
 the DNS record. Nothing else changes: the webhook URL is the hostname,
 so Meta needs no reconfiguration in either direction.
+
+## 9. Moving to Graviton (arm64) {#graviton}
+
+AWS's own recommendation to move `t3.small` → `t4g.small` is worth
+taking — same 2 vCPU and 2 GB, roughly 20% cheaper — but it is **not a
+resize**. The architectures differ, so the x86_64 root volume will not
+boot on Graviton and the old EBS volume cannot simply be re-attached.
+It is a new instance plus a full restore, which is why it belongs in
+this document rather than in a one-line runbook.
+
+**The compatibility question is answerable, not a matter of nerve.**
+Do not reason about it — compute it. Every wheel in `uv.lock` either
+has an `aarch64` build or is pure Python:
+
+```bash
+python3 - <<'PY'
+import re, pathlib
+blocks = pathlib.Path("uv.lock").read_text().split("[[package]]")
+for b in blocks[1:]:
+    name = re.search(r'name = "([^"]+)"', b)
+    wheels = re.findall(r'url = "[^"]*/([^/"]+\.whl)"', b)
+    if not name or not wheels:        # sdist-only builds anywhere
+        continue
+    if not any(k in w for w in wheels
+               for k in ("any.whl", "aarch64", "arm64", "universal2")):
+        print("NO aarch64 wheel:", name.group(1))
+PY
+```
+
+Silence means go. Run it again after any dependency change that lands
+before the move.
+
+**The one thing that would block it is already absent.** PaddlePaddle
+publishes no `aarch64` wheel on PyPI, and `ocr_primary_engine` still
+names `paddle` in config — but it has never been installed, the import
+fails, and `backend/ocr/engines.py` degrades to the vision engine and
+Tesseract without comment. Verify rather than assume:
+
+```bash
+docker compose exec -T worker-ocr python -c \
+  "import importlib.util as u; print(u.find_spec('paddle') is not None)"
+```
+
+If that ever prints `True`, this migration stops being free.
+
+**The rest is unremarkable.** All four base images
+(`python:3.12-slim`, `postgres:16-alpine`, `redis:7-alpine`,
+`nginx:1.27-alpine`) are multi-arch, and images are built on the box —
+so on Graviton they build natively, with no `buildx`, no emulation and
+no cross-compilation. A side benefit: the development laptop is arm64,
+so for the first time dev and production agree on architecture.
+
+**Sequencing matters if a Savings Plan is involved.** A Savings Plan
+commits to *dollars per hour*, not to an instance. Bought at the
+`t3.small` rate and then followed by a move to `t4g.small`, usage falls
+below the commitment and the difference is paid for nothing — the
+saving is bought and handed straight back. Migrate first, let the bill
+settle, then size the plan to the lower number. Use a **Compute**
+Savings Plan, not an **EC2 Instance** one: the latter locks to an
+instance family and would have stranded this move.

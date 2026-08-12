@@ -97,20 +97,57 @@ else
   fi
 fi
 
-# One tunnel, not two. Both hosts sharing credentials.json answer, and
-# webhooks land wherever Cloudflare felt like sending them. Probed from
-# the api container: the cloudflared image is distroless and has no
-# shell to exec into.
-edges="$(docker compose exec -T api sh -lc \
-  'curl -s --max-time 5 http://cloudflared:2000/ready' 2>/dev/null | tr -d '\r')"
-case "$edges" in
-  *'"readyConnections":0'*)
-    bad "the tunnel is up but connected to nothing -- the hostname will not answer" ;;
-  *readyConnections*)
-    ok "tunnel connected: $(printf '%s' "$edges" | sed 's/.*readyConnections":\([0-9]*\).*/\1/') edge(s)" ;;
-  *)
-    printf '    tunnel status unavailable (is cloudflared in this stack?)\n' ;;
-esac
+head "TLS"
+# This stack terminates TLS itself. While the Cloudflare tunnel fronted
+# the site, Cloudflare presented the public certificate and the origin's
+# could be -- and was -- a self-signed placeholder. Now an expired or
+# wrong certificate is the whole site being down, so it is checked here.
+served="$(echo | openssl s_client -connect localhost:443 -servername "$DOMAIN" 2>/dev/null \
+  | openssl x509 -noout -subject 2>/dev/null)"
+if printf '%s' "$served" | grep -q "CN *= *${DOMAIN}"; then
+  ok "443 serves a certificate for ${DOMAIN}"
+else
+  bad "443 is not serving a certificate for ${DOMAIN} (got: ${served:-no answer})"
+fi
+
+CERT="docker/certs/fullchain.pem"
+if [ -f "$CERT" ]; then
+  enddate="$(openssl x509 -in "$CERT" -noout -enddate 2>/dev/null | cut -d= -f2)"
+  # 30 days is the window Let's Encrypt will actually renew in, so a
+  # certificate inside it that has not been replaced means renewal is
+  # already failing -- not that it is merely getting close.
+  if openssl x509 -in "$CERT" -noout -checkend 2592000 >/dev/null 2>&1; then
+    ok "certificate valid well past 30 days (expires ${enddate})"
+  else
+    bad "certificate expires ${enddate}, inside the renewal window and still
+    not replaced -- renew-cert.sh is failing. Check ~/renew-cert.log."
+  fi
+fi
+
+# The check that exists because of this migration. secrets/certs carries
+# the certificate, so TLS serves and everything above passes -- but
+# certbot's account key and renewal config live in a *volume*, and a
+# host that did not receive it cannot renew anything. The failure is
+# invisible for ~90 days and then total.
+PROJECT="$(basename "$PWD")"
+if docker volume inspect "${PROJECT}_letsencrypt" >/dev/null 2>&1; then
+  state="$(docker run --rm -v "${PROJECT}_letsencrypt:/le:ro" alpine:3.20 sh -c \
+    'printf "%s %s" "$(ls /le/renewal/*.conf 2>/dev/null | wc -l)" \
+                    "$(find /le/accounts -name private_key.json 2>/dev/null | wc -l)"' \
+    2>/dev/null | tr -d '\r')"
+  confs="${state%% *}"; accts="${state##* }"
+  if [ "${confs:-0}" -gt 0 ] && [ "${accts:-0}" -gt 0 ]; then
+    ok "certbot can renew (renewal config and ACME account both present)"
+  else
+    bad "the letsencrypt volume has ${confs:-0} renewal config(s) and ${accts:-0} account
+    key(s) -- certbot has nothing to renew from. TLS works today and
+    stops working when the current certificate expires. Re-issue with:
+      ./scripts/renew-cert.sh   (or certbot certonly --webroot, once)"
+  fi
+else
+  bad "no ${PROJECT}_letsencrypt volume -- the certificate cannot be renewed.
+    It was not carried over by the migration; restore it or re-issue."
+fi
 
 head "WhatsApp"
 # The failure that cost hours: containers holding a stale app secret

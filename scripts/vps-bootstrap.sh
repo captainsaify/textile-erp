@@ -9,7 +9,12 @@
 #
 # Deliberately does NOT touch sshd config. Locking yourself out of a
 # box you just bought is a worse outcome than a slightly permissive
-# default, and the tunnel means nothing but SSH is exposed anyway.
+# default. Harden it afterwards, from a session you can already use,
+# with scripts/harden-ssh.sh.
+#
+# Architecture-neutral: the Docker repo line is built from
+# `dpkg --print-architecture`, so this works unchanged on arm64
+# (Graviton) as well as x86_64. See docs/30 §9.
 
 set -euo pipefail
 
@@ -79,11 +84,24 @@ else
 fi
 
 # --- 4. firewall ----------------------------------------------------
-# SSH only. The Cloudflare Tunnel dials *out*, so 80/443 never need to
-# be open -- which is the security win of the tunnel and the reason not
-# to reflexively open them "just in case".
-say "Configuring the firewall: SSH only"
+# SSH, HTTP and HTTPS. This used to be SSH only, correctly: the
+# Cloudflare Tunnel dialled *out*, so nothing inbound was needed. The
+# stack now serves 443 itself (docs/30 §8), and 80 is not optional --
+# Let's Encrypt's HTTP-01 challenge is what renews the certificate, so
+# closing 80 buys nothing and expires the site in 90 days.
+#
+# Be clear about what this does and does not do. Docker publishes ports
+# by writing its own DNAT rules, which are traversed *before* ufw's
+# rules for routed traffic -- so a container port published to 0.0.0.0
+# is reachable whether or not ufw allows it. These rules govern
+# processes listening on the host; what actually keeps postgres and
+# redis private is that compose never publishes them. Verify with
+# `docker compose ps` that only nginx maps to 0.0.0.0, and treat any
+# other 0.0.0.0 mapping as public regardless of what ufw reports.
+say "Configuring the firewall: SSH, HTTP, HTTPS"
 ufw allow OpenSSH >/dev/null 2>&1 || ufw allow 22/tcp >/dev/null
+ufw allow 80/tcp >/dev/null
+ufw allow 443/tcp >/dev/null
 ufw --force enable >/dev/null
 ufw status | sed 's/^/    /'
 

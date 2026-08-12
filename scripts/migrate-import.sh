@@ -100,7 +100,13 @@ docker compose exec -T postgres sh -lc \
 say "Stopping redis to replace its data"
 docker compose stop redis >/dev/null 2>&1 || true
 
-for volume in attachments reports backups redis_data; do
+# letsencrypt is restored here rather than with the other secrets: it is
+# certbot's own state (account key, renewal config, the archive the live
+# symlinks point at), and it has to land as a volume because that is
+# where renew-cert.sh mounts it from. Without it TLS still serves -- the
+# certificate is a plain file in docker/certs -- but it can never be
+# renewed, and that is invisible until the day it expires.
+for volume in attachments reports backups redis_data letsencrypt; do
   archive="$STAGE/volumes/${volume}.tar.gz"
   [ -f "$archive" ] || continue
   say "Restoring volume: ${volume}"
@@ -167,17 +173,30 @@ cat <<'DONE'
 
 Nothing is serving yet, on purpose. Before starting the app:
 
-  1. Make sure the OLD host's tunnel is stopped. Two cloudflared
-     instances sharing one credentials.json will both answer, and
-     roughly half of Meta's webhooks will hit the host you are trying
-     to retire.
+  1. Build the images now, not during the outage. On 2 vCPU this takes
+     a few minutes, and there is no reason for it to happen while the
+     business is down.
+
+       docker compose build
+
+  2. Stop the OLD host's whole stack -- not just its front door.
+     beat reaches Meta outbound and needs no inbound route at all, so
+     an old stack left running keeps firing check-ins and partner
+     notices at real phones from books that stopped being true at the
+     cutover. `stop` preserves every volume, so this costs nothing in
+     rollback terms.
 
        # on the old host
-       docker compose stop cloudflared
+       docker compose stop
 
-  2. Then bring this one up and check it:
+  3. Move the Elastic IP to this host, then bring it up and check it:
 
        docker compose up -d
        ./scripts/migrate-verify.sh
+
+     The address is what the DNS record and Meta's webhook URL both
+     point at, so nothing else needs reconfiguring -- but until it
+     moves, this host answers on its own public IP and not on the
+     hostname the certificate is issued for.
 
 DONE
