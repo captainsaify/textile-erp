@@ -362,12 +362,12 @@ async def _prepare(draft: SaleDraft, ctx: RequestContext) -> tuple[SaleDraft, li
         service = SalesService(session)
         candidates: list[str] = []
         if draft.customer_id is None:
-            matches = await service.resolve_customer(ctx.user.org_id, draft.customer_name)
-            if len(matches) == 1:
-                draft.customer_id = matches[0].id
-                draft.customer_name = matches[0].name
-            elif matches:
-                candidates = [customer.name for customer in matches]
+            match = await service.resolve_customer(ctx.user.org_id, draft.customer_name)
+            if match.exact is not None:
+                draft.customer_id = match.exact.id
+                draft.customer_name = match.exact.name
+            elif match.near:
+                candidates = [customer.name for customer in match.near]
         draft = await service.hydrate(ctx.user.org_id, draft)
     return draft, candidates
 
@@ -489,14 +489,15 @@ async def handle_sale_session_reply(
 
     if _PICK.match(lowered) and draft.customer_id is None:
         async with ctx.session_factory() as session:
-            matches = await SalesService(session).resolve_customer(
+            match = await SalesService(session).resolve_customer(
                 ctx.user.org_id, draft.customer_name
             )
+        options = match.near
         index = int(lowered) - 1
-        if not 0 <= index < len(matches):
+        if not 0 <= index < len(options):
             return CommandResult(reply=f"There's no option {lowered}.")
-        draft.customer_id = matches[index].id
-        draft.customer_name = matches[index].name
+        draft.customer_id = options[index].id
+        draft.customer_name = options[index].name
         draft, _ = await _prepare(draft, ctx)
         await sessions.set(
             ctx.user.org_id, ctx.user.id, AWAITING_SALE_CONFIRMATION, draft.to_context()

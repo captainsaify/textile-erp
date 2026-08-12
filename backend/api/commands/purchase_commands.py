@@ -52,7 +52,7 @@ _HEADER = re.compile(
 _ITEM = re.compile(r"^(?P<code>[A-Za-z0-9][\w.\-/&]*)\s+(?P<qty>[\d.]+)\s+(?P<rate>[\d.]+)$")
 _LABELED = re.compile(r"^(?P<label>freight|other|total):\s*(?P<amount>[\d.]+)$", re.IGNORECASE)
 _CORRECTION = re.compile(
-    r"^line\s+(?P<line>\d+)\s+(?P<field>code|qty|rate)\s+(?P<value>.+)$", re.IGNORECASE
+    r"^line\s+(?P<line>\d+)\s+(?P<field>code|qty|rate|brand)\s+(?P<value>.+)$", re.IGNORECASE
 )
 #: "This message was *meant* as corrections." Matched per line, so a
 #: message whose lines are all malformed still gets told so, instead of
@@ -169,6 +169,11 @@ def next_step(draft: Draft) -> str:
         return "details"
     if draft.brand_collisions:
         return "brand"
+    # Before "codes": a code carried by two brands is not missing from
+    # the catalogue, and offering to create it would add a third product
+    # sharing the code -- which is the mess, not the fix.
+    if draft.needs_brand is not None:
+        return "line_brand"
     if draft.unresolved_codes:
         return "codes"
     if draft.supplier_id is None:
@@ -253,6 +258,14 @@ def render_preview(draft: Draft) -> str:
         # the start but nothing ever mentioned it, so a first purchase --
         # where *every* code is new -- looked like a dead end.
         lines.append(unresolved_help(draft.unresolved_codes))
+    elif step == "line_brand":
+        pending = draft.needs_brand
+        assert pending is not None
+        listed = ", ".join(f"*{name}*" for name in pending.brand_choices)
+        lines.append(
+            f"*{pending.code}* is carried by {listed}. Which one is this line?\n"
+            f"Reply *line {draft.lines.index(pending) + 1} brand <name>*."
+        )
     elif step == "supplier":
         lines.append(f"One thing left: *{draft.supplier_name}* isn't in your supplier list yet.")
     elif step == "confirm":
@@ -408,12 +421,25 @@ async def _resolve_draft(draft: Draft, ctx: RequestContext) -> Draft:
                 brand = await service.resolve_or_create_brand(org_id, draft.brand_name)
                 draft.brand_id = brand.id
         for line in draft.lines:
-            if line.product_id is None:
-                product = await service.resolve_product(org_id, line.code, draft.brand_id)
-                if product is not None:
-                    line.product_id = product.id
-                    line.resolved_code = product.code
-                    line.unit_code = product.unit.code
+            if line.product_id is not None:
+                continue
+            # The line's own brand wins over the bill's. One bill can
+            # carry the same code under two brands -- 1051 had 55X under
+            # BSQ and 55X under AR on consecutive rows -- and with only
+            # a bill-level brand that had to be entered as two bills.
+            brand_id = line.brand_id or draft.brand_id
+            product = await service.resolve_product(org_id, line.code, brand_id)
+            if product is not None:
+                line.product_id = product.id
+                line.resolved_code = product.code
+                line.unit_code = product.unit.code
+                line.brand_choices = []
+                continue
+            if brand_id is None:
+                # Ambiguous rather than unknown: asking beats guessing,
+                # and beats offering to create a third product under a
+                # code two already share.
+                line.brand_choices = await service.brands_carrying(org_id, line.code)
     return draft
 
 
@@ -437,11 +463,26 @@ async def _apply_correction(
             line.qty = decimal.Decimal(value)
         elif field == "rate":
             line.rate = decimal.Decimal(value)
+        elif field == "brand":
+            async with ctx.session_factory() as session:
+                brand = await PurchaseService(session).find_brand(ctx.user.org_id, value)
+            if brand is None:
+                carried = ", ".join(line.brand_choices) or "none on this code"
+                return f"there is no brand *{value}* — this code is carried by {carried}"
+            # Cleared so the line resolves again under the brand just
+            # named; left set it would show the new brand while still
+            # pointing at the other one's product.
+            line.brand_id = brand
+            line.product_id = None
+            line.resolved_code = None
+            line.unit_code = None
+            line.brand_choices = []
         else:
             line.code = value.upper()
             line.product_id = None
             line.resolved_code = None
             line.unit_code = None
+            line.brand_choices = []
     except decimal.InvalidOperation:
         return f"*{value}* is not a number"
     if field == "code" and previous_code and previous_code != line.code:

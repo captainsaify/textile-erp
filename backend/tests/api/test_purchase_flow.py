@@ -320,6 +320,65 @@ async def test_brand_names_match_ignoring_case_and_space(
         assert rows == "TOP"  # stored trimmed, whatever was typed
 
 
+async def test_one_bill_can_carry_two_brands_for_one_code(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A code under two brands is two products, and one bill can hold both.
+
+    Iqbal Bhai's sheet had 55X under BSQ and 55X under AR on consecutive
+    rows. The draft carried a single brand, so the second line resolved
+    to the first line's product -- the fuzzy search returned it happily
+    once the exact lookup declined -- and the bill had to be entered
+    twice, as 007 and 007B, to keep the two apart.
+    """
+    from backend.services.purchase_service import PurchaseService
+
+    async with session_factory() as session:
+        service = PurchaseService(session)
+        async with session.begin():
+            bsq = await service.resolve_or_create_brand(ctx.user.org_id, "BSQ")
+            ar = await service.resolve_or_create_brand(ctx.user.org_id, "AR")
+            await service.create_product(ctx.user, "55X", "Zipper sweater", bsq.id)
+            await service.create_product(ctx.user, "55X", "Zipper sweater", ar.id)
+
+    result = await handle_purchase(
+        "Supplier: Iqbal Bhai Invoice: 1051 Date: 06-08-2026\n55X 800 125\n55X 800 125", ctx
+    )
+    # Asked, not guessed -- and not offered as a code to create, which
+    # would add a third product sharing the code.
+    assert "carried by" in result.reply
+    assert "AR" in result.reply and "BSQ" in result.reply
+    assert "create all products" not in result.reply
+
+    result = await _session_reply("line 1 brand BSQ", ctx)
+    assert "carried by" in result.reply  # line 2 still to answer
+    result = await _session_reply("line 2 brand AR", ctx)
+    assert "carried by" not in result.reply
+
+    result = await _session_reply("create supplier", ctx)
+    result = await _session_reply("GST 2240", ctx)
+    result = await _session_reply("LBPK 2100", ctx)
+    assert "Other charges: ₹4,340.00  (GST ₹2,240.00 + LBPK ₹2,100.00)" in result.reply
+
+    result = await _session_reply("CONFIRM", ctx)
+    assert "✅ Purchase confirmed" in result.reply
+    assert "Grand total: ₹2,04,340.00" in result.reply
+
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                sa.text(
+                    "SELECT b.name, i.qty_on_hand FROM inventory i "
+                    "JOIN products p ON p.id = i.product_id "
+                    "JOIN brands b ON b.id = p.brand_id "
+                    "WHERE p.code = '55X' ORDER BY b.name"
+                )
+            )
+        ).all()
+        # One bill, two brands, 800 each -- not 1,600 under one of them.
+        assert [(r[0], r[1]) for r in rows] == [("AR", D("800.000")), ("BSQ", D("800.000"))]
+
+
 async def test_supplier_and_charges_are_fixable_mid_draft(ctx: RequestContext) -> None:
     """The most prominent name on a bill is often the *buyer's*.
 

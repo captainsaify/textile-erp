@@ -38,6 +38,19 @@ ZERO = decimal.Decimal("0")
 
 CUSTOMER_MATCH_THRESHOLD = 80  # §9 fuzzy >= 0.8
 
+
+@dataclasses.dataclass(frozen=True)
+class CustomerMatch:
+    """Either this is definitely them, or here are the possibilities.
+
+    The two are kept apart in the type because collapsing them into one
+    list is what let a near match be mistaken for a resolved one.
+    """
+
+    exact: Customer | None
+    near: list[Customer]
+
+
 _WHITESPACE = re.compile(r"\s+")
 
 
@@ -267,25 +280,36 @@ class SalesService:
         self._audit = AuditService(session)
         self._settings = SettingsRepository(session)
 
-    async def resolve_customer(self, org_id: uuid.UUID, name: str) -> list[Customer]:
-        """Returns [] (none), [one] (resolved), or several when the match
-        is ambiguous -- never auto-picked (docs/05_Sales.md §10)."""
+    async def resolve_customer(self, org_id: uuid.UUID, name: str) -> CustomerMatch:
+        """An exact match, or the near ones to choose between.
+
+        A near match is **offered, never taken**. It used to be taken
+        whenever exactly one cleared the threshold, and only a dead heat
+        between two was treated as ambiguous -- which is not how these
+        names collide. Traders are recorded name-then-town, so two in one
+        town share half the string:
+
+            Sohail Bhai Lucknow  vs  Rais bhai Lucknow    83
+            Zahid Bhai Dimapur   vs  Shahid Bhai Dimnapur 90
+
+        Both cleared 80 alone and were taken silently, putting two sales
+        on a stranger's ledger -- which means a debt chased from the
+        wrong man. Asking costs one tap; being wrong costs a customer.
+        """
         from rapidfuzz import fuzz
 
         candidates = await self._customers.search(org_id, name, limit=5)
-        exact = [c for c in candidates if c.name.lower() == name.lower()]
-        if exact:
-            return exact[:1]
+        wanted = " ".join(name.split()).lower()
+        for customer in candidates:
+            if " ".join(customer.name.split()).lower() == wanted:
+                return CustomerMatch(exact=customer, near=[])
         scored = [
-            (c, fuzz.ratio(c.name.lower(), name.lower()))
+            (c, fuzz.ratio(c.name.lower(), wanted))
             for c in candidates
-            if fuzz.ratio(c.name.lower(), name.lower()) >= CUSTOMER_MATCH_THRESHOLD
+            if fuzz.ratio(c.name.lower(), wanted) >= CUSTOMER_MATCH_THRESHOLD
         ]
-        if not scored:
-            return []
-        best = max(score for _, score in scored)
-        tied = [c for c, score in scored if score == best]
-        return tied if len(tied) > 1 else [tied[0]]
+        scored.sort(key=lambda pair: -pair[1])
+        return CustomerMatch(exact=None, near=[customer for customer, _ in scored])
 
     async def create_customer(self, actor: User, name: str) -> Customer:
         customer = Customer(org_id=actor.org_id, name=name, created_by=actor.id)

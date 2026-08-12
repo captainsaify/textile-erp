@@ -223,6 +223,48 @@ async def test_cash_sale_posts_ledger_inflow(
         assert status == "paid"
 
 
+async def test_a_near_matching_customer_is_offered_never_taken(
+    ctx: RequestContext,
+    stocked: dict[str, uuid.UUID],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Two traders in one town must not collapse into one ledger.
+
+    Names are recorded name-then-town, so two customers in the same city
+    share half the string and score well above the 80 threshold:
+
+        Sohail Bhai Lucknow  vs  Rais bhai Lucknow    83
+        Zahid Bhai Dimapur   vs  Shahid Bhai Dimnapur 90
+
+    A single candidate over the threshold used to be taken outright --
+    only an exact tie between two counted as ambiguous. Both of those
+    pairs were silently merged in production, putting sales on a
+    stranger's ledger, which means a debt chased from the wrong man.
+    """
+    from backend.services.sales_service import SalesService
+
+    async with session_factory() as session, session.begin():
+        await SalesService(session).create_customer(ctx.user, "Rais bhai Lucknow")
+
+    result = await handle_sale("Customer: Sohail Bhai Lucknow\nTRP 10 165", ctx)
+    # Offered, not taken -- and creating the new one stays available.
+    assert "Rais bhai Lucknow" in result.reply
+    assert "Sale recorded" not in result.reply
+
+    async with session_factory() as session:
+        service = SalesService(session)
+        match = await service.resolve_customer(ctx.user.org_id, "Sohail Bhai Lucknow")
+        assert match.exact is None
+        assert [c.name for c in match.near] == ["Rais bhai Lucknow"]
+
+        # An exact name still resolves without a question, whatever the
+        # spacing -- asking about a name typed perfectly would be noise.
+        match = await service.resolve_customer(ctx.user.org_id, "  rais   bhai  lucknow ")
+        assert match.exact is not None and match.exact.name == "Rais bhai Lucknow"
+
+    await _reply("discard", ctx)
+
+
 async def test_sale_charges_bill_the_customer_without_inflating_revenue(
     ctx: RequestContext,
     stocked: dict[str, uuid.UUID],

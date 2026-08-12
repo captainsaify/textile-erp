@@ -90,6 +90,14 @@ class DraftLine:
     description: str | None = None  # from the sheet; used when creating
     pieces: decimal.Decimal | None = None  # sheet's Qty column (rolls/bags)
     weight_per_unit: decimal.Decimal | None = None  # sheet's KG column
+    #: This line's brand, when it differs from the bill's. One bill can
+    #: carry the same code under two brands -- Iqbal Bhai's 1051 was
+    #: 55X under BSQ and 55X under AR on consecutive rows -- and a draft
+    #: with a single brand could not hold that. It was entered as two
+    #: bills, 007 and 007B, to get around it.
+    brand_id: uuid.UUID | None = None
+    #: Brands carrying this code, set only while the question is open.
+    brand_choices: list[str] = dataclasses.field(default_factory=list)
 
     @property
     def line_total(self) -> decimal.Decimal:
@@ -144,7 +152,20 @@ class Draft:
 
     @property
     def unresolved_codes(self) -> list[str]:
-        return [line.code for line in self.lines if line.product_id is None]
+        """Codes naming no product at all.
+
+        A code carried by several brands is *not* one of these. It names
+        too many, which is a question with an answer -- offering to
+        create it would add a third product with the same code.
+        """
+        return [
+            line.code for line in self.lines if line.product_id is None and not line.brand_choices
+        ]
+
+    @property
+    def needs_brand(self) -> DraftLine | None:
+        """The first line still waiting to be told which brand."""
+        return next((line for line in self.lines if line.brand_choices), None)
 
     def to_context(self) -> dict[str, Any]:
         return {
@@ -169,6 +190,8 @@ class Draft:
                     "weight_per_unit": (
                         str(line.weight_per_unit) if line.weight_per_unit is not None else None
                     ),
+                    "line_brand_id": str(line.brand_id) if line.brand_id else None,
+                    "brand_choices": list(line.brand_choices),
                 }
                 for line in self.lines
             ],
@@ -211,6 +234,10 @@ class Draft:
                         if line.get("weight_per_unit") is not None
                         else None
                     ),
+                    brand_id=(
+                        uuid.UUID(line["line_brand_id"]) if line.get("line_brand_id") else None
+                    ),
+                    brand_choices=list(line.get("brand_choices") or []),
                 )
                 for line in context["lines"]
             ],
@@ -283,12 +310,47 @@ class PurchaseService:
             return best
         return None
 
+    async def find_brand(self, org_id: uuid.UUID, name: str) -> uuid.UUID | None:
+        """An existing brand by name, or None. Never creates one -- this
+        answers "which of these?", and a typo must not silently become a
+        third brand."""
+        from sqlalchemy import func, select
+
+        return (
+            await self._session.execute(
+                select(Brand.id).where(
+                    Brand.org_id == org_id,
+                    func.lower(func.btrim(Brand.name)) == " ".join(name.split()).lower(),
+                    Brand.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+
+    async def brands_carrying(self, org_id: uuid.UUID, code: str) -> list[str]:
+        """Brand names holding this exact code, for the "which one?" ask.
+
+        Empty when the code is unambiguous. Deliberately exact-match: a
+        fuzzy neighbour under another brand is not evidence that this
+        code is ambiguous, it is evidence the search is loose.
+        """
+        carriers = await self._products.list_by_code(org_id, code)
+        if len(carriers) < 2:
+            return []
+        return sorted({(p.brand.name if p.brand else "no brand") for p in carriers})
+
     async def resolve_product(
         self, org_id: uuid.UUID, code: str, brand_id: uuid.UUID | None = None
     ) -> Product | None:
         exact = await self._products.get_by_code(org_id, code, brand_id)
         if exact is not None:
             return exact
+        # `get_by_code` returns None for an ambiguous code on purpose, so
+        # the caller can ask which brand. Falling through to the fuzzy
+        # search here defeated that: it happily returned one of them, and
+        # a bill carrying 55X under two brands filed both under whichever
+        # came back first.
+        if brand_id is None and len(await self._products.list_by_code(org_id, code)) > 1:
+            return None
         candidates = await self._products.search(org_id, code, limit=1, brand_id=brand_id)
         if (
             candidates
