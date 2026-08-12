@@ -129,3 +129,43 @@ def test_a_real_brand_still_wins_over_fold_noise() -> None:
         row(code="CPK", label="MKD"),
     ]
     assert OcrService._dominant_label(mixed) == "MKD"
+
+
+def test_charges_read_off_a_sheet_are_kept_and_cleaned() -> None:
+    """GST and packing at the foot of a bill, or in their own columns.
+
+    Iqbal Bhai's 1051 carried 'BPK+ 2100' and 'GST 2240' under the items
+    and the intake never looked at them, so they were entered afterwards
+    as operating expenses -- money owed to a supplier, filed where money
+    leaves, and the goods costing less than they did.
+    """
+    booked = OcrService._charges_from_sheet(
+        [
+            ("gst", "2,240"),
+            ("BPK", "2100"),
+            ("packing", "0"),  # nothing charged: not a charge
+            ("labour", "n/a"),  # not a number
+            ("", "500"),  # no label to bill it under
+        ]
+    )
+    assert booked == {"GST": D("2240"), "BPK": D("2100")}
+
+
+def test_a_repeated_charge_column_is_counted_once() -> None:
+    """A charge in a column repeats on every row and still belongs to the
+    bill once. Summing the column would multiply the tax by the number of
+    items -- on a two-line sheet, exactly double."""
+    from backend.ocr.vision_engine import _charges_from
+
+    assert _charges_from(
+        [
+            {"label": "GST", "amount": "2240"},
+            {"label": "GST", "amount": "2240"},
+            {"label": "BPK", "amount": "2100"},
+        ]
+    ) == [("GST", "2240"), ("BPK", "2100")]
+
+    # A label with no usable number never becomes a charge of zero.
+    assert _charges_from([{"label": "GST", "amount": ""}]) == []
+    assert _charges_from([{"label": "GST", "amount": "-5"}]) == []
+    assert _charges_from("not a list") == []

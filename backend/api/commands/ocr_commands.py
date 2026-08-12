@@ -382,6 +382,7 @@ async def read_stored_sheet(attachment_id_text: str, ctx: RequestContext) -> Com
     invoice_hint = ""
     date_hint = ""
     brand_hint = ""
+    charge_hints: list[tuple[str, str]] = []
 
     # A photo already read is never read again. Tapping "A purchase" a
     # second time, or re-answering after a crash, used to bill a fresh
@@ -436,6 +437,7 @@ async def read_stored_sheet(attachment_id_text: str, ctx: RequestContext) -> Com
                     invoice_hint = vision.invoice_no
                     date_hint = vision.invoice_date
                     brand_hint = vision.brand
+                    charge_hints = vision.charges
             except VisionUnavailableError as exc:
                 logger.warning("vision_read_failed_falling_back", error=str(exc))
 
@@ -470,6 +472,7 @@ async def read_stored_sheet(attachment_id_text: str, ctx: RequestContext) -> Com
                 supplier_name=supplier_hint,
                 invoice_no=invoice_hint,
                 brand_name=brand_hint,
+                charges=charge_hints,
             )
             build.draft.source_attachment_id = attachment_id
             await service.mark_attachment(

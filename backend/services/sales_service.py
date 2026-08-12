@@ -103,6 +103,10 @@ class SaleDraftLine:
     #: The brands that carry this code, set only while the question is
     #: outstanding. Empty once the line resolves.
     brand_choices: list[str] = dataclasses.field(default_factory=list)
+    #: The LABEL cell as the sheet wrote it, before it is matched to a
+    #: brand. Kept apart from brand_id so an unrecognised label can be
+    #: shown back rather than silently dropped.
+    brand_hint: str = ""
 
     @property
     def line_total(self) -> decimal.Decimal:
@@ -189,6 +193,7 @@ class SaleDraft:
                     "qty_on_hand": str(line.qty_on_hand),
                     "brand_id": str(line.brand_id) if line.brand_id else None,
                     "brand_choices": list(line.brand_choices),
+                    "brand_hint": line.brand_hint,
                 }
                 for line in self.lines
             ],
@@ -222,6 +227,7 @@ class SaleDraft:
                     qty_on_hand=decimal.Decimal(line["qty_on_hand"]),
                     brand_id=uuid.UUID(line["brand_id"]) if line.get("brand_id") else None,
                     brand_choices=list(line.get("brand_choices") or []),
+                    brand_hint=line.get("brand_hint") or "",
                 )
                 for line in context["lines"]
             ],

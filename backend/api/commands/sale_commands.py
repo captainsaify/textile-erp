@@ -68,6 +68,10 @@ ZERO = decimal.Decimal("0")
 TWO = decimal.Decimal("0.01")
 
 _PICK = re.compile(r"^[1-9]\d*$")
+#: Naming the buyer on a note that arrived without one. Not the same
+#: as `create customer`, which confirms a name already read off the
+#: sheet -- here there is nothing yet to confirm.
+_SET_CUSTOMER = re.compile(r"^customer:?\s+(?P<name>.+)$", re.IGNORECASE)
 
 CONFIRM_VOCAB = {"confirm", "yes", "ok", "save"}
 
@@ -235,10 +239,15 @@ def render_sale(sale: ConfirmedSale) -> str:
 
 def _render_unresolved(draft: SaleDraft, candidates: list[str]) -> str:
     lines = []
-    if candidates:
+    if not draft.customer_name.strip():
+        # A note photographed straight off the pad names the goods and
+        # not the buyer. Asking outright beats "Customer '' not found",
+        # which reads like a failure rather than the next question.
+        lines.append("Who is this sale to? Reply *customer <name>*.")
+    elif candidates:
         lines.append(f"Which customer did you mean for '{draft.customer_name}'?")
         lines.extend(f"{index}. {name}" for index, name in enumerate(candidates, start=1))
-        lines.append("Reply with the number.")
+        lines.append("Reply with the number, or *customer <name>* if none of these.")
     else:
         lines.append(
             f"Customer '{draft.customer_name}' not found — reply 'create customer' to add them."
@@ -472,6 +481,20 @@ async def handle_sale_session_reply(
         )
         return _sale_preview(draft)
 
+    named = _SET_CUSTOMER.match(text.strip())
+    if named is not None and draft.customer_id is None:
+        # Naming the buyer on a note that never had one. Separate from
+        # `create customer`, which confirms the name already read off the
+        # sheet -- here there is nothing to confirm yet.
+        draft.customer_name = " ".join(named["name"].split())
+        draft, candidates = await _prepare(draft, ctx)
+        await sessions.set(
+            ctx.user.org_id, ctx.user.id, AWAITING_SALE_CONFIRMATION, draft.to_context()
+        )
+        if draft.customer_id is None:
+            return CommandResult(reply=_render_unresolved(draft, candidates))
+        return await _continue_after_resolution(draft, ctx)
+
     if lowered == "create customer":
         if draft.customer_id is not None:
             return CommandResult(reply="Customer is already set.")
@@ -656,7 +679,9 @@ async def read_stored_sale_sheet(attachment_id_text: str, ctx: RequestContext) -
             notes.append(f"Line {index}: couldn't read this row fully — check it before confirming")
             if qty is None or rate is None:
                 continue
-        lines.append(SaleDraftLine(code=row.code.upper(), qty=qty, rate=rate))
+        lines.append(
+            SaleDraftLine(code=row.code.upper(), qty=qty, rate=rate, brand_hint=row.label.strip())
+        )
 
         # The sheet's own total is checked against qty x rate and any
         # disagreement is *surfaced*, never resolved. When two sources
@@ -676,12 +701,17 @@ async def read_stored_sale_sheet(attachment_id_text: str, ctx: RequestContext) -
             "*sale Customer: <name>*\n*<CODE> <qty> <rate>*"
         )
 
+    booked = _charges_from_note(sheet.charges)
     draft = SaleDraft(
         customer_id=None,
         customer_name=sheet.customer_name.strip(),
         payment_type=SalePaymentType.CREDIT,  # §2 default; changeable before CONFIRM
         lines=lines,
+        freight=booked.pop("FREIGHT", ZERO),
+        other_charges=sum(booked.values(), ZERO),
+        charges=booked,
     )
+    await _apply_row_brands(draft, ctx)
     draft.idempotency_key = idempotency_key(ctx.user.whatsapp_number or "", attachment_id_text)
     draft, candidates = await _prepare(draft, ctx)
 
@@ -719,3 +749,56 @@ def _sheet_number(raw: str) -> decimal.Decimal | None:
     except decimal.InvalidOperation:
         return None
     return value if value > ZERO else None
+
+
+def _charges_from_note(charges: list[tuple[str, str]]) -> dict[str, decimal.Decimal]:
+    """The note's charge words as amounts, dropping anything unusable.
+
+    An amount with no word for it is dropped rather than booked under a
+    blank name: it could not be shown on the bill or corrected later.
+    """
+    booked: dict[str, decimal.Decimal] = {}
+    for label, raw in charges:
+        name = " ".join(str(label).split()).upper()
+        amount = _sheet_number(str(raw))
+        if name and amount is not None and amount > ZERO:
+            booked[name] = amount
+    return booked
+
+
+async def _apply_row_brands(draft: SaleDraft, ctx: RequestContext) -> None:
+    """Give each line the brand its own row names, when they differ.
+
+    One note can sell the same code under two brands -- the sheet's
+    LABEL column says which. Only brands that already exist are
+    attached: a misread cell must not mint one, and the note has no way
+    to distinguish "new brand" from "read wrongly".
+
+    Silent when every row agrees. A single brand is what the code lookup
+    would land on anyway, and stamping it per line would only make the
+    later "which brand?" question impossible to ask.
+    """
+    from sqlalchemy import func, select
+
+    from backend.models import Brand
+
+    wanted = {
+        " ".join(line.brand_hint.split()).lower() for line in draft.lines if line.brand_hint.strip()
+    }
+    if len(wanted) < 2:
+        return
+    async with ctx.session_factory() as session:
+        rows = (
+            await session.execute(
+                select(func.lower(func.btrim(Brand.name)), Brand.id).where(
+                    Brand.org_id == ctx.user.org_id,
+                    Brand.deleted_at.is_(None),
+                    func.lower(func.btrim(Brand.name)).in_(wanted),
+                )
+            )
+        ).all()
+    by_name = {name: brand_id for name, brand_id in rows}
+    for line in draft.lines:
+        brand_id = by_name.get(" ".join(line.brand_hint.split()).lower())
+        if brand_id is not None:
+            line.brand_id = brand_id

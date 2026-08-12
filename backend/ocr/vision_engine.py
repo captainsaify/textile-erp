@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import decimal
 from typing import Any
 
 import cv2
@@ -138,6 +139,33 @@ SHEET_SCHEMA: dict[str, Any] = {
                 "whole heading. '' if no heading names a brand."
             ),
         },
+        "charges": {
+            "type": "array",
+            "description": (
+                "Charges the bill adds on top of the goods -- GST, packing/BPK/LBPK, "
+                "freight, labour, commission. They appear either as their own columns "
+                "to the right of the item columns, or written at the foot of the sheet "
+                "('BPK+ 2100', 'GST 2240'). Give each ONCE for the whole bill, even if "
+                "a column repeats the figure on every row. Do NOT include the subtotal, "
+                "the grand total, or any per-item rate or amount -- those are not "
+                "charges. Empty list if the sheet shows none."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": "string",
+                        "description": "The word the sheet uses, e.g. GST, BPK, PACKING.",
+                    },
+                    "amount": {
+                        "type": "string",
+                        "description": "The amount as a plain number string.",
+                    },
+                },
+                "required": ["label", "amount"],
+                "additionalProperties": False,
+            },
+        },
         "unreadable_note": {
             "type": "string",
             "description": "Brief note if parts were unreadable, else ''.",
@@ -149,6 +177,7 @@ SHEET_SCHEMA: dict[str, Any] = {
         "invoice_no",
         "invoice_date",
         "brand",
+        "charges",
         "unreadable_note",
     ],
     "additionalProperties": False,
@@ -215,6 +244,42 @@ class VisionSheet:
     #: label column: "LOGO :- MKD WINTER" is unambiguous, where a column
     #: of repeated single letters is a guess.
     brand: str = ""
+    #: What the bill adds on top of the goods, as (label, amount) in the
+    #: sheet's own words -- [("GST", "2240"), ("BPK", "2100")]. Read but
+    #: never applied silently: they change the payable and the cost of
+    #: the stock, so the preview shows them and CONFIRM accepts them.
+    charges: list[tuple[str, str]] = dataclasses.field(default_factory=list)
+
+
+def _charges_from(raw: object) -> list[tuple[str, str]]:
+    """(label, amount) pairs, keeping only what is usable.
+
+    A label with no number, or a number that is not one, is dropped
+    rather than carried forward as a charge of zero -- a bill quietly
+    growing a line called GST worth nothing is harder to notice than one
+    that never mentioned it.
+
+    A column repeated on every row is collapsed to its first value: the
+    charge belongs to the bill, and summing a repeat would multiply it
+    by the number of items.
+    """
+    if not isinstance(raw, list):
+        return []
+    seen: dict[str, str] = {}
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        label = " ".join(str(entry.get("label", "")).split()).upper()
+        amount = str(entry.get("amount", "")).replace(",", "").strip()
+        if not label or not amount:
+            continue
+        try:
+            if decimal.Decimal(amount) <= 0:
+                continue
+        except decimal.InvalidOperation:
+            continue
+        seen.setdefault(label, amount)
+    return list(seen.items())
 
 
 class VisionUnavailableError(Exception):
@@ -339,6 +404,7 @@ class VisionSheetReader:
                 qty=str(row.get("qty", "")).strip(),
                 rate=str(row.get("rate", "")).strip(),
                 line_total=str(row.get("line_total", "")).strip(),
+                label=str(row.get("label", "")).strip(),
             )
             for row in payload.get("rows", [])
         ]
@@ -350,6 +416,7 @@ class VisionSheetReader:
             declared_total=str(payload.get("declared_total", "")),
             unreadable_note=str(payload.get("unreadable_note", "")),
             model=self._model,
+            charges=_charges_from(payload.get("charges")),
         )
 
     def _call(
@@ -496,6 +563,7 @@ class VisionSheetReader:
             unreadable_note=str(payload.get("unreadable_note", "")),
             model=self._model,
             brand=str(payload.get("brand", "")).strip(),
+            charges=_charges_from(payload.get("charges")),
         )
 
 
@@ -542,8 +610,18 @@ SALE_SCHEMA: dict[str, Any] = {
                             "it; '' if the sheet doesn't show one."
                         ),
                     },
+                    "label": {
+                        "type": "string",
+                        "description": (
+                            "The LABEL / BRAND column -- the brand this item is sold "
+                            "under (e.g. TOP, MKD, BSQ). Often repeats down the sheet. "
+                            "A FOLD column (F, FOLD, ROLL, OPEN, TUBE) says how the "
+                            "cloth is folded and is NOT a brand -- leave this '' rather "
+                            "than putting a fold marker in it. '' if absent."
+                        ),
+                    },
                 },
-                "required": ["code", "description", "qty", "rate", "line_total"],
+                "required": ["code", "description", "qty", "rate", "line_total", "label"],
                 "additionalProperties": False,
             },
         },
@@ -556,12 +634,39 @@ SALE_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": "The sheet's own grand total as written, else ''.",
         },
+        "charges": {
+            "type": "array",
+            "description": (
+                "Charges the note adds on top of the goods -- GST, packing, freight, "
+                "delivery. They appear either as their own columns to the right of the "
+                "item columns, or written at the foot. Give each ONCE for the whole "
+                "note, even if a column repeats the figure on every row. Do NOT include "
+                "the subtotal, the grand total, or any per-item rate or amount. Empty "
+                "list if the note shows none."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string", "description": "e.g. GST, PACKING."},
+                    "amount": {"type": "string", "description": "Plain number string."},
+                },
+                "required": ["label", "amount"],
+                "additionalProperties": False,
+            },
+        },
         "unreadable_note": {
             "type": "string",
             "description": "Brief note if parts were unreadable, else ''.",
         },
     },
-    "required": ["rows", "customer_name", "sale_date", "declared_total", "unreadable_note"],
+    "required": [
+        "rows",
+        "customer_name",
+        "sale_date",
+        "declared_total",
+        "charges",
+        "unreadable_note",
+    ],
     "additionalProperties": False,
 }
 
@@ -592,6 +697,8 @@ Columns you may see, under varying headers and in any order:
 - a quantity column (KG, Qty, Pcs)
 - a rate column (Rate, KG Rate, Price) -- often written like '200/-'
 - a line total column (Total, Amount)
+- a LABEL/BRAND column naming the brand each item is sold under
+- charge columns, or footer lines, for GST / packing / freight
 
 Also capture the customer or party name, the date, and the sheet's own \
 grand total if written."""
@@ -604,6 +711,9 @@ class VisionSaleRow:
     qty: str
     rate: str
     line_total: str
+    #: The row's own brand, so one note can sell the same code under two
+    #: of them -- the same column a purchase sheet carries.
+    label: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -614,3 +724,6 @@ class VisionSaleSheet:
     declared_total: str
     unreadable_note: str
     model: str
+    #: (label, amount) as written. Read but never applied silently: they
+    #: change what the customer owes, so the preview shows them.
+    charges: list[tuple[str, str]] = dataclasses.field(default_factory=list)

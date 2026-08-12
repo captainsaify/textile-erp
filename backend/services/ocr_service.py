@@ -303,6 +303,74 @@ class OcrService:
             return ZERO
         return value if value > ZERO else ZERO
 
+    @staticmethod
+    def _charges_from_sheet(charges: list[tuple[str, str]]) -> dict[str, decimal.Decimal]:
+        """The sheet's charge words as amounts, dropping anything unusable.
+
+        FREIGHT is separated by the caller because it has its own field:
+        it is allocated across the lines by weight and so changes landed
+        cost, where the rest only move the bill's total.
+        """
+        booked: dict[str, decimal.Decimal] = {}
+        for label, raw in charges:
+            # An amount with no word for it cannot be shown on the bill
+            # or corrected afterwards, so it is dropped rather than
+            # booked under a blank name.
+            name = " ".join(str(label).split()).upper()
+            if not name:
+                continue
+            try:
+                amount = decimal.Decimal(str(raw).replace(",", "").strip())
+            except (decimal.InvalidOperation, AttributeError):
+                continue
+            if amount > ZERO:
+                booked[name] = amount
+        return booked
+
+    async def _apply_row_brands(
+        self, org_id: uuid.UUID, rows: list[ExtractedRow], lines: list[DraftLine]
+    ) -> None:
+        """Give each line the brand its own row names, when they differ.
+
+        Only brands that already exist are attached. An unrecognised
+        label is left alone rather than created: a misread cell would
+        otherwise mint a brand, and the sheet has no way to say "this is
+        a new brand" that can be told apart from "this was read wrongly".
+        """
+        from sqlalchemy import func, select
+
+        from backend.models import Brand
+
+        labels = [
+            (field.text.strip() if (field := row.fields.get("label")) is not None else "")
+            for row in rows
+            if not self._is_noise_row(row)
+        ]
+        distinct = {
+            " ".join(label.split()).lower() for label in labels if self._is_brand(label.strip())
+        }
+        if len(distinct) < 2:
+            # One brand (or none) for the whole sheet: that is what the
+            # bill-level brand already says, and setting it per line too
+            # would just be the same answer written twice.
+            return
+
+        found = (
+            await self._session.execute(
+                select(func.lower(func.btrim(Brand.name)), Brand.id).where(
+                    Brand.org_id == org_id,
+                    Brand.deleted_at.is_(None),
+                    func.lower(func.btrim(Brand.name)).in_(distinct),
+                )
+            )
+        ).all()
+        by_name = {name: brand_id for name, brand_id in found}
+
+        for line, label in zip(lines, labels, strict=False):
+            brand_id = by_name.get(" ".join(label.split()).lower())
+            if brand_id is not None:
+                line.brand_id = brand_id
+
     @classmethod
     def _dominant_label(cls, rows: list[ExtractedRow]) -> str:
         """The brand the sheet is for.
@@ -451,6 +519,7 @@ class OcrService:
         invoice_date: datetime.date | None = None,
         brand_id: uuid.UUID | None = None,
         brand_name: str = "",
+        charges: list[tuple[str, str]] | None = None,
     ) -> DraftBuild:
         """ParsedSheet -> the same Draft the typed command produces, so
         both paths share one confirmation flow."""
@@ -526,6 +595,14 @@ class OcrService:
         # it from a FOLD column is how every row's brand became "F".
         sheet_label = brand_name.strip() or self._dominant_label(sheet.extraction.rows)
 
+        # Each row's own label, when the sheet gives different ones. A
+        # bill with 55X under BSQ and 55X under AR on consecutive rows is
+        # two products, and collapsing the column to one "dominant" brand
+        # is what forced that bill to be entered as two.
+        await self._apply_row_brands(org_id, sheet.extraction.rows, lines)
+
+        booked = self._charges_from_sheet(charges or [])
+
         draft = Draft(
             supplier_id=supplier_id,
             supplier_name=supplier_name,
@@ -534,9 +611,10 @@ class OcrService:
             brand_id=brand_id,
             brand_name=sheet_label or None,
             lines=lines,
-            freight=ZERO,
-            other_charges=ZERO,
+            freight=booked.pop("FREIGHT", ZERO),
+            other_charges=sum(booked.values(), ZERO),
             declared_total=None,
+            charges=booked,
         )
         return DraftBuild(
             draft=draft,
