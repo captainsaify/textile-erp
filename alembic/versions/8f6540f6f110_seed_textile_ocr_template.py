@@ -63,7 +63,5 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute(
-        sa.text("DELETE FROM ocr_templates WHERE id = CAST(:id AS uuid)").bindparams(
-            id=TEMPLATE_ID
-        )
+        sa.text("DELETE FROM ocr_templates WHERE id = CAST(:id AS uuid)").bindparams(id=TEMPLATE_ID)
     )

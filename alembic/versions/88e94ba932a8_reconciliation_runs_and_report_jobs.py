@@ -32,48 +32,88 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.create_table('reconciliation_runs',
-    sa.Column('kind', sa.String(), nullable=False),
-    sa.Column('status', sa.String(), nullable=False),
-    sa.Column('checked_count', sa.Integer(), server_default=sa.text('0'), nullable=False),
-    sa.Column('mismatch_count', sa.Integer(), server_default=sa.text('0'), nullable=False),
-    sa.Column('details', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-    sa.Column('acknowledged_at', postgresql.TIMESTAMP(timezone=True), nullable=True),
-    sa.Column('acknowledged_by', sa.UUID(), nullable=True),
-    sa.Column('started_at', postgresql.TIMESTAMP(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.Column('finished_at', postgresql.TIMESTAMP(timezone=True), nullable=True),
-    sa.Column('id', sa.UUID(), server_default=sa.text('gen_random_uuid()'), nullable=False),
-    sa.Column('org_id', sa.UUID(), nullable=False),
-    sa.CheckConstraint("kind IN ('inventory','ledger')", name=op.f('ck_reconciliation_runs_kind_valid')),
-    sa.CheckConstraint("status IN ('ok','mismatch','failed')", name=op.f('ck_reconciliation_runs_status_valid')),
-    sa.ForeignKeyConstraint(['acknowledged_by'], ['users.id'], name=op.f('fk_reconciliation_runs_acknowledged_by_users')),
-    sa.ForeignKeyConstraint(['org_id'], ['organizations.id'], name=op.f('fk_reconciliation_runs_org_id_organizations')),
-    sa.PrimaryKeyConstraint('id', name=op.f('pk_reconciliation_runs'))
+    op.create_table(
+        "reconciliation_runs",
+        sa.Column("kind", sa.String(), nullable=False),
+        sa.Column("status", sa.String(), nullable=False),
+        sa.Column("checked_count", sa.Integer(), server_default=sa.text("0"), nullable=False),
+        sa.Column("mismatch_count", sa.Integer(), server_default=sa.text("0"), nullable=False),
+        sa.Column("details", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("acknowledged_at", postgresql.TIMESTAMP(timezone=True), nullable=True),
+        sa.Column("acknowledged_by", sa.UUID(), nullable=True),
+        sa.Column(
+            "started_at",
+            postgresql.TIMESTAMP(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column("finished_at", postgresql.TIMESTAMP(timezone=True), nullable=True),
+        sa.Column("id", sa.UUID(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("org_id", sa.UUID(), nullable=False),
+        sa.CheckConstraint(
+            "kind IN ('inventory','ledger')", name=op.f("ck_reconciliation_runs_kind_valid")
+        ),
+        sa.CheckConstraint(
+            "status IN ('ok','mismatch','failed')", name=op.f("ck_reconciliation_runs_status_valid")
+        ),
+        sa.ForeignKeyConstraint(
+            ["acknowledged_by"],
+            ["users.id"],
+            name=op.f("fk_reconciliation_runs_acknowledged_by_users"),
+        ),
+        sa.ForeignKeyConstraint(
+            ["org_id"],
+            ["organizations.id"],
+            name=op.f("fk_reconciliation_runs_org_id_organizations"),
+        ),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_reconciliation_runs")),
     )
-    op.create_index('idx_reconciliation_runs_org_kind', 'reconciliation_runs', ['org_id', 'kind', 'started_at'], unique=False)
-    op.create_index(op.f('ix_reconciliation_runs_org_id'), 'reconciliation_runs', ['org_id'], unique=False)
-    op.create_table('report_jobs',
-    sa.Column('report_type', sa.String(), nullable=False),
-    sa.Column('output_format', sa.String(), server_default='excel', nullable=False),
-    sa.Column('period_start', sa.Date(), nullable=True),
-    sa.Column('period_end', sa.Date(), nullable=True),
-    sa.Column('status', sa.String(), server_default='queued', nullable=False),
-    sa.Column('file_path', sa.String(), nullable=True),
-    sa.Column('file_size_bytes', sa.Integer(), nullable=True),
-    sa.Column('row_count', sa.Integer(), nullable=True),
-    sa.Column('error', sa.String(), nullable=True),
-    sa.Column('expires_at', postgresql.TIMESTAMP(timezone=True), nullable=True),
-    sa.Column('created_at', postgresql.TIMESTAMP(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.Column('created_by', sa.UUID(), nullable=False),
-    sa.Column('id', sa.UUID(), server_default=sa.text('gen_random_uuid()'), nullable=False),
-    sa.Column('org_id', sa.UUID(), nullable=False),
-    sa.CheckConstraint("status IN ('queued','generating','ready','failed')", name=op.f('ck_report_jobs_status_valid')),
-    sa.ForeignKeyConstraint(['created_by'], ['users.id'], name=op.f('fk_report_jobs_created_by_users')),
-    sa.ForeignKeyConstraint(['org_id'], ['organizations.id'], name=op.f('fk_report_jobs_org_id_organizations')),
-    sa.PrimaryKeyConstraint('id', name=op.f('pk_report_jobs'))
+    op.create_index(
+        "idx_reconciliation_runs_org_kind",
+        "reconciliation_runs",
+        ["org_id", "kind", "started_at"],
+        unique=False,
     )
-    op.create_index('idx_report_jobs_org_created', 'report_jobs', ['org_id', 'created_at'], unique=False)
-    op.create_index(op.f('ix_report_jobs_org_id'), 'report_jobs', ['org_id'], unique=False)
+    op.create_index(
+        op.f("ix_reconciliation_runs_org_id"), "reconciliation_runs", ["org_id"], unique=False
+    )
+    op.create_table(
+        "report_jobs",
+        sa.Column("report_type", sa.String(), nullable=False),
+        sa.Column("output_format", sa.String(), server_default="excel", nullable=False),
+        sa.Column("period_start", sa.Date(), nullable=True),
+        sa.Column("period_end", sa.Date(), nullable=True),
+        sa.Column("status", sa.String(), server_default="queued", nullable=False),
+        sa.Column("file_path", sa.String(), nullable=True),
+        sa.Column("file_size_bytes", sa.Integer(), nullable=True),
+        sa.Column("row_count", sa.Integer(), nullable=True),
+        sa.Column("error", sa.String(), nullable=True),
+        sa.Column("expires_at", postgresql.TIMESTAMP(timezone=True), nullable=True),
+        sa.Column(
+            "created_at",
+            postgresql.TIMESTAMP(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column("created_by", sa.UUID(), nullable=False),
+        sa.Column("id", sa.UUID(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("org_id", sa.UUID(), nullable=False),
+        sa.CheckConstraint(
+            "status IN ('queued','generating','ready','failed')",
+            name=op.f("ck_report_jobs_status_valid"),
+        ),
+        sa.ForeignKeyConstraint(
+            ["created_by"], ["users.id"], name=op.f("fk_report_jobs_created_by_users")
+        ),
+        sa.ForeignKeyConstraint(
+            ["org_id"], ["organizations.id"], name=op.f("fk_report_jobs_org_id_organizations")
+        ),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_report_jobs")),
+    )
+    op.create_index(
+        "idx_report_jobs_org_created", "report_jobs", ["org_id", "created_at"], unique=False
+    )
+    op.create_index(op.f("ix_report_jobs_org_id"), "report_jobs", ["org_id"], unique=False)
 
 
 def downgrade() -> None:

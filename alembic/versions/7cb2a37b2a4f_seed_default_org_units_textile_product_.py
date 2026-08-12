@@ -14,14 +14,15 @@ Revises: 1eca2cb3e208
 Create Date: 2026-07-25 15:35:00.000000
 
 """
+
 from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = '7cb2a37b2a4f'
-down_revision: Union[str, Sequence[str], None] = '1eca2cb3e208'
+revision: str = "7cb2a37b2a4f"
+down_revision: Union[str, Sequence[str], None] = "1eca2cb3e208"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -95,7 +96,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute(
-        sa.text("DELETE FROM warehouses WHERE id = CAST(:id AS uuid)").bindparams(id=MAIN_WAREHOUSE_ID)
+        sa.text("DELETE FROM warehouses WHERE id = CAST(:id AS uuid)").bindparams(
+            id=MAIN_WAREHOUSE_ID
+        )
     )
     op.execute(
         sa.text("DELETE FROM product_types WHERE id = CAST(:id AS uuid)").bindparams(
@@ -104,4 +107,6 @@ def downgrade() -> None:
     )
     for unit_id in UNIT_IDS.values():
         op.execute(sa.text("DELETE FROM units WHERE id = CAST(:id AS uuid)").bindparams(id=unit_id))
-    op.execute(sa.text("DELETE FROM organizations WHERE id = CAST(:id AS uuid)").bindparams(id=ORG_ID))
+    op.execute(
+        sa.text("DELETE FROM organizations WHERE id = CAST(:id AS uuid)").bindparams(id=ORG_ID)
+    )

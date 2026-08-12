@@ -28,13 +28,21 @@ class PurchaseHeader(UUIDPkMixin, OrgScopedMixin, Base):
     __table_args__ = (
         # Exact-duplicate guard, soft-delete-aware (§4); the fuzzy guard is
         # application-level -- docs/04_Purchases.md#duplicate-detection.
+        #
+        # Only *confirmed* bills reserve their number. Without the status
+        # clause a cancelled bill held its invoice number for ever, and
+        # since an exact duplicate cannot be overridden, the correction
+        # this system recommends -- undo it and enter it again -- was
+        # impossible on any bill that had been entered once. A number
+        # can legitimately be cancelled several times before it goes in
+        # correctly.
         Index(
             "purchase_headers_org_supplier_invoice_active_uq",
             "org_id",
             "supplier_id",
             "invoice_no",
             unique=True,
-            postgresql_where=text("deleted_at IS NULL"),
+            postgresql_where=text("deleted_at IS NULL AND status = 'confirmed'"),
         ),
         CheckConstraint(
             "freight_allocation_method IN ('by_weight','by_value','by_qty','manual')",
