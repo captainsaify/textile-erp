@@ -238,5 +238,90 @@ const Charts = (() => {
     container.append(legend);
   }
 
-  return { profitColumns, revenueColumns };
+  /** Spending by category, biggest first.
+   *
+   * Horizontal bars rather than a pie: these are named categories whose
+   * job is to be compared and read, and a category name set sideways
+   * around a circle is neither. One measure, so one hue -- the colour
+   * carries magnitude, and identity is carried by the label beside each
+   * bar, never by colour alone.
+   */
+  function expenseBars(container, rows) {
+    container.replaceChildren();
+    if (!rows.length) {
+      container.append(
+        Object.assign(document.createElement("p"), {
+          className: "muted",
+          textContent: "Nothing spent in this period.",
+        }),
+      );
+      return;
+    }
+
+    const shown = rows.slice(0, 8);
+    const rowHeight = 30;
+    const width = 520;
+    const pad = { top: 8, right: 96, bottom: 8, left: 118 };
+    const height = pad.top + pad.bottom + shown.length * rowHeight;
+    const max = Math.max(...shown.map((r) => Money.toPlotValue(r.total)));
+    const span = width - pad.left - pad.right;
+
+    const svg = el("svg", {
+      viewBox: `0 0 ${width} ${height}`,
+      class: "svg-chart",
+      role: "img",
+      "aria-label": "Spending by category",
+    });
+
+    shown.forEach((row, index) => {
+      const value = Money.toPlotValue(row.total);
+      const barWidth = max > 0 ? Math.max(2, (value / max) * span) : 2;
+      const y = pad.top + index * rowHeight;
+
+      svg.append(
+        el(
+          "text",
+          {
+            x: pad.left - 10,
+            y: y + rowHeight / 2 + 4,
+            class: "mark-label",
+            "text-anchor": "end",
+          },
+          row.category.length > 16 ? `${row.category.slice(0, 15)}…` : row.category,
+        ),
+      );
+
+      const bar = el("rect", {
+        x: pad.left,
+        y: y + 5,
+        width: barWidth,
+        height: rowHeight - 14,
+        rx: 4,
+        class: "bar bar-profit",
+      });
+      svg.append(bar);
+      attachHover(
+        container,
+        bar,
+        `<strong>${row.category}</strong><br>${Money.format(row.total)} · ${row.share}%` +
+          `<br>${row.count} ${row.count === 1 ? "entry" : "entries"}`,
+      );
+
+      svg.append(
+        el(
+          "text",
+          {
+            x: pad.left + barWidth + 8,
+            y: y + rowHeight / 2 + 4,
+            class: "mark-label",
+          },
+          Money.compact(row.total),
+        ),
+      );
+    });
+
+    container.append(svg);
+  }
+
+  return { profitColumns, revenueColumns, expenseBars };
 })();

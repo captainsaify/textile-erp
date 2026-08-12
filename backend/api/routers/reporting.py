@@ -205,6 +205,65 @@ async def _payment_references(
     return references
 
 
+@router.get("/expenses")
+async def expenses(
+    user: CurrentUser,
+    session: Session,
+    date_from: Annotated[datetime.date | None, Query()] = None,
+    date_to: Annotated[datetime.date | None, Query()] = None,
+) -> dict[str, Any]:
+    """What the business spent, and on what.
+
+    Expenses were visible only as a single `operating_expenses` figure
+    inside the month's profit -- a number with nothing behind it. Three
+    partners spend from one cash box, so "₹27,940 this month" is not an
+    answer to anything; ₹21,200 of flights and ₹1,780 of personal is.
+
+    Not owner-only. Staff record most of these, and a person who can add
+    an expense but cannot see the list has no way to tell whether theirs
+    went in twice.
+    """
+    from backend.repositories.accounting_repository import ExpenseRepository
+
+    today = await business_today(session, user.org_id)
+    start = date_from or today.replace(day=1)
+    end = date_to or today
+
+    repo = ExpenseRepository(session)
+    rows = await repo.in_period(user.org_id, start, end)
+    grouped = await repo.by_category(user.org_id, start, end)
+    total = sum((amount for _, amount, _ in grouped), decimal.Decimal("0"))
+
+    return {
+        "period": {"from": start.isoformat(), "to": end.isoformat()},
+        "total": money_str(total),
+        "count": sum(count for _, _, count in grouped),
+        "by_category": [
+            {
+                "category": category,
+                "total": money_str(amount),
+                "count": count,
+                # Computed here rather than in the browser so the figure
+                # in a shared screenshot matches the one in an export.
+                "share": (f"{(amount / total * 100):.1f}" if total else "0.0"),
+            }
+            for category, amount, count in grouped
+        ],
+        "entries": [
+            {
+                "id": str(row.id)[:8],
+                "date": row.entry_date.isoformat(),
+                "category": row.category,
+                "amount": money_str(row.amount),
+                "paid_via": row.paid_via,
+                "description": row.description or "",
+                "spent_by": row.spent_by,
+            }
+            for row in rows
+        ],
+    }
+
+
 class ExportRequest(BaseModel):
     type: str
     date_from: datetime.date | None = None

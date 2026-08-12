@@ -1121,6 +1121,97 @@
     );
   }
 
+  // -------------------------------------------------------- expenses
+
+  let expenseRows = [];
+  let expenseCategory = null;
+
+  function expensePeriod() {
+    const today = new Date();
+    const iso = (d) => d.toISOString().slice(0, 10);
+    switch ($("expense-period").value) {
+      case "last30": {
+        const from = new Date(today);
+        from.setDate(from.getDate() - 29);
+        return `?date_from=${iso(from)}&date_to=${iso(today)}`;
+      }
+      case "year":
+        return `?date_from=${today.getFullYear()}-01-01&date_to=${iso(today)}`;
+      default:
+        return ""; // the API defaults to this month
+    }
+  }
+
+  async function loadExpenses() {
+    const data = await api(`/expenses${expensePeriod()}`);
+    expenseRows = data.entries || [];
+
+    $("expense-kpis").innerHTML = [
+      kpi("Spent", Money.format(data.total), `${data.count} entries`),
+      kpi(
+        "Biggest category",
+        data.by_category.length ? data.by_category[0].category : "—",
+        data.by_category.length
+          ? `${Money.format(data.by_category[0].total)} · ${data.by_category[0].share}%`
+          : "",
+      ),
+      kpi("Categories", String(data.by_category.length), "in this period"),
+    ].join("");
+
+    Charts.expenseBars($("chart-expenses"), data.by_category);
+
+    $("expense-categories").replaceChildren(
+      table(
+        [
+          { label: "Category", key: "category" },
+          { label: "Spent", numeric: true, render: (row) => money(row.total) },
+          { label: "Share", numeric: true, render: (row) => `${row.share}%` },
+          { label: "Entries", numeric: true, key: "count" },
+        ],
+        data.by_category,
+        {
+          onRowClick: (row) => {
+            // Second click on the same category clears it, so the filter
+            // can be undone without hunting for a reset control.
+            expenseCategory =
+              expenseCategory === row.category ? null : row.category;
+            renderExpenses();
+          },
+        },
+      ),
+    );
+    renderExpenses();
+  }
+
+  function renderExpenses() {
+    const term = $("expense-search").value.trim().toLowerCase();
+    const rows = expenseRows.filter((row) => {
+      if (expenseCategory && row.category !== expenseCategory) return false;
+      if (!term) return true;
+      return [row.category, row.description, row.spent_by, row.paid_via]
+        .map((v) => String(v ?? "").toLowerCase())
+        .some((v) => v.includes(term));
+    });
+
+    $("expense-filter-note").textContent = expenseCategory
+      ? `showing ${expenseCategory} — click it again to clear`
+      : "";
+
+    $("expense-table").replaceChildren(
+      table(
+        [
+          { label: "Date", key: "date" },
+          { label: "Category", key: "category" },
+          { label: "Note", render: (row) => row.description || "—" },
+          { label: "Paid via", key: "paid_via" },
+          { label: "By", key: "spent_by" },
+          { label: "Amount", numeric: true, render: (row) => money(row.amount) },
+        ],
+        rows,
+      ),
+    );
+  }
+
   // ----------------------------------------------------------- admin
 
   async function loadAdmin() {
@@ -1369,6 +1460,7 @@
     parties: loadParties,
     ledger: loadLedger,
     money: loadMoney,
+    expenses: loadExpenses,
     admin: loadAdmin,
   };
 
@@ -1397,6 +1489,15 @@
   $("ledger-search").addEventListener("input", renderLedger);
   $("audit-action").addEventListener("change", renderAudit);
   $("audit-search").addEventListener("input", renderAudit);
+  $("expense-search").addEventListener("input", renderExpenses);
+  // Changing the period refetches; the category filter is dropped with
+  // it, since a category that had spending last month may have none in
+  // the new window and the list would come back empty for no visible
+  // reason.
+  $("expense-period").addEventListener("change", () => {
+    expenseCategory = null;
+    loadExpenses().catch((exc) => banner(exc.message));
+  });
   document.querySelectorAll("#nav button").forEach((button) => {
     button.addEventListener("click", () => showPage(button.dataset.page));
   });

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Textile ERP</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=11" />
+    <link rel="stylesheet" href="/assets/styles.css?v=12" />
     <link
       rel="icon"
       href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>"
@@ -51,6 +51,7 @@
           <button data-page="parties">Parties</button>
           <button data-page="ledger">Ledger</button>
           <button data-page="money">Money</button>
+          <button data-page="expenses">Expenses</button>
           <button data-page="admin">Admin</button>
         </nav>
         <div class="topbar-end">
@@ -202,6 +203,47 @@
           </div>
         </section>
 
+        <section id="page-expenses" class="page" hidden>
+          <div id="expense-kpis" class="kpi-row"></div>
+          <div class="grid-2">
+            <section class="card">
+              <div class="card-head">
+                <h2>Where it went</h2>
+                <div class="filters">
+                  <select id="expense-period">
+                    <option value="month">This month</option>
+                    <option value="last30">Last 30 days</option>
+                    <option value="year">This year</option>
+                  </select>
+                </div>
+              </div>
+              <p class="muted">Biggest first. Click a category to filter the list.</p>
+              <div id="expense-categories" class="table-scroll"></div>
+            </section>
+            <figure class="card">
+              <figcaption>
+                <h2>Share of spending</h2>
+                <p class="muted">By category, for the period</p>
+              </figcaption>
+              <div id="chart-expenses" class="chart"></div>
+            </figure>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <h2>Every expense</h2>
+              <div class="filters">
+                <input
+                  id="expense-search"
+                  type="search"
+                  placeholder="Search category, note or person"
+                />
+                <span id="expense-filter-note" class="muted"></span>
+              </div>
+            </div>
+            <div id="expense-table" class="table-scroll"></div>
+          </div>
+        </section>
+
         <section id="page-admin" class="page" hidden>
           <div class="card">
             <h2>Nightly reconciliation</h2>
@@ -234,8 +276,8 @@
       <p id="banner" class="banner" role="status" hidden></p>
     </div>
 
-    <script src="/assets/money.js?v=11"></script>
-    <script src="/assets/charts.js?v=11"></script>
-    <script src="/assets/app.js?v=11"></script>
+    <script src="/assets/money.js?v=12"></script>
+    <script src="/assets/charts.js?v=12"></script>
+    <script src="/assets/app.js?v=12"></script>
   </body>
 </html>

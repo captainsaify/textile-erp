@@ -6,6 +6,7 @@ concurrent posts can't both read the same previous balance."""
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import decimal
 import uuid
@@ -24,10 +25,25 @@ from backend.models import (
     Journal,
     JournalLine,
     PartnerCapital,
+    User,
 )
 from backend.models.enums import CapitalEntryType, LedgerEntryType
 
 LedgerModel = type[CashLedger] | type[BankLedger]
+
+
+@dataclasses.dataclass(frozen=True)
+class ExpenseRow:
+    """One expense, with the person who recorded it."""
+
+    id: uuid.UUID
+    entry_date: datetime.date
+    category: str
+    amount: decimal.Decimal
+    paid_via: str
+    description: str | None
+    spent_by: str
+
 
 _LEDGERS: dict[str, LedgerModel] = {"cash": CashLedger, "bank": BankLedger}
 
@@ -444,6 +460,68 @@ class ExpenseRepository:
             .distinct()
         )
         return list((await self._session.execute(stmt)).scalars())
+
+    async def in_period(
+        self, org_id: uuid.UUID, start: datetime.date, end: datetime.date, *, limit: int = 500
+    ) -> list[ExpenseRow]:
+        """Every expense in the window, newest first, with who paid it.
+
+        Joined to `users` rather than resolved caller-side: three
+        partners spend from one cash box, and an expenses page that
+        cannot say who spent it answers half the question people
+        actually have about it.
+        """
+        stmt = (
+            select(
+                Expense.id,
+                Expense.expense_date,
+                Expense.category,
+                Expense.amount,
+                Expense.paid_via,
+                Expense.description,
+                User.full_name,
+            )
+            .join(User, User.id == Expense.created_by)
+            .where(
+                Expense.org_id == org_id,
+                Expense.deleted_at.is_(None),
+                Expense.expense_date >= start,
+                Expense.expense_date <= end,
+            )
+            .order_by(Expense.expense_date.desc(), Expense.created_at.desc())
+            .limit(limit)
+        )
+        return [
+            ExpenseRow(
+                id=row[0],
+                entry_date=row[1],
+                category=row[2],
+                amount=row[3],
+                paid_via=row[4],
+                description=row[5],
+                spent_by=row[6],
+            )
+            for row in (await self._session.execute(stmt)).all()
+        ]
+
+    async def by_category(
+        self, org_id: uuid.UUID, start: datetime.date, end: datetime.date
+    ) -> list[tuple[str, decimal.Decimal, int]]:
+        """(category, total, count), biggest first -- which is the order
+        the question "where is the money going" wants them in."""
+        total = func.sum(Expense.amount)
+        stmt = (
+            select(Expense.category, total, func.count())
+            .where(
+                Expense.org_id == org_id,
+                Expense.deleted_at.is_(None),
+                Expense.expense_date >= start,
+                Expense.expense_date <= end,
+            )
+            .group_by(Expense.category)
+            .order_by(total.desc())
+        )
+        return [(row[0], row[1], row[2]) for row in (await self._session.execute(stmt)).all()]
 
 
 class IncomeRepository:
