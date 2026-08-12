@@ -116,6 +116,12 @@ class PurchaseHeader(UUIDPkMixin, OrgScopedMixin, Base):
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )
     deleted_at: Mapped[datetime.datetime | None]
+    #: Set alongside `deleted_at` by `erp purge` (docs/31_AdminCLI.md).
+    #: `deleted_at` is what hides the row -- every query already filters
+    #: on it. This only distinguishes "purged, should never have been
+    #: entered" from "soft-deleted, was cancelled", so `restore-purged`
+    #: cannot resurrect something that was merely cancelled.
+    purged_at: Mapped[datetime.datetime | None]
 
     lines: Mapped[list[PurchaseLine]] = relationship(
         back_populates="header", order_by="PurchaseLine.line_no"

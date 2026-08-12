@@ -27,6 +27,7 @@ dependencies = [
     "anthropic>=0.69",
     "celery[redis]>=5.4",
     "openpyxl>=3.1.5",
+    "agentops>=0.4.21",
 ]
 
 [dependency-groups]

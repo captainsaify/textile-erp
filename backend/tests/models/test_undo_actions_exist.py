@@ -71,7 +71,12 @@ def test_the_dispatch_table_matches_the_registry() -> None:
 
     from backend.services import undo_service
 
-    source = inspect.getsource(undo_service.UndoService.undo)
+    # `undo` is now a thin transaction wrapper around
+    # `undo_in_transaction` (the admin CLI needs to own the transaction
+    # so it can roll back on a failed reconciliation). The dispatch table
+    # moved with the body, so read it where it actually lives -- reading
+    # the wrapper would pass vacuously the day a handler goes missing.
+    source = inspect.getsource(undo_service.UndoService.undo_in_transaction)
     for action in ("purchase.confirmed", "sale.created", "expense.created", "income.created"):
         assert f'"{action}"' in source, (
             f"{action} is undoable but has no handler; undo would raise KeyError "

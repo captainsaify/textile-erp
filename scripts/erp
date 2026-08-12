@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+#
+# `erp` -- the admin CLI, from anywhere on the box.
+#
+# Install: sudo install -m 0755 scripts/erp /usr/local/bin/erp
+#
+# This wrapper exists for one reason, and it is not convenience. The
+# live database lives inside the `api` container; PostgreSQL on the
+# host's localhost:5432 is a stale copy left over from an earlier
+# deployment. Running the CLI on the host would connect to that copy,
+# report success, and edit a database nobody reads -- which is worse
+# than failing, because it looks like the repair worked.
+#
+# Running through `compose exec` makes that mistake impossible: the
+# only database reachable from inside the container is the real one.
+set -euo pipefail
+
+COMPOSE_FILE="${ERP_COMPOSE_FILE:-/home/ubuntu/textile-erp/docker-compose.yml}"
+
+[ -f "$COMPOSE_FILE" ] || {
+  printf '\033[31mERROR:\033[0m no compose file at %s\n' "$COMPOSE_FILE" >&2
+  printf '        set ERP_COMPOSE_FILE if the repo lives elsewhere.\n' >&2
+  exit 1
+}
+
+# -T only when stdin is not a terminal. With a TTY, `confirm` can read
+# the typed invoice number; without one -- in a pipeline or from cron --
+# allocating a TTY fails outright.
+TTY_FLAG=()
+[ -t 0 ] || TTY_FLAG=(-T)
+
+exec docker compose -f "$COMPOSE_FILE" exec "${TTY_FLAG[@]}" api \
+  python -m backend.admin "$@"

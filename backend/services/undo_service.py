@@ -209,35 +209,62 @@ class UndoService:
         reference: str | None = None,
         whatsapp_message_id: str | None = None,
     ) -> UndoResult:
-        org_id = actor.org_id
+        """Reverse a transaction, managing the transaction itself.
+
+        This is the entry point for every caller that is not already
+        inside one -- WhatsApp, the API, the dashboard."""
         async with self._session.begin():
-            entry = await self._resolve_entry(actor, entity, reference)
-            self._check_permission(actor, entry)
-            if await self._audit_repo.was_undone(org_id, entry.entity_id):
-                raise ValidationError("That entry has already been undone.")
-
-            today = await business_today(self._session, org_id)
-            handlers = {
-                "purchase.confirmed": self._undo_purchase,
-                "sale.created": self._undo_sale,
-                "expense.created": self._undo_expense,
-                "income.created": self._undo_income,
-                "capital.contribution": self._undo_capital,
-                "capital.withdrawal": self._undo_capital,
-            }
-            result = await handlers[entry.action](actor, entry, today)
-
-            await self._audit.record(
-                org_id,
-                actor.id,
-                action=f"{entry.action}.undone",
-                entity_type=entry.entity_type,
-                entity_id=entry.entity_id,
-                before_state=entry.after_state,
-                after_state={"undone": True, "original_action": entry.action},
+            return await self.undo_in_transaction(
+                actor,
+                entity=entity,
+                reference=reference,
                 whatsapp_message_id=whatsapp_message_id,
             )
-            return result
+
+    async def undo_in_transaction(
+        self,
+        actor: User,
+        *,
+        entity: str | None = None,
+        reference: str | None = None,
+        whatsapp_message_id: str | None = None,
+    ) -> UndoResult:
+        """The same work, for a caller that already holds the transaction.
+
+        The admin CLI needs this: it commits only if reconciliation still
+        passes afterwards, which means the reversal and the check have to
+        share one transaction it can roll back. `session.begin()` raises
+        if a transaction is already open, so the two entry points exist
+        rather than one that guesses (docs/31_AdminCLI.md §3.1, and the
+        autobegin trap in HANDOFF.md §5)."""
+        org_id = actor.org_id
+        entry = await self._resolve_entry(actor, entity, reference)
+        self._check_permission(actor, entry)
+        if await self._audit_repo.was_undone(org_id, entry.entity_id):
+            raise ValidationError("That entry has already been undone.")
+
+        today = await business_today(self._session, org_id)
+        handlers = {
+            "purchase.confirmed": self._undo_purchase,
+            "sale.created": self._undo_sale,
+            "expense.created": self._undo_expense,
+            "income.created": self._undo_income,
+            "capital.contribution": self._undo_capital,
+            "capital.withdrawal": self._undo_capital,
+        }
+        result = await handlers[entry.action](actor, entry, today)
+
+        await self._audit.record(
+            org_id,
+            actor.id,
+            action=f"{entry.action}.undone",
+            entity_type=entry.entity_type,
+            entity_id=entry.entity_id,
+            before_state=entry.after_state,
+            after_state={"undone": True, "original_action": entry.action},
+            whatsapp_message_id=whatsapp_message_id,
+        )
+        return result
 
     # --- per-type reversals -------------------------------------------
 

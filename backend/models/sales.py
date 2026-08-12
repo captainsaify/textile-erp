@@ -97,6 +97,8 @@ class SalesHeader(UUIDPkMixin, OrgScopedMixin, Base):
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )
     deleted_at: Mapped[datetime.datetime | None]
+    #: See PurchaseHeader.purged_at -- same meaning, same reason.
+    purged_at: Mapped[datetime.datetime | None]
 
     lines: Mapped[list[SalesLine]] = relationship(
         back_populates="header", order_by="SalesLine.line_no"
