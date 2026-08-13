@@ -377,6 +377,17 @@ async def export_status(job_id: str, user: CurrentUser, session: Session) -> dic
     }
 
 
+def _qty(value: decimal.Decimal | None) -> str:
+    """A quantity a person can read.
+
+    `Decimal.normalize()` alone renders 2480 as `2.48E+3` -- correct,
+    and unreadable on a dashboard next to a rupee figure. `format(..,
+    "f")` keeps it positional while still dropping the trailing zeros
+    that make a count look like a measurement.
+    """
+    return format(decimal.Decimal(value or 0).normalize(), "f")
+
+
 @router.get("/metrics/products")
 async def product_performance(
     user: OwnerUser,
@@ -447,7 +458,7 @@ async def product_performance(
                 "code": code,
                 "brand": brand,
                 "description": description,
-                "qty": str(qty.normalize()),
+                "qty": _qty(qty),
                 "revenue": money_str(gross),
                 "cost": money_str(spent),
                 "profit": money_str(profit),
@@ -525,7 +536,7 @@ async def brand_performance(
         items.append(
             {
                 "brand": brand or "—",
-                "qty": str(decimal.Decimal(qty or 0).normalize()),
+                "qty": _qty(qty),
                 "revenue": money_str(gross),
                 "profit": money_str(profit),
                 "margin_pct": (
@@ -615,14 +626,14 @@ async def stock_health(
             "code": code,
             "brand": brand or "—",
             "description": description,
-            "on_hand": str(on_hand.normalize()),
+            "on_hand": _qty(on_hand),
             "value": money_str(on_hand * decimal.Decimal(cost or 0)),
-            "sold": str(sold.normalize()),
+            "sold": _qty(sold),
             "sale_count": sale_count or 0,
             "sold_over_days": days,
             "last_sold": last.isoformat() if last else None,
             "days_of_cover": cover,
-            "reorder_level": str(decimal.Decimal(level or 0).normalize()),
+            "reorder_level": _qty(level),
         }
         if on_hand <= 0 or (level and on_hand <= decimal.Decimal(level)):
             row["reason"] = "at or below reorder level"

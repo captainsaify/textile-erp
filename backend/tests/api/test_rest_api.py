@@ -1128,3 +1128,22 @@ async def test_analytics_are_owner_only(
     ):
         response = await client.get(path, headers=_auth(token))
         assert response.status_code == 403, f"{path} was readable by staff"
+
+
+async def test_quantities_are_not_rendered_in_scientific_notation(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """2,480 kg is not `2.48E+3`.
+
+    `Decimal.normalize()` produces an exponent whenever a number has
+    trailing zeros, which is most weights in kilograms. It is correct
+    and it is unreadable beside a rupee figure -- and it went out to the
+    live dashboard before anyone looked at the output.
+    """
+    await _sold_product(session_factory, owner, code="EEE", rate="100", cost_then="50", qty="2480")
+    token = await _token(client, owner)
+
+    body = (await client.get("/api/v1/metrics/products", headers=_auth(token))).json()
+    row = next(r for r in body["best_by_profit"] if r["code"] == "EEE")
+    assert row["qty"] == "2480", f"rendered as {row['qty']!r}"
+    assert "E" not in row["qty"].upper()
