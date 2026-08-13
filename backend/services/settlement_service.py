@@ -13,7 +13,7 @@ import decimal
 import uuid
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.exceptions import NotFoundError, ValidationError
@@ -41,6 +41,17 @@ class Allocation:
     reference: str
     applied: decimal.Decimal
     remaining: decimal.Decimal
+    #: The bill this landed on, by primary key.
+    #:
+    #: `reference` is an invoice number, and reversal used to resolve
+    #: bills by (party, invoice_no) alone. Both halves of that key are
+    #: mutable -- `erp merge` changes the party, `erp fix --invoice-no`
+    #: changes the number -- so a payment made before either operation
+    #: could no longer be found afterwards, and the reversal silently
+    #: unwound nothing while still moving the money in the ledger. An id
+    #: does not move. Older audit entries have no id and fall back to
+    #: the reference, which is why this is optional rather than required.
+    header_id: uuid.UUID | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -183,7 +194,12 @@ class SettlementService:
                     "entry_date": when.isoformat(),
                     "note": note,
                     "allocations": [
-                        {"reference": a.reference, "applied": str(a.applied)} for a in allocations
+                        {
+                            "reference": a.reference,
+                            "applied": str(a.applied),
+                            "header_id": str(a.header_id) if a.header_id else None,
+                        }
+                        for a in allocations
                     ],
                     "advance": str(advance),
                 },
@@ -283,7 +299,12 @@ class SettlementService:
                     "entry_date": when.isoformat(),
                     "note": note,
                     "allocations": [
-                        {"reference": a.reference, "applied": str(a.applied)} for a in allocations
+                        {
+                            "reference": a.reference,
+                            "applied": str(a.applied),
+                            "header_id": str(a.header_id) if a.header_id else None,
+                        }
+                        for a in allocations
                     ],
                     "advance": str(advance),
                 },
@@ -349,6 +370,7 @@ class SettlementService:
                     reference=reference,
                     applied=applied,
                     remaining=(header.grand_total - header.amount_paid),
+                    header_id=header.id,
                 )
             )
         return allocations, remaining
@@ -422,9 +444,20 @@ class PaymentReversalService:
             allocations = state.get("allocations") or []
             is_payment = entry.action == "payment.paid"
 
-            party_name, outstanding_after, unapplied = await self._unapply(
+            party_name, outstanding_after, unapplied, orphaned = await self._unapply(
                 org_id, entry, allocations, is_payment=is_payment
             )
+            if orphaned:
+                # Loud, not logged. The money has moved in the ledger and
+                # these bills still show settled; someone has to know
+                # which, and a warning in a file nobody opens is not that.
+                raise ValidationError(
+                    "That payment cannot be fully reversed: "
+                    + ", ".join(orphaned)
+                    + " could not be matched to a bill. They were probably moved by a "
+                    "merge or renumbered since the payment was recorded. Reverse it "
+                    "after putting those bills back, or settle them by hand."
+                )
 
             # money back the way it came
             ledger_row = await self._ledgers.append(
@@ -478,6 +511,52 @@ class PaymentReversalService:
                 unapplied=unapplied,
             )
 
+    async def _allocated_header(
+        self,
+        org_id: uuid.UUID,
+        allocation: Any,
+        *,
+        model: Any,
+        party_column: Any,
+        party_id: uuid.UUID,
+    ) -> Any:
+        """Find the bill an allocation landed on.
+
+        By primary key when the entry has one, because an id survives
+        everything. Falling back to (party, invoice number) only for
+        entries written before header_id was recorded -- and that key is
+        exactly what `merge` and `fix --invoice-no` invalidate, so the
+        fallback is best-effort by nature and its failure is reported
+        rather than swallowed.
+        """
+        raw_id = allocation.get("header_id")
+        if raw_id:
+            try:
+                header = await self._session.get(model, uuid.UUID(str(raw_id)))
+            except ValueError:
+                header = None
+            if header is not None and header.org_id == org_id:
+                return header
+
+        reference = str(allocation.get("reference", ""))
+        if not reference:
+            return None
+        stmt = select(model).where(model.org_id == org_id, model.deleted_at.is_(None))
+        if model.__name__ == "PurchaseHeader":
+            stmt = stmt.where(
+                party_column == party_id,
+                func.lower(model.invoice_no) == reference.lower(),
+            )
+        else:
+            stmt = stmt.where(
+                party_column == party_id,
+                # cast(..., String), never func.text().type -- that is a
+                # NullType and will not compile. Same mistake, twice, in
+                # one day: it reads like a type and is a function call.
+                cast(model.id, String).ilike(f"{reference.lower()}%"),
+            )
+        return (await self._session.execute(stmt)).scalars().first()
+
     async def _unapply(
         self,
         org_id: uuid.UUID,
@@ -485,39 +564,41 @@ class PaymentReversalService:
         allocations: list[Any],
         *,
         is_payment: bool,
-    ) -> tuple[str, decimal.Decimal, list[str]]:
+    ) -> tuple[str, decimal.Decimal, list[str], list[str]]:
         """Take the money back off the bills it was applied to.
 
         Reversing the ledger without this leaves bills marked settled
         that nobody has paid -- the payable understated, which is the
         direction that loses money without anyone noticing.
-        """
-        from sqlalchemy import func, select
 
+        Returns the orphans as well: allocations whose bill could not be
+        found at all. Previously those were skipped in silence, so a
+        reversal after a merge or a renumbered invoice moved the money
+        and left the bill showing settled, with nothing said.
+        """
         from backend.models import Customer, PurchaseHeader, SalesHeader
 
         unapplied: list[str] = []
+        orphaned: list[str] = []
         if is_payment:
             supplier = await self._session.get(Supplier, entry.entity_id)
             party_name = supplier.name if supplier else "(unknown)"
             for allocation in allocations:
                 reference = str(allocation.get("reference", ""))
                 applied = decimal.Decimal(str(allocation.get("applied", "0")))
-                header = (
-                    (
-                        await self._session.execute(
-                            select(PurchaseHeader).where(
-                                PurchaseHeader.org_id == org_id,
-                                PurchaseHeader.supplier_id == entry.entity_id,
-                                func.lower(PurchaseHeader.invoice_no) == reference.lower(),
-                                PurchaseHeader.deleted_at.is_(None),
-                            )
-                        )
-                    )
-                    .scalars()
-                    .first()
+                header = await self._allocated_header(
+                    org_id,
+                    allocation,
+                    model=PurchaseHeader,
+                    party_column=PurchaseHeader.supplier_id,
+                    party_id=entry.entity_id,
                 )
                 if header is None:
+                    # Reported, never skipped in silence. A missed
+                    # allocation means the ledger moved and the bill
+                    # still shows settled -- the payable understated,
+                    # which is the direction that loses money quietly.
+                    orphaned.append(f"{reference} ({applied})")
                     continue
                 header.amount_paid = max(ZERO, header.amount_paid - applied)
                 header.payment_status = _status_for(header.amount_paid, header.grand_total)
@@ -542,21 +623,15 @@ class PaymentReversalService:
             for allocation in allocations:
                 reference = str(allocation.get("reference", ""))
                 applied = decimal.Decimal(str(allocation.get("applied", "0")))
-                sale_header = (
-                    (
-                        await self._session.execute(
-                            select(SalesHeader).where(
-                                SalesHeader.org_id == org_id,
-                                SalesHeader.customer_id == entry.entity_id,
-                                cast_text(SalesHeader.id).like(f"{reference.lower()}%"),
-                                SalesHeader.deleted_at.is_(None),
-                            )
-                        )
-                    )
-                    .scalars()
-                    .first()
+                sale_header = await self._allocated_header(
+                    org_id,
+                    allocation,
+                    model=SalesHeader,
+                    party_column=SalesHeader.customer_id,
+                    party_id=entry.entity_id,
                 )
                 if sale_header is None:
+                    orphaned.append(f"{reference} ({applied})")
                     continue
                 sale_header.amount_paid = max(ZERO, sale_header.amount_paid - applied)
                 sale_header.payment_status = _status_for(
@@ -577,7 +652,7 @@ class PaymentReversalService:
                     )
                 )
             ).scalar_one()
-        return party_name, decimal.Decimal(outstanding), unapplied
+        return party_name, decimal.Decimal(outstanding), unapplied, orphaned
 
 
 def cast_text(column: Any) -> Any:

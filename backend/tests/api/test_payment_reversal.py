@@ -549,3 +549,72 @@ async def test_a_payment_carries_its_note_into_the_party_statement(
         )
     payment = next(entry for entry in entries if "Payment" in entry.kind)
     assert "through Hanif Pune" in payment.reference
+
+
+async def test_a_payment_survives_its_bill_being_renumbered(
+    owner_user: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The bug this test exists for.
+
+    Allocations used to be resolved back to a bill by (party, invoice
+    number). Both halves are mutable -- `erp merge` changes the party,
+    `erp fix --invoice-no` changes the number -- so a payment made
+    before either operation could no longer be found, and the reversal
+    moved the money in the ledger while leaving the bill showing
+    settled. Silently. The allocation now carries the bill's id, which
+    does not move.
+    """
+    supplier, invoice = await _bill(session_factory, owner_user, total="10000")
+    payment = await _pay(session_factory, owner_user, supplier, "4000")
+
+    async with session_factory() as session:
+        header = (
+            await session.execute(
+                sa.select(PurchaseHeader).where(PurchaseHeader.invoice_no == invoice)
+            )
+        ).scalar_one()
+        assert header.amount_paid == D("4000")
+        header.invoice_no = "RENUMBERED-001"
+        await session.commit()
+
+    async with session_factory() as session:
+        await PaymentReversalService(session).reverse(owner_user, reference=payment)
+
+    async with session_factory() as session:
+        header = (
+            await session.execute(
+                sa.select(PurchaseHeader).where(PurchaseHeader.invoice_no == "RENUMBERED-001")
+            )
+        ).scalar_one()
+        assert header.amount_paid == D("0"), (
+            "the reversal did not find the bill and left it showing settled"
+        )
+        assert header.payment_status == "unpaid"
+
+
+async def test_an_allocation_whose_bill_vanished_refuses_loudly(
+    owner_user: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """An allocation that cannot be matched used to be skipped with
+    `continue`. The money came back in the ledger and the bill kept
+    showing paid, and nothing said so -- the payable understated, which
+    is the direction that loses money quietly. It now refuses."""
+    supplier, invoice = await _bill(session_factory, owner_user, total="10000")
+    payment = await _pay(session_factory, owner_user, supplier, "4000")
+
+    # An entry in the old format: a reference, and no id to fall back on.
+    async with session_factory() as session:
+        await session.execute(
+            sa.text(
+                "UPDATE audit_logs SET after_state = jsonb_set("
+                "  after_state, '{allocations}',"
+                """  '[{"reference": "GONE-999", "applied": "4000"}]'::jsonb)"""
+                " WHERE cast(id as text) LIKE :prefix"
+            ),
+            {"prefix": f"{payment}%"},
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        with pytest.raises(ValidationError, match="GONE-999"):
+            await PaymentReversalService(session).reverse(owner_user, reference=payment)
