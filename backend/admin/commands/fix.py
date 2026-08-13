@@ -31,12 +31,14 @@ from backend.models import (
     Customer,
     InventoryMovement,
     Product,
+    PurchaseHeader,
     PurchaseLine,
     SalesHeader,
     SalesLine,
 )
 from backend.services.audit_service import AuditService
 from backend.services.cost_replay_service import CostReplayService
+from backend.services.purchase_service import allocate
 from backend.services.receipt_correction_service import RateChangeService
 
 fix = typer.Typer(no_args_is_help=True, help="Correct something already recorded.")
@@ -129,6 +131,46 @@ async def _replay_both(ctx: AdminContext, *product_ids: object) -> None:
                 )
 
 
+ZERO = decimal.Decimal("0")
+TWO = decimal.Decimal("0.01")
+FOUR = decimal.Decimal("0.0001")
+
+
+async def _retotal(ctx: AdminContext, header: PurchaseHeader) -> None:
+    """Re-spread freight and charges, then re-add the bill.
+
+    Freight is what the transporter charged and does not change because
+    a line was removed or a quantity corrected -- but its split across
+    the lines is by quantity, so that split moves. Same shape as
+    ReceiptCorrectionService, and for the same reason: a bill whose
+    lines no longer add up to its total is worse than either number
+    being wrong on its own.
+    """
+    lines = list(
+        (
+            await ctx.session.execute(
+                select(PurchaseLine)
+                .where(PurchaseLine.purchase_header_id == header.id)
+                .order_by(PurchaseLine.line_no)
+            )
+        ).scalars()
+    )
+    if not lines:
+        header.subtotal = ZERO
+        header.grand_total = (header.freight + header.other_charges).quantize(TWO)
+        return
+    freight_shares = allocate(header.freight, [row.qty for row in lines])
+    other_shares = allocate(header.other_charges, [row.line_total for row in lines])
+    for index, row in enumerate(lines):
+        row.freight_allocated = freight_shares[index]
+        if row.qty > ZERO:
+            row.landed_cost_per_unit = (
+                (row.line_total + freight_shares[index] + other_shares[index]) / row.qty
+            ).quantize(FOUR)
+    header.subtotal = sum((row.line_total for row in lines), ZERO).quantize(TWO)
+    header.grand_total = (header.subtotal + header.freight + header.other_charges).quantize(TWO)
+
+
 async def _move_sales_of(
     ctx: AdminContext, *, old: Product, new: Product
 ) -> list[tuple[str, str, decimal.Decimal]]:
@@ -187,6 +229,12 @@ def fix_purchase(
         str | None, typer.Option("--invoice-no", help="Renumber the bill")
     ] = None,
     date: Annotated[str | None, typer.Option("--date", help="Invoice date, YYYY-MM-DD")] = None,
+    quantity: Annotated[
+        str | None, typer.Option("--qty", help="Corrected quantity for that line")
+    ] = None,
+    remove: Annotated[
+        bool, typer.Option("--remove", help="Delete that line from the bill entirely")
+    ] = False,
     with_sales: Annotated[
         bool,
         typer.Option(
@@ -215,12 +263,17 @@ def fix_purchase(
             "supplier_id": str(header.supplier_id),
             "invoice_date": str(header.invoice_date),
         }
-        if not any([line_no, code, brand, description, rate, supplier, invoice_no, date]):
+        if not any(
+            [line_no, code, brand, description, rate, supplier, invoice_no, date, quantity, remove]
+        ):
             raise AdminError("nothing to change -- pass at least one option. See ADMIN.md.")
-        if (code or brand or description) and line_no is None:
+        if (code or brand or description or quantity or remove) and line_no is None:
             raise AdminError(
-                "--code, --brand and --desc need --line N. `erp show purchase` lists them."
+                "--code, --brand, --desc, --qty and --remove need --line N. "
+                "`erp show purchase` lists them."
             )
+        if remove and (code or brand or description or quantity):
+            raise AdminError("--remove deletes the line; nothing else about it can be set.")
 
         console.head(f"Purchase {header.invoice_no}")
         async with guarded(ctx, what=f"purchase {header.invoice_no}"):
@@ -235,7 +288,7 @@ def fix_purchase(
                 header.invoice_date = datetime.date.fromisoformat(date)
                 console.item(f"date → {header.invoice_date}")
 
-            if line_no is not None and (code or brand or description):
+            if line_no is not None and (code or brand or description or quantity or remove):
                 line = (
                     await ctx.session.execute(
                         select(PurchaseLine).where(
@@ -249,6 +302,84 @@ def fix_purchase(
                 old_product = await ctx.session.get(Product, line.product_id)
                 if old_product is None:
                     raise AdminError("that line points at a product that no longer exists.")
+
+                if remove:
+                    # The line's movements go with it. A line that was
+                    # never delivered did not move goods, so leaving a
+                    # purchase movement behind would be recording a
+                    # delivery that never happened -- and the audit row
+                    # below is what preserves that this existed.
+                    gone = list(
+                        (
+                            await ctx.session.execute(
+                                select(InventoryMovement).where(
+                                    InventoryMovement.org_id == ctx.org_id,
+                                    InventoryMovement.source_type == "purchase_line",
+                                    InventoryMovement.source_id == line.id,
+                                )
+                            )
+                        ).scalars()
+                    )
+                    for movement in gone:
+                        await ctx.session.delete(movement)
+                    await ctx.session.delete(line)
+                    await ctx.session.flush()
+                    # Renumber what is left, so `--line N` keeps meaning
+                    # what `erp show` prints.
+                    survivors = list(
+                        (
+                            await ctx.session.execute(
+                                select(PurchaseLine)
+                                .where(PurchaseLine.purchase_header_id == header.id)
+                                .order_by(PurchaseLine.line_no)
+                            )
+                        ).scalars()
+                    )
+                    for position, row in enumerate(survivors, start=1):
+                        row.line_no = position
+                    await _retotal(ctx, header)
+                    await ctx.session.flush()
+                    console.item(
+                        f"line {line_no} removed ({old_product.code}, "
+                        f"{console.qty(line.qty)}), {len(gone)} movement(s) deleted"
+                    )
+                    console.item(f"{len(survivors)} line(s) left, renumbered")
+                    console.item(f"bill total → {console.money(header.grand_total)}")
+                    await _replay_both(ctx, old_product.id)
+
+                if quantity is not None:
+                    new_qty = decimal.Decimal(quantity)
+                    if new_qty <= ZERO:
+                        raise AdminError(
+                            "a quantity of zero is a removed line -- use --remove, which "
+                            "also renumbers and re-adds the bill."
+                        )
+                    old_qty = line.qty
+                    line.qty = new_qty
+                    line.line_total = (new_qty * line.rate).quantize(TWO)
+                    if line.total_weight_kg is not None:
+                        line.total_weight_kg = new_qty
+                    # The stock movement carries the quantity too; the
+                    # balance is derived from it, so editing the line
+                    # alone would leave the two disagreeing.
+                    for movement in (
+                        await ctx.session.execute(
+                            select(InventoryMovement).where(
+                                InventoryMovement.org_id == ctx.org_id,
+                                InventoryMovement.source_type == "purchase_line",
+                                InventoryMovement.source_id == line.id,
+                                InventoryMovement.qty_delta != ZERO,
+                            )
+                        )
+                    ).scalars():
+                        movement.qty_delta = new_qty
+                    await _retotal(ctx, header)
+                    await ctx.session.flush()
+                    console.item(
+                        f"line {line_no} qty {console.qty(old_qty)} → {console.qty(new_qty)}"
+                    )
+                    console.item(f"bill total → {console.money(header.grand_total)}")
+                    await _replay_both(ctx, old_product.id)
 
                 if description is not None:
                     line.description = description
