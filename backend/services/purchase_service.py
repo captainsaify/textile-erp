@@ -116,7 +116,12 @@ class Draft:
     lines: list[DraftLine]
     freight: decimal.Decimal
     other_charges: decimal.Decimal
-    declared_total: decimal.Decimal | None
+    #: Taken off the bill. Reduces what the goods *cost*, so it is
+    #: allocated across the lines exactly as freight and charges are --
+    #: negatively. Stock valued at a price nobody paid is the failure
+    #: this avoids; there is no income account involved.
+    discount: decimal.Decimal = ZERO
+    declared_total: decimal.Decimal | None = None
     #: The non-freight charges, itemised under the name the bill uses --
     #: {"GST": 2240, "BPK": 2100}. `other_charges` stays the single total
     #: the books care about; this exists so a bill carrying two charges
@@ -149,7 +154,7 @@ class Draft:
 
     @property
     def grand_total(self) -> decimal.Decimal:
-        return self.subtotal + self.freight + self.other_charges
+        return self.subtotal + self.freight + self.other_charges - self.discount
 
     @property
     def unresolved_codes(self) -> list[str]:
@@ -566,6 +571,11 @@ class PurchaseService:
             warehouse = await self._default_warehouse(org_id)
             freight_shares = allocate(draft.freight, [line.qty for line in draft.lines])
             other_shares = allocate(draft.other_charges, [line.line_total for line in draft.lines])
+            # A discount received reduces what the goods cost, so it is
+            # spread across the lines the same way charges are and then
+            # subtracted. Leaving it out of the landed cost would value
+            # the stock at a price nobody paid.
+            discount_shares = allocate(draft.discount, [line.line_total for line in draft.lines])
 
             header = PurchaseHeader(
                 org_id=org_id,
@@ -577,6 +587,7 @@ class PurchaseService:
                 ocr_source_attachment_id=draft.source_attachment_id,
                 freight=draft.freight,
                 other_charges=draft.other_charges,
+                discount=draft.discount,
                 subtotal=draft.subtotal,
                 grand_total=draft.grand_total,
                 declared_total=draft.declared_total,
@@ -601,7 +612,13 @@ class PurchaseService:
             for index, line in enumerate(draft.lines):
                 assert line.product_id is not None
                 landed = (
-                    (line.line_total + freight_shares[index] + other_shares[index]) / line.qty
+                    (
+                        line.line_total
+                        + freight_shares[index]
+                        + other_shares[index]
+                        - discount_shares[index]
+                    )
+                    / line.qty
                 ).quantize(FOUR)
                 row = PurchaseLine(
                     org_id=org_id,

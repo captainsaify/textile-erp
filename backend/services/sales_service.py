@@ -133,6 +133,10 @@ class SaleDraft:
     #: the line totals because they are not revenue -- see SalesHeader.
     freight: decimal.Decimal = ZERO
     other_charges: decimal.Decimal = ZERO
+    #: Given away on this sale. Contra-revenue, not a negative charge:
+    #: the customer is debited the net while SALES_REVENUE keeps the
+    #: gross, so "sold 12 lakh and gave away 40,000" stays visible.
+    discount: decimal.Decimal = ZERO
     #: Itemised under the name the bill uses, {"GST": 2240}. The books
     #: only need the total in `other_charges`; this exists so each one
     #: can be entered and corrected on its own rather than the sender
@@ -156,7 +160,7 @@ class SaleDraft:
         the payment, the credit-limit check, duplicate detection -- wants
         this, not the subtotal, so the name stays on the larger figure.
         """
-        return self.subtotal + self.freight + self.other_charges
+        return self.subtotal + self.freight + self.other_charges - self.discount
 
     @property
     def total_cogs(self) -> decimal.Decimal:
@@ -501,6 +505,7 @@ class SalesService:
                 subtotal=draft.subtotal,
                 freight=draft.freight,
                 other_charges=draft.other_charges,
+                discount=draft.discount,
                 grand_total=draft.grand_total,
                 amount_paid=draft.grand_total if paid_immediately else ZERO,
                 payment_status="paid" if paid_immediately else "unpaid",
@@ -593,6 +598,14 @@ class SalesService:
             credits = [(AccountCode.SALES_REVENUE, draft.subtotal)]
             if charges > ZERO:
                 credits.append((AccountCode.OTHER_INCOME, charges))
+            # A discount is contra-revenue, not a negative charge. The
+            # customer is debited the net; SALES_REVENUE keeps the gross
+            # and the giveaway sits in its own account, so "sold 12 lakh
+            # and gave away 40,000" stays a sentence you can read off the
+            # P&L. Netting it into revenue would hide exactly the number
+            # worth watching.
+            if draft.discount > ZERO:
+                debits.append((AccountCode.SALES_DISCOUNT, draft.discount))
             if cogs > ZERO:
                 debits.append((AccountCode.COGS, cogs))
                 credits.append((AccountCode.INVENTORY, cogs))

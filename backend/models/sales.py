@@ -81,6 +81,12 @@ class SalesHeader(UUIDPkMixin, OrgScopedMixin, Base):
     other_charges: Mapped[decimal.Decimal] = mapped_column(
         MONEY, nullable=False, server_default=text("0")
     )
+    #: Taken off the bill. On a sale it is contra-revenue
+    #: (AccountCode.SALES_DISCOUNT); on a purchase it reduces what
+    #: the goods cost and flows into landed cost with freight.
+    discount: Mapped[decimal.Decimal] = mapped_column(
+        MONEY, nullable=False, server_default=text("0")
+    )
     grand_total: Mapped[decimal.Decimal] = mapped_column(
         MONEY, nullable=False, server_default=text("0")
     )
