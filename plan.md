@@ -3,6 +3,8 @@
 > **Status: proposed. No code written.**
 > This is the plan for the admin web app. Nothing here is built.
 > The CLI it builds on is `ADMIN.md` / [`docs/31_AdminCLI.md`](docs/31_AdminCLI.md).
+> What it looks like and how it is built in the browser:
+> [`ui-plan.md`](ui-plan.md).
 
 ---
 
