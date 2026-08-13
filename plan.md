@@ -8,19 +8,32 @@
 
 ## 1. What this is, and what it replaces
 
-WhatsApp is the right interface for the people doing the trading. It is
-the wrong interface for the person *fixing* the trading — a fourteen-line
-bill with one wrong character is not a conversation.
+This has **two** purposes, and the second one is the reason to build it.
 
-The CLI closed that gap last week and works. But it is a terminal, over
-SSH, on a phone tether. Master Control is the same capability with a
-screen: see the bill, click the line, change the field, watch what it
-would do, save it.
+**Entering.** A purchase bill with fourteen lines, typed into WhatsApp
+one message at a time, is slow work that a form does better. Every field
+is known in advance, the arithmetic is the machine's job, and the
+ambiguities that make the chat version painful — *which* brand carries
+`55X`, is this below cost, have I entered this invoice already — are
+things a screen can answer while you type instead of after you send.
+This is the Vyapar-shaped part, and it is what gets used every day.
 
-**This is not a second system.** Everything Master Control does, `erp`
-already does. The web app is a second front door onto the same guarded
-operations — which is the single most important constraint in this
-document, and §3 is about why.
+**Fixing.** A fourteen-line bill with one wrong character is not a
+conversation either. The CLI closed that gap and works, but it is a
+terminal over SSH on a phone tether. Master Control is the same
+capability with a screen.
+
+Entry is the daily work; repair is the occasional work. **The plan is
+ordered accordingly** — §9 builds invoice entry before the repair
+console, which is a change from the first draft of this document.
+
+**Neither is a second system.** Entry goes through
+`PurchaseService.confirm` and `SalesService.record` — the same code
+WhatsApp calls, with the same duplicate detection, freight allocation
+and below-cost checks. Repair goes through the same guarded operations
+`erp` calls. The web app is a front door, never a parallel
+implementation. §3 is about why that matters more than anything else
+here.
 
 ---
 
@@ -96,7 +109,7 @@ These are new risks, not inherited ones, and each needs a decision:
 - **Preview is not free here.** `--dry-run` in a terminal is one word.
   In a browser, a destructive action that shows you the exact effect
   *before* asking to confirm is the difference between a safe tool and a
-  fast one. See §5.
+  fast one. See §6.
 
 ---
 
@@ -109,6 +122,7 @@ That is the choice to design well rather than argue with, so:
 
 | control | requirement |
 |---|---|
+| who | **the owner only.** One account, not a role system — see §11.1 |
 | credential | separate from the dashboard's; not reused anywhere |
 | strength | ≥ 16 characters, generated not chosen, stored `argon2` as now |
 | session | its own cookie, **30-minute** idle expiry, not the dashboard's 12-hour |
@@ -130,7 +144,62 @@ same pages.
 
 ---
 
-## 5. How a destructive action behaves
+## 5. Invoice entry — the screen that gets used daily
+
+One screen for a purchase, the same shape for a sale. Keyboard first:
+Tab between fields, Enter adds a row, nothing needs a mouse.
+
+```
+┌─ New purchase ───────────────────────────────────────────────────────┐
+│  Supplier [ SHAHNAWAZ TEXTILE          ▾]  Invoice [ 009 ]           │
+│  Date     [ 2026-08-13 ]                                             │
+│                                                                      │
+│  #  Item                        Qty      Rate      Amount            │
+│  1  [55X — BSQ · 0 on hand  ▾]  [  800]  [120.00]   96,000.00   [×]  │
+│  2  [44D — MKD · 1520 …     ▾]  [  640]  [107.00]   68,480.00   [×]  │
+│  3  [                       ▾]                                  [+]  │
+│                                                                      │
+│  Charges   GST [ 1,200 ]  Packing [ 800 ]  Freight [ 0 ]             │
+│                                                                      │
+│                                    Subtotal      1,64,480.00         │
+│                                    Charges          2,000.00         │
+│                                    TOTAL         1,66,480.00         │
+│                                                                      │
+│  ⚠ 009 looks like invoice 007 from the same supplier (6 Aug)         │
+│                                    [ Cancel ]      [ Save bill ]     │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**What the screen fixes that the chat version cannot.** These are not
+new features — they are existing behaviours moved from *after you send*
+to *while you type*:
+
+- **Brand ambiguity disappears.** `55X` exists under three brands on
+  these books, and picking the wrong one silently is what produced 007
+  and 007B. The item dropdown shows `CODE — BRAND · qty on hand`, so
+  the choice is made by looking rather than by being asked afterwards.
+- **Duplicate invoice detection becomes a warning as you type it**, not
+  a rejection after you have entered fourteen lines.
+- **Below-cost shows on the line**, in the sale form, next to the rate
+  that triggered it.
+- **Stock on hand is visible while choosing**, so a sale that would go
+  negative is obvious before saving rather than refused after.
+- **Charges are fields, not a second command.** The whole `charge`
+  workflow exists because charges arrive after the bill is confirmed;
+  entered on the form there is nothing to add later.
+
+**Deliberately kept:** the sheet. Saving still produces the same
+document the partners already receive, through the same generator. The
+web form changes how a bill is *entered*, not what anyone downstream
+sees.
+
+**Not in scope for entry:** OCR from a photo. That flow works over
+WhatsApp and the interesting part — a sheet photographed on a phone — is
+where the phone already is.
+
+---
+
+## 6. How a destructive action behaves
 
 This is the interaction that has to be right, because it is where the
 CLI's safety becomes a screen.
@@ -167,7 +236,7 @@ Three rules, taken straight from the CLI because they earned their place:
 
 ---
 
-## 6. Screens
+## 7. Screens
 
 Mapping the requested tree to what exists. **"CLI"** means the logic is
 built and tested and needs an endpoint plus a screen. **"New"** means the
@@ -179,7 +248,7 @@ operation does not exist anywhere yet.
 |---|---|---|
 | Parties → Merge | **CLI** | `erp merge supplier/customer` |
 | Parties → Transfer | **New** | move *selected* transactions to another party without merging — the "three sales were his, the rest weren't" case |
-| Parties → Recalculate | **New** | recompute outstanding from source rows; opening balance is an input, not a derived value |
+| Parties → Recalculate | **New** | recompute outstanding from source rows. Cheap, because **every balance here is derived** — there are no opening balances to preserve (§11.2) |
 | Parties → Delete | **CLI** | soft delete exists; blocked when transactions reference it |
 | Products → Merge | **Partial** | `erp merge brand` exists; merging two *products* under one brand is new |
 | Products → Transfer | **CLI** | this is `fix --code/--brand`, per line |
@@ -201,7 +270,7 @@ operation does not exist anywhere yet.
 | | state | notes |
 |---|---|---|
 | Ledger Corrections | **New** | a typed correcting entry, never an edit of a posted one |
-| Opening Balances | **New** | per party and per ledger |
+| ~~Opening Balances~~ | **dropped** | every balance is derived from transactions (§11.2). A screen to set one would be a way to create a number nothing can verify |
 | Recalculate Balances | **New** | derived balances from the journal |
 | Rebuild Ledger | **New** | the ledger equivalent of `stock recost` — replay from the journal |
 
@@ -210,7 +279,7 @@ operation does not exist anywhere yet.
 | | state | notes |
 |---|---|---|
 | Stock Adjustment | **CLI** | `erp stock adjust` |
-| Stock Transfer | **New** | between warehouses. **Inert today** — one warehouse is seeded, so this ships disabled with a note rather than pretending |
+| ~~Stock Transfer~~ | **dropped** | between warehouses, and there is one warehouse and no second one coming (§11.4). Not built, not shipped disabled — a greyed-out button is a promise |
 | Rebuild Inventory | **CLI** | `erp stock recost --all` |
 
 ### WHATSAPP
@@ -218,14 +287,14 @@ operation does not exist anywhere yet.
 | | state | notes |
 |---|---|---|
 | Re-link Contacts | **New** | same as Contacts → Re-link |
-| Message Queue | **New** | pending/failed outbound, with retry |
+| Message Queue | **New** | pending/failed outbound: **retry, and cancel while still queued** (§11.3) |
 | Webhook Logs | **New** | inbound with signature result — the 401 trap that cost hours has no UI today |
 
 ### SYSTEM
 
 | | state | notes |
 |---|---|---|
-| Users & Permissions | **Partial** | `backend/cli.py create-user` exists; no UI |
+| Users & Permissions | **Minimal** | one owner account and its password. No role editor: a permission system with one user is a way to lock yourself out (§10.1) |
 | Audit Log | **API exists** | `/audit` is live and the dashboard shows it; needs filters by entity |
 | Database Health | **New** | connection, sizes, partition coverage, migration head |
 | Backups | **CLI** | list / create / restore |
@@ -242,7 +311,7 @@ operation does not exist anywhere yet.
 
 ---
 
-## 7. Deliberately excluded
+## 8. Deliberately excluded
 
 - **No raw SQL console.** The moment it exists it is what gets used at
   1 a.m., and §3's guarantee is over.
@@ -265,27 +334,33 @@ operation does not exist anywhere yet.
 
 ---
 
-## 8. Build order
+## 9. Build order
 
 Each phase is usable on its own.
 
 | phase | contents | why here |
 |---|---|---|
-| **0** | Extract `backend/services/admin/` from the CLI command modules; CLI becomes a thin caller; no behaviour change | Nothing else can be built safely until the guard is callable from HTTP |
-| **1** | Auth (§4), `/control` shell, Integrity Check, Audit Log, Database Health, Backups | Read-only and near-read-only. Proves the auth and the shell before anything can write |
-| **2** | The guarded write pipeline: idempotency, optimistic locking, the Preview→Confirm component (§5), one endpoint end-to-end (`merge customer`) | The riskiest machinery, exercised on one operation |
-| **3** | TRANSACTIONS — sales, purchases, stock movements | The screens replacing what has been done by hand all week |
-| **4** | DATA — parties, products, contacts | Merges and transfers |
-| **5** | FINANCIAL + INVENTORY — ledger corrections, opening balances, rebuilds, adjustments | Depends on 2's pipeline being proven |
-| **6** | WHATSAPP — queue, webhook logs, re-link | Operational visibility |
-| **7** | DANGER ZONE | Last, deliberately: everything it depends on is proven by then |
+| **0** | Auth (§4) and the `/control` shell; POST endpoints for purchase and sale over the *existing* services; idempotency | The smallest thing that can safely accept a write |
+| **1** | **Invoice entry (§5)** — purchase, then sale. Item picker with brand and stock, charges, live totals, inline warnings | The daily work. Ships first because it is what you asked for and what gets used every day |
+| **2** | Read screens the entry form needs anyway: parties, products, recent bills, stock | Mostly built already (~40 GET endpoints); assembling, not inventing |
+| **3** | Extract `backend/services/admin/` from the CLI command modules; CLI becomes a thin caller; no behaviour change | Nothing *repair-shaped* can be built until the guard is callable from HTTP |
+| **4** | The guarded write pipeline: optimistic locking, the Preview→Confirm component (§6), one operation end-to-end (`merge customer`) | The riskiest machinery, exercised on one operation |
+| **5** | TRANSACTIONS repair — edit a saved sale or purchase, stock movements | What has been done by hand all week |
+| **6** | DATA — parties, products, contacts | Merges and transfers |
+| **7** | FINANCIAL + INVENTORY — ledger corrections, recalculate, rebuilds, adjustments | Depends on 4's pipeline being proven |
+| **8** | WHATSAPP — queue, webhook logs, re-link · SYSTEM — integrity, health, backups | Operational visibility |
+| **9** | DANGER ZONE | Last, deliberately: everything it depends on is proven by then |
 
-Phase 0 is the one to resist skipping. It is the least visible and the
-whole plan rests on it.
+**Phases 0–2 are a usable product on their own** — enter bills on a
+screen instead of in a chat, and read them back. If nothing after phase
+2 were ever built, the thing you actually asked for would exist.
+
+Phase 3 is the one to resist skipping once repair work starts. It is the
+least visible and everything from 4 onward rests on it.
 
 ---
 
-## 9. What could go wrong
+## 10. What could go wrong
 
 - **The guard gets bypassed by accident.** A new endpoint written in a
   hurry that forgets `guarded()`. *Mitigation:* one router-level
@@ -297,22 +372,46 @@ whole plan rests on it.
   longer matches what was shown. This is what §3.1's optimistic locking
   is for.
 - **The password.** Covered in §4 and not re-argued here.
-- **Scope.** This document is nine sections and roughly forty screens.
+- **Scope.** This document is eleven sections and roughly forty screens.
   The CLI took a day and three real bugs that only appeared when it was
   run against live data. This is several times that, and the estimate to
   distrust is the one that says otherwise.
 
 ---
 
-## 10. Open questions
+## 11. Answered
 
-1. **Users & Permissions** — is Master Control owner-only, or does Shoyab
-   get a limited view? Roles exist (`owner`/`staff`); nothing in this
-   plan uses them yet.
-2. **Opening balances** — do any parties have one today, or is every
-   balance derived from transactions? Changes whether §6 FINANCIAL is a
-   real screen or a migration.
-3. **Message Queue** — retry only, or also *cancel* a queued message?
-   Cancel is easy to build and easy to regret.
-4. **Second warehouse** — is one coming? If not, Stock Transfer ships
-   disabled and that is fine; if it is, it changes the inventory screens.
+**10.1 Owner only.** One account, yours. No role editor and no second
+tier of access — a permission system with a single user is surface area
+that can only ever lock you out of your own books. If Shoyab ever needs
+a view, it is the existing read-only dashboard, which already has its
+own login.
+
+**10.2 Every balance is derived.** No party carries a stored opening
+balance, so *Opening Balances* is dropped from §7 rather than built. A
+screen for setting one would be a way to type in a number that nothing
+downstream can verify — the opposite of the property that makes
+`erp check` meaningful. *Recalculate* stays, and is cheap for the same
+reason: it only ever recomputes from rows that already exist.
+
+**10.3 Message queue: retry, and cancel while queued — my call.**
+Retry alone is half the feature; the case that actually happens is
+noticing a wrong figure in a notice that has not gone out yet, and the
+only thing worse than not being able to stop it is being able to "stop"
+one that already left. So: cancel is offered **only** while a message is
+still queued, disappears the moment it is handed to Meta, and the row
+stays visible afterwards marked cancelled. What is never offered is
+deleting the record — a message that was cancelled is a thing that
+happened.
+
+**10.4 One warehouse, no second one coming.** *Stock Transfer* is
+dropped from §7 entirely rather than shipped disabled. A greyed-out
+button is a promise, and this one would not be kept. The `warehouse_id`
+columns stay where they are — they cost nothing and mean a second
+warehouse is a migration rather than a rewrite.
+
+**10.5 And the point of the whole thing.** The request was not primarily
+a repair console; it was *"a proper sale/purchase input invoice like
+Vyapar"*. That is §5, and it moved to the front of §9. The first
+version of this plan had it as phase 3 of 7, behind machinery that
+serves the occasional job rather than the daily one.
