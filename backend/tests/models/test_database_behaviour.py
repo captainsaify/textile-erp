@@ -167,3 +167,41 @@ async def test_organization_model_roundtrip(
         org = await session.get(Organization, SEEDED_ORG_ID)
         assert org is not None
         assert org.base_currency == "INR"
+
+
+async def test_both_line_tables_carry_weight_the_same_way(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Purchases and sales must describe a quantity identically.
+
+    The sheets have three quantity columns -- bales, kg per bale, and
+    the two multiplied -- and `purchase_lines` carried them from the
+    start while `sales_lines` did not. That asymmetry was invisible
+    while both sides were typed into WhatsApp a field at a time, and
+    becomes two screens that look like different products the moment
+    there is a form. Same names, same precision, or the next query that
+    joins them is subtly wrong on one side.
+    """
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                sa.text(
+                    "SELECT table_name, column_name, numeric_precision, numeric_scale, "
+                    "       is_nullable "
+                    "FROM information_schema.columns "
+                    "WHERE table_name IN ('purchase_lines','sales_lines') "
+                    "  AND column_name IN ('weight_kg','total_weight_kg') "
+                    "ORDER BY column_name, table_name"
+                )
+            )
+        ).all()
+
+    shapes: dict[str, set[tuple[int, int, str]]] = {}
+    for _table, column, precision, scale, nullable in rows:
+        shapes.setdefault(column, set()).add((precision, scale, nullable))
+
+    assert set(shapes) == {"weight_kg", "total_weight_kg"}, (
+        f"a weight column is missing from one side: {sorted(shapes)}"
+    )
+    for column, seen in shapes.items():
+        assert len(seen) == 1, f"{column} differs between purchase_lines and sales_lines: {seen}"

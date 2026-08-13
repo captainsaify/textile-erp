@@ -96,6 +96,12 @@ class SaleDraftLine:
     unit_code: str | None = None
     avg_cost: decimal.Decimal = ZERO
     qty_on_hand: decimal.Decimal = ZERO
+    #: Kilograms per bale, when the sale was counted in bales. `qty`
+    #: stays the costing quantity in kilograms either way -- this only
+    #: records what was counted, so the document can say "10 bales"
+    #: and a later correction can work in bales like `receive` does.
+    #: None for a sale entered straight in kilograms.
+    weight_per_unit: decimal.Decimal | None = None
     #: Which brand's product this line means, once asked. A code is
     #: unique only within a brand, so VVP alone does not identify a
     #: product -- and selling the wrong brand's stock is worse than
@@ -517,6 +523,11 @@ class SalesService:
                     line_no=index + 1,
                     product_id=line.product_id,
                     qty=line.qty,
+                    # `qty` is already the costing quantity in kilograms;
+                    # total_weight_kg mirrors it so a query joining the
+                    # two line tables reads the same column on both.
+                    weight_kg=line.weight_per_unit,
+                    total_weight_kg=line.qty if line.weight_per_unit is not None else None,
                     rate=line.rate,
                     line_total=line.line_total,
                     # snapshot for margin reporting and return costing (§3)

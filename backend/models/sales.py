@@ -123,6 +123,14 @@ class SalesLine(UUIDPkMixin, OrgScopedMixin, Base):
         UUID(as_uuid=True), ForeignKey("products.id"), nullable=False
     )
     qty: Mapped[decimal.Decimal] = mapped_column(QTY, nullable=False)
+    #: Kilograms per bale, and the two multiplied -- the sheet's own
+    #: shape, and the same pair `purchase_lines` carries. `qty` stays the
+    #: costing quantity in kilograms on both sides; bales are derived
+    #: (`qty / weight_kg`) rather than stored, so the arithmetic lives
+    #: in one place. Nullable: sales recorded before this existed have
+    #: no weight, and inventing one would be fabrication.
+    weight_kg: Mapped[decimal.Decimal | None] = mapped_column(QTY)
+    total_weight_kg: Mapped[decimal.Decimal | None] = mapped_column(QTY)
     rate: Mapped[decimal.Decimal] = mapped_column(RATE, nullable=False)
     line_total: Mapped[decimal.Decimal] = mapped_column(MONEY, nullable=False)
     avg_cost_at_sale_time: Mapped[decimal.Decimal] = mapped_column(RATE, nullable=False)
