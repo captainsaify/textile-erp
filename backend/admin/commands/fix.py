@@ -27,6 +27,7 @@ from backend.admin import console, resolve
 from backend.admin.app import cli, run
 from backend.admin.harness import AdminContext, AdminError, guarded
 from backend.models import (
+    Brand,
     InventoryMovement,
     Product,
     PurchaseLine,
@@ -53,7 +54,13 @@ async def _product_for(
     wanted_code = " ".join((code or old.code).split()).upper()
     if brand is None:
         target_brand_id = old.brand_id
-        brand_label = "unchanged"
+        # Name the brand it actually lands under. "unchanged" described
+        # the *argument*, not the result, and read as though no brand had
+        # been chosen at all.
+        inherited = (
+            await ctx.session.execute(select(Brand.name).where(Brand.id == old.brand_id))
+        ).scalar_one_or_none()
+        brand_label = inherited or "no brand"
     else:
         target_brand = await resolve.brand_by_name(ctx.session, ctx.org_id, brand)
         target_brand_id = target_brand.id

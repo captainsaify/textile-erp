@@ -34,7 +34,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.admin import console
-from backend.models import Organization, User
+from backend.models import Brand, Inventory, Organization, Product, User
 from backend.models.enums import UserRole
 from backend.services.backup_service import BackupService
 from backend.services.demo_service import DEMO_ORG_ID
@@ -131,8 +131,29 @@ def _gap(d: Discrepancy) -> decimal.Decimal:
         return decimal.Decimal(0) if d.cached == d.replayed else decimal.Decimal(1)
 
 
+async def _negative_stock(ctx: AdminContext) -> dict[str, decimal.Decimal]:
+    """Products holding less than nothing.
+
+    Reconciliation cannot catch this: it proves `qty_on_hand` equals the
+    signed sum of movements, and −800 satisfies that perfectly well. A
+    repair that moves a purchase to another product while leaving the
+    sale behind is internally consistent and physically impossible, and
+    the first version of this harness let exactly that through on a
+    dry run against the real books.
+    """
+    rows = (
+        await ctx.session.execute(
+            select(Product.code, Brand.name, Inventory.qty_on_hand)
+            .join(Product, Product.id == Inventory.product_id)
+            .join(Brand, Brand.id == Product.brand_id, isouter=True)
+            .where(Inventory.org_id == ctx.org_id, Inventory.qty_on_hand < 0)
+        )
+    ).all()
+    return {f"negative stock:{brand or '—'} {code}": abs(qty) for code, brand, qty in rows}
+
+
 async def _snapshot(ctx: AdminContext) -> dict[str, decimal.Decimal]:
-    """Every discrepancy on both books, by subject, with its size."""
+    """Everything that is wrong right now, by subject, with its size."""
     service = ReconciliationService(ctx.session)
     found: dict[str, decimal.Decimal] = {}
     for outcome in (
@@ -141,6 +162,7 @@ async def _snapshot(ctx: AdminContext) -> dict[str, decimal.Decimal]:
     ):
         for d in outcome.discrepancies:
             found[f"{outcome.kind}:{d.subject}"] = _gap(d)
+    found.update(await _negative_stock(ctx))
     return found
 
 

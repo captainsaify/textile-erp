@@ -165,3 +165,38 @@ async def test_dry_run_changes_nothing(
             await session.execute(select(Inventory).where(Inventory.product_id == widget.id))
         ).scalar_one()
         assert row.qty_on_hand == decimal.Decimal("0.000"), "--dry-run committed"
+
+
+async def test_negative_stock_is_a_regression_even_though_the_books_balance(
+    ctx: AdminContext,
+    widget: Product,
+    staff_user: User,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The gap a real dry run exposed.
+
+    Re-pointing a purchase to another product while its sale stays
+    behind leaves the original at -800. `qty_on_hand` still equals the
+    signed sum of movements, so reconciliation passes -- the books are
+    internally consistent and physically impossible. Stock below zero is
+    its own regression, and it has to be judged on what the *command*
+    did: books that were already negative must still be repairable.
+    """
+    with pytest.raises(ReconciliationRegressed) as caught:
+        async with guarded(ctx, what="strands stock below zero", backup=False):
+            ctx.session.add(_movement(widget, staff_user, "-800"))
+            inventory = (
+                await ctx.session.execute(
+                    select(Inventory).where(Inventory.product_id == widget.id)
+                )
+            ).scalar_one()
+            # balanced: stock equals the sum of movements. And impossible.
+            inventory.qty_on_hand = decimal.Decimal("-800.000")
+
+    assert any("negative stock" in problem for problem in caught.value.problems)
+
+    async with session_factory() as session:
+        row = (
+            await session.execute(select(Inventory).where(Inventory.product_id == widget.id))
+        ).scalar_one()
+        assert row.qty_on_hand == decimal.Decimal("0.000"), "the rollback did not happen"
