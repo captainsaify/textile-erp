@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, Text, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.admin.harness import AdminError
@@ -67,7 +67,10 @@ async def sale_by_reference(
     token = reference.strip().lower()
     stmt: Select[tuple[SalesHeader]] = select(SalesHeader).where(
         SalesHeader.org_id == org_id,
-        func.cast(SalesHeader.id, func.text().type).ilike(f"{token}%"),
+        # cast(..., Text), not func.text().type -- the latter is a
+        # NullType and SQLAlchemy refuses to compile it, which broke
+        # every sale command with a CompileError rather than a message.
+        cast(SalesHeader.id, Text).ilike(f"{token}%"),
     )
     stmt = (
         stmt.where(SalesHeader.purged_at.is_not(None))

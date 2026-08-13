@@ -200,3 +200,22 @@ async def test_negative_stock_is_a_regression_even_though_the_books_balance(
             await session.execute(select(Inventory).where(Inventory.product_id == widget.id))
         ).scalar_one()
         assert row.qty_on_hand == decimal.Decimal("0.000"), "the rollback did not happen"
+
+
+async def test_a_sale_reference_lookup_compiles(
+    ctx: AdminContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Guards the whole `erp *  sale` family.
+
+    The id is a UUID and the reference is a prefix of it, so the column
+    has to be cast to text. Written as `func.text().type` that cast is a
+    NullType, SQLAlchemy refuses to compile it, and every sale command
+    died with a CompileError traceback instead of a message. Nothing
+    caught it because no test ever ran the query -- asserting the
+    not-found path is enough, since reaching it means the SQL compiled.
+    """
+    from backend.admin.harness import AdminError as _AdminError
+    from backend.admin.resolve import sale_by_reference
+
+    with pytest.raises(_AdminError, match="no sale starting"):
+        await sale_by_reference(ctx.session, ctx.org_id, "deadbeef")
