@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Textile ERP</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=12" />
+    <link rel="stylesheet" href="/assets/styles.css?v=13" />
     <link
       rel="icon"
       href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>"
@@ -52,6 +52,7 @@
           <button data-page="ledger">Ledger</button>
           <button data-page="money">Money</button>
           <button data-page="expenses">Expenses</button>
+          <button data-page="analytics">Analytics</button>
           <button data-page="admin">Admin</button>
         </nav>
         <div class="topbar-end">
@@ -203,6 +204,64 @@
           </div>
         </section>
 
+        <section id="page-analytics" class="page" hidden>
+          <div id="analytics-kpis" class="kpi-row"></div>
+
+          <div class="card-head">
+            <h2>Performance</h2>
+            <div class="filters">
+              <select id="analytics-window">
+                <option value="30">Last 30 days</option>
+                <option value="90" selected>Last 90 days</option>
+                <option value="365">Last year</option>
+              </select>
+            </div>
+          </div>
+          <p id="analytics-basis" class="muted"></p>
+
+          <div class="grid-2">
+            <section class="card">
+              <div class="card-head"><h2>Earns the most</h2></div>
+              <p class="muted">By profit — what actually matters to the month.</p>
+              <div id="analytics-profit" class="table-scroll"></div>
+            </section>
+            <section class="card">
+              <div class="card-head"><h2>Best margin</h2></div>
+              <p class="muted">By percentage — what sells well, whatever the volume.</p>
+              <div id="analytics-margin" class="table-scroll"></div>
+            </section>
+          </div>
+
+          <section class="card">
+            <div class="card-head"><h2>Sold below cost</h2></div>
+            <p class="muted">Losing money on the goods themselves.</p>
+            <div id="analytics-losing" class="table-scroll"></div>
+          </section>
+
+          <section class="card">
+            <div class="card-head"><h2>By label</h2></div>
+            <p class="muted">A code means nothing without its brand — three share 55X.</p>
+            <div id="analytics-brands" class="table-scroll"></div>
+          </section>
+
+          <div class="grid-2">
+            <section class="card">
+              <div class="card-head"><h2>Running low</h2></div>
+              <p class="muted">
+                Below reorder level, or about a month left at the recent rate.
+                <strong>Sales</strong> is how many sales that rate is built on — a
+                figure from one sale is a guess with a number on it.
+              </p>
+              <div id="analytics-reorder" class="table-scroll"></div>
+            </section>
+            <section class="card">
+              <div class="card-head"><h2>Not moving</h2></div>
+              <p class="muted">Bought, still here, nothing sold in the window.</p>
+              <div id="analytics-dead" class="table-scroll"></div>
+            </section>
+          </div>
+        </section>
+
         <section id="page-expenses" class="page" hidden>
           <div id="expense-kpis" class="kpi-row"></div>
           <div class="grid-2">
@@ -276,8 +335,8 @@
       <p id="banner" class="banner" role="status" hidden></p>
     </div>
 
-    <script src="/assets/money.js?v=12"></script>
-    <script src="/assets/charts.js?v=12"></script>
-    <script src="/assets/app.js?v=12"></script>
+    <script src="/assets/money.js?v=13"></script>
+    <script src="/assets/charts.js?v=13"></script>
+    <script src="/assets/app.js?v=13"></script>
   </body>
 </html>

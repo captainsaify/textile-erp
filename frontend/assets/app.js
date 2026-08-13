@@ -1121,6 +1121,119 @@
     );
   }
 
+  // ------------------------------------------------------- analytics
+
+  const pct = (value) => `${value}%`;
+
+  // How much to trust a rate-based figure. A days-of-cover number built
+  // on one sale is a different object from one built on fifty, and a
+  // dashboard that renders them identically is one that lies politely.
+  function evidence(row) {
+    const n = row.sale_count || 0;
+    if (n === 0) return "no sales";
+    if (n === 1) return "1 sale";
+    return `${n} sales`;
+  }
+
+  async function loadAnalytics() {
+    const days = $("analytics-window").value;
+    const [products, brands, health] = await Promise.all([
+      api(`/metrics/products?days=${days}`),
+      api(`/metrics/brands?days=${days}`),
+      api(`/metrics/stock-health?days=${days}`),
+    ]);
+
+    const best = products.best_by_profit[0];
+    const worst = products.losing.length;
+    $("analytics-kpis").innerHTML = [
+      kpi(
+        "Biggest earner",
+        best ? `${best.code} · ${best.brand || "—"}` : "—",
+        best ? `${money(best.profit)} on ${money(best.revenue)}` : "nothing sold yet",
+      ),
+      kpi("Below cost", String(worst), worst ? "products losing money" : "none"),
+      kpi("To reorder", String(health.reorder.length), "low or running out"),
+      kpi("Not moving", money(health.dead_value), `${health.dead_stock.length} products`),
+    ].join("");
+
+    $("analytics-basis").textContent =
+      `Margin uses the cost recorded at the time of each sale, not today's average. ` +
+      `Rates are measured over ${days} days.`;
+
+    const perf = (rows) =>
+      table(
+        [
+          { label: "Code", key: "code" },
+          { label: "Brand", key: "brand" },
+          { label: "Sold", numeric: true, key: "qty" },
+          { label: "Revenue", numeric: true, render: (r) => money(r.revenue) },
+          { label: "Profit", numeric: true, render: (r) => money(r.profit) },
+          { label: "Margin", numeric: true, render: (r) => pct(r.margin_pct) },
+        ],
+        rows,
+      );
+
+    $("analytics-profit").replaceChildren(perf(products.best_by_profit));
+    $("analytics-margin").replaceChildren(perf(products.best_by_margin));
+    $("analytics-losing").replaceChildren(
+      table(
+        [
+          { label: "Code", key: "code" },
+          { label: "Brand", key: "brand" },
+          { label: "Sold at", numeric: true, render: (r) => money(r.avg_rate) },
+          { label: "Cost then", numeric: true, render: (r) => money(r.avg_cost) },
+          { label: "Lost", numeric: true, render: (r) => money(r.profit) },
+        ],
+        products.losing,
+      ),
+    );
+
+    $("analytics-brands").replaceChildren(
+      table(
+        [
+          { label: "Label", key: "brand" },
+          { label: "Codes", numeric: true, key: "codes" },
+          { label: "Sales", numeric: true, key: "sales" },
+          { label: "Revenue", numeric: true, render: (r) => money(r.revenue) },
+          { label: "Profit", numeric: true, render: (r) => money(r.profit) },
+          { label: "Margin", numeric: true, render: (r) => pct(r.margin_pct) },
+        ],
+        brands.brands,
+      ),
+    );
+
+    $("analytics-reorder").replaceChildren(
+      table(
+        [
+          { label: "Code", key: "code" },
+          { label: "Brand", key: "brand" },
+          { label: "On hand", numeric: true, key: "on_hand" },
+          {
+            label: "Days left",
+            numeric: true,
+            render: (r) => (r.days_of_cover === null ? "—" : String(r.days_of_cover)),
+          },
+          { label: "Based on", render: evidence },
+          { label: "Why", key: "reason" },
+        ],
+        health.reorder,
+      ),
+    );
+
+    $("analytics-dead").replaceChildren(
+      table(
+        [
+          { label: "Code", key: "code" },
+          { label: "Brand", key: "brand" },
+          { label: "On hand", numeric: true, key: "on_hand" },
+          { label: "Tied up", numeric: true, render: (r) => money(r.value) },
+          { label: "Last sold", render: (r) => r.last_sold || "never" },
+        ],
+        health.dead_stock,
+      ),
+    );
+  }
+
   // -------------------------------------------------------- expenses
 
   let expenseRows = [];
@@ -1460,12 +1573,16 @@
     parties: loadParties,
     ledger: loadLedger,
     money: loadMoney,
+    analytics: loadAnalytics,
     expenses: loadExpenses,
     admin: loadAdmin,
   };
 
   async function showPage(name) {
-    document.querySelectorAll("#nav button").forEach((button) => {
+    $("analytics-window").addEventListener("change", () => {
+    loadAnalytics().catch((exc) => banner(exc.message));
+  });
+  document.querySelectorAll("#nav button").forEach((button) => {
       button.classList.toggle("active", button.dataset.page === name);
     });
     document.querySelectorAll(".page").forEach((page) => {
@@ -1497,6 +1614,9 @@
   $("expense-period").addEventListener("change", () => {
     expenseCategory = null;
     loadExpenses().catch((exc) => banner(exc.message));
+  });
+  $("analytics-window").addEventListener("change", () => {
+    loadAnalytics().catch((exc) => banner(exc.message));
   });
   document.querySelectorAll("#nav button").forEach((button) => {
     button.addEventListener("click", () => showPage(button.dataset.page));
