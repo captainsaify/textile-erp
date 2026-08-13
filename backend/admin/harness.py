@@ -176,6 +176,29 @@ async def guarded(ctx: AdminContext, *, what: str, backup: bool = True) -> Async
         record = await BackupService(ctx.session).create_backup(ctx.org_id)
         console.item(console.dim(f"backup: {Path(record.file_path).name}"))
 
+    # The baseline snapshot ran SELECTs, and a bare SELECT autobegins a
+    # transaction (HANDOFF.md §5) -- so `session.begin()` below raises
+    # "a transaction is already begun" and every mutating command dies
+    # before doing anything. Nothing above wrote through the session
+    # (create_backup shells out to pg_dump and never touches it), so
+    # releasing that read transaction costs nothing, and it is what
+    # makes the real one ownable and therefore roll-back-able.
+    #
+    # This was written the obvious way first and shipped: the pure-
+    # function tests over `_regressions` all passed, because none of
+    # them ever entered `guarded`. It failed on the first real command.
+    #
+    # Released with commit() rather than rollback() even though nothing
+    # was written. rollback() expires every loaded instance
+    # unconditionally, so the next attribute touch re-queries -- and if
+    # that touch happens inside a flush, it raises MissingGreenlet
+    # instead of doing IO. commit() honours expire_on_commit=False,
+    # which both the app's session factory and the tests' set, so the
+    # identity map survives. On a read-only transaction the two are
+    # otherwise identical.
+    if ctx.session.in_transaction():
+        await ctx.session.commit()
+
     committed = False
     try:
         async with ctx.session.begin():
