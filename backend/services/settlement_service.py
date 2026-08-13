@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy import String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.core.db import joined_transaction
 from backend.core.exceptions import NotFoundError, ValidationError
 from backend.models import Customer, PurchaseHeader, SalesHeader, Supplier, User
 from backend.models.enums import AccountCode, LedgerEntryType
@@ -120,7 +121,7 @@ class SettlementService:
     ) -> SettlementResult:
         amount = _validate_amount(amount)
         org_id = actor.org_id
-        async with self._session.begin():
+        async with joined_transaction(self._session):
             customer = await self._resolve_customer(org_id, customer_name)
             when = await entry_day(self._session, org_id, on)
 
@@ -234,7 +235,7 @@ class SettlementService:
     ) -> SettlementResult:
         amount = _validate_amount(amount)
         org_id = actor.org_id
-        async with self._session.begin():
+        async with joined_transaction(self._session):
             supplier = await self._resolve_supplier(org_id, supplier_name)
             when = await entry_day(self._session, org_id, on)
 
@@ -419,7 +420,7 @@ class PaymentReversalService:
         from backend.models import AuditLog
 
         org_id = actor.org_id
-        async with self._session.begin():
+        async with joined_transaction(self._session):
             entry = (
                 (
                     await self._session.execute(

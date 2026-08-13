@@ -133,6 +133,17 @@ class SaleDraft:
     #: the line totals because they are not revenue -- see SalesHeader.
     freight: decimal.Decimal = ZERO
     other_charges: decimal.Decimal = ZERO
+    #: Money handed over with the goods, when it is less than the whole
+    #: bill. A sale was either credit (paid nothing) or cash/bank (paid
+    #: in full); "paid 50,000 of 1,65,980 at the counter" had nowhere to
+    #: go. Recorded as a *receipt against the sale*, not as a field on
+    #: it, so the cash ledger, the journal and the payment document all
+    #: happen -- the same path `received 50000 from ...` takes.
+    paid_now: decimal.Decimal = ZERO
+    #: Which ledger that money landed in. Required as soon as an amount
+    #: is set: money that arrived somewhere unnamed is asserted, not
+    #: recorded.
+    paid_via: str = "cash"
     #: Given away on this sale. Contra-revenue, not a negative charge:
     #: the customer is debited the net while SALES_REVENUE keeps the
     #: gross, so "sold 12 lakh and gave away 40,000" stays visible.
@@ -451,6 +462,24 @@ class SalesService:
                 raise ValidationError(f"Quantity for {line.code} must be greater than zero.")
             if line.rate < ZERO:
                 raise ValidationError(f"Rate for {line.code} can't be negative.")
+        if draft.paid_now < ZERO:
+            raise ValidationError("Amount paid can't be negative.")
+        if draft.paid_now > ZERO:
+            if draft.payment_type is not SalePaymentType.CREDIT:
+                # A cash sale is already paid in full. Accepting an
+                # amount as well would leave two answers to "how much
+                # came in" and no way to tell which is true.
+                raise ValidationError(
+                    "A cash or bank sale is already paid in full — "
+                    "leave the amount blank, or record it as credit."
+                )
+            if draft.paid_now > draft.grand_total:
+                raise ValidationError(
+                    f"Paid {draft.paid_now} is more than the bill of {draft.grand_total}. "
+                    "Record the sale, then take the extra as an advance."
+                )
+            if draft.paid_via not in {"cash", "bank"}:
+                raise ValidationError("Money has to arrive in cash or bank.")
 
     async def find_by_idempotency_key(self, org_id: uuid.UUID, key: str) -> SalesHeader | None:
         since = datetime.datetime.now(datetime.UTC) - datetime.timedelta(
@@ -638,6 +667,29 @@ class SalesService:
             outstanding_after = (
                 outstanding_before if paid_immediately else outstanding_before + draft.grand_total
             )
+
+            # Money handed over with the goods, when it is less than the
+            # whole bill. Deliberately a *receipt*, not a field: it has
+            # to move the cash ledger, post to the journal, allocate
+            # against this sale and produce a payment document, and all
+            # of that already exists behind `received … from …`.
+            #
+            # Inside the same transaction as the sale, so a sale that
+            # saved while its payment failed cannot happen -- that would
+            # show money owed which was already handed over.
+            if draft.paid_now > ZERO:
+                from backend.services.settlement_service import SettlementService
+
+                receipt = await SettlementService(self._session).receive_from_customer(
+                    actor,
+                    customer_name=draft.customer_name,
+                    amount=draft.paid_now,
+                    via=draft.paid_via,
+                    on=draft.on,
+                    note="paid with the sale",
+                )
+                outstanding_after = receipt.outstanding_after
+                ledger_balance = receipt.ledger_balance
 
         return ConfirmedSale(
             sale_id=header.id,

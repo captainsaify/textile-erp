@@ -100,6 +100,15 @@ async def joined_transaction(session: AsyncSession) -> AsyncIterator[None]:
     it commits only if reconciliation still passes afterwards
     (docs/31_AdminCLI.md §3.1).
 
+    **The trap.** "Already open" includes a transaction *autobegun* by a
+    stray SELECT, which has no owner and so is never committed. A caller
+    that reads on a session and then calls a service on that same
+    session gets a service that joins, does its work, and silently loses
+    it when the session closes. Give a service its own session, or
+    commit before handing it over -- which is what the admin harness
+    does deliberately, and what every command handler does by opening a
+    fresh session per operation.
+
     The alternative was a second public entry point per service. Two of
     those exist already (`UndoService.undo_in_transaction`,
     `ChargeService.add_in_transaction`) and were written before this

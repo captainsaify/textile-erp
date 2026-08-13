@@ -575,3 +575,71 @@ async def test_charge_can_be_added_after_a_sale_is_confirmed(
 
     # Unknown bill says so rather than failing quietly.
     assert "bill" in (await handle_charge("nosuchbill GST 100", ctx)).reply.lower()
+
+
+async def test_money_handed_over_with_the_goods_is_a_receipt_not_a_field(
+    ctx: RequestContext,
+    stocked: dict[str, uuid.UUID],
+    staff_user: User,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A part-payment at the counter has to be a real receipt.
+
+    A sale used to be credit (paid nothing) or cash (paid in full);
+    "paid 50,000 of 1,65,980 at the counter" had nowhere to go. Recording
+    it as a number on the sale would leave the cash ledger, the journal
+    and the payment document all missing -- so it goes through the same
+    settlement the `received ...` command uses, in the *same*
+    transaction, because a sale that saved while its payment failed
+    would show money owed that was already handed over.
+    """
+    from backend.models import CashLedger, Customer, SalesHeader
+    from backend.models.enums import SalePaymentType
+    from backend.services.sales_service import SaleDraft, SaleDraftLine, SalesService
+
+    async with session_factory() as session:
+        customer = Customer(org_id=ORG, name="Counter Cash", created_by=staff_user.id)
+        session.add(customer)
+        await session.commit()
+        await session.refresh(customer)
+        customer_id = customer.id
+
+    draft = SaleDraft(
+        customer_id=customer_id,
+        customer_name="Counter Cash",
+        payment_type=SalePaymentType.CREDIT,
+        lines=[SaleDraftLine(code="TRP", qty=D("10"), rate=D("200"), product_id=stocked["TRP"])],
+        paid_now=D("1200"),
+        paid_via="cash",
+    )
+
+    # Two sessions, as the WhatsApp handler does. Hydrating first on the
+    # *same* session autobegins a transaction that `record` then joins
+    # rather than owns, and nothing commits -- see joined_transaction.
+    async with session_factory() as session:
+        hydrated = await SalesService(session).hydrate(ORG, draft)
+    async with session_factory() as session:
+        result = await SalesService(session).record(staff_user, hydrated, below_cost_confirmed=True)
+
+    assert result.grand_total == D("2000")
+
+    async with session_factory() as session:
+        header = (
+            await session.execute(
+                sa.select(SalesHeader)
+                .where(SalesHeader.customer_id == customer_id)
+                .order_by(SalesHeader.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one()
+        assert header.amount_paid == D("1200"), "the receipt did not allocate against the sale"
+        assert header.payment_status == "partial"
+
+        cash = (
+            (await session.execute(sa.select(CashLedger).where(CashLedger.source_id.is_not(None))))
+            .scalars()
+            .all()
+        )
+        assert any(row.amount == D("1200") for row in cash), (
+            "the money never reached the cash ledger — it was recorded as a field, not a receipt"
+        )

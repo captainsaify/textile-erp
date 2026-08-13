@@ -18,9 +18,14 @@ actually steer by.
 from __future__ import annotations
 
 import decimal
+import uuid
 
-from backend.models.enums import AccountCode
+import pytest
+
+from backend.core.exceptions import ValidationError
+from backend.models.enums import AccountCode, SalePaymentType
 from backend.services.purchase_service import allocate
+from backend.services.sales_service import SaleDraft, SaleDraftLine, SalesService
 
 D = decimal.Decimal
 
@@ -96,3 +101,59 @@ def test_a_sale_debits_the_customer_net_and_credits_revenue_gross() -> None:
     assert dict(credits)[AccountCode.SALES_REVENUE] == D("1200000"), (
         "revenue was netted down; the giveaway is now invisible"
     )
+
+
+# --- partial payment at sale time -------------------------------------
+
+
+def _validate(draft: SaleDraft) -> None:
+    """Call the validator without building a service.
+
+    `SalesService.validate` touches no state on `self` -- it is a pure
+    check over the draft that happens to live on the class. Constructing
+    the service would need a live session for repositories none of these
+    cases reach.
+    """
+    SalesService.validate(SalesService.__new__(SalesService), draft)
+
+
+def _draft(**over: object) -> SaleDraft:
+    uid = uuid.uuid4()
+    fields: dict[str, object] = {
+        "customer_id": uid,
+        "customer_name": "Hanif Pune",
+        "payment_type": SalePaymentType.CREDIT,
+        "lines": [SaleDraftLine(code="X", qty=D("1"), rate=D("100"), product_id=uid)],
+    }
+    fields.update(over)
+    return SaleDraft(**fields)  # type: ignore[arg-type]
+
+
+def test_a_cash_sale_and_an_amount_are_contradictory() -> None:
+    """Two answers to "how much came in" and no way to tell which is
+    true, so the validation says so rather than picking one."""
+    with pytest.raises(ValidationError, match="already paid in full"):
+        _validate(_draft(payment_type=SalePaymentType.CASH, paid_now=D("50")))
+
+
+def test_paying_more_than_the_bill_is_refused() -> None:
+    with pytest.raises(ValidationError, match="more than the bill"):
+        _validate(_draft(paid_now=D("500")))
+
+
+def test_money_must_land_somewhere_named() -> None:
+    """Paid, but into what? Money that arrived somewhere unnamed is
+    asserted, not recorded."""
+    with pytest.raises(ValidationError, match="cash or bank"):
+        _validate(_draft(paid_now=D("50"), paid_via="pocket"))
+
+
+def test_paying_exactly_the_bill_on_credit_is_allowed() -> None:
+    """The counter case: handing over the whole amount is a legitimate
+    part-payment of 100%, and refusing it would force a choice between
+    two ways of recording the same event."""
+    _validate(_draft(paid_now=D("100")))
+
+
+def test_no_payment_is_the_ordinary_case_and_needs_nothing() -> None:
+    _validate(_draft())
