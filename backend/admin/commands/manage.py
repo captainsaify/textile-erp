@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import uuid
 from typing import Annotated
 
 import typer
@@ -27,6 +28,7 @@ from backend.models import (
 from backend.models.enums import PurchaseStatus
 from backend.services.audit_service import AuditService
 from backend.services.receipt_correction_service import ChargeService
+from backend.services.reversal_service import ReversalService
 from backend.services.undo_service import UndoService
 
 merge = typer.Typer(no_args_is_help=True, help="Combine two things that are one thing.")
@@ -229,20 +231,41 @@ async def _merge_party(
         winner = await resolve.customer_by_name(ctx.session, ctx.org_id, winner_name)
 
     console.head(f"Merge {label} {loser.name} → {winner.name}")
-    moved = (
-        await ctx.session.execute(
-            select(func.count())
-            .select_from(header_model)
-            .where(
-                getattr(header_model, fk) == loser.id,
-                header_model.deleted_at.is_(None),
+    # The rows themselves, not a count. A count cannot be reversed:
+    # two months later nothing would say *which* transactions had been
+    # this party's (plan.md §10).
+    subject_ids: list[uuid.UUID] = list(
+        (
+            await ctx.session.execute(
+                select(header_model.id).where(
+                    getattr(header_model, fk) == loser.id,
+                    header_model.deleted_at.is_(None),
+                )
             )
-        )
-    ).scalar_one()
+        ).scalars()
+    )
+    moved = len(subject_ids)
     console.item(f"{moved} transaction(s) to move")
     confirm(ctx, expected=winner.name, prompt=f"Type the surviving name ({winner.name}): ")
 
     async with guarded(ctx, what=f"merge of {loser.name} into {winner.name}"):
+        manifest = await ReversalService(ctx.session).record(
+            ctx.org_id,
+            ctx.actor,
+            operation="merge_party",
+            subject=f"{loser.name} → {winner.name}",
+            moved=[
+                {
+                    "table": header_model.__tablename__,
+                    "id": str(row_id),
+                    "column": fk,
+                    "from": str(loser.id),
+                    "to": str(winner.id),
+                }
+                for row_id in subject_ids
+            ],
+            hidden=[{"table": f"{label}s", "id": str(loser.id)}],
+        )
         await ctx.session.execute(
             update(header_model)
             .where(getattr(header_model, fk) == loser.id)
@@ -251,6 +274,7 @@ async def _merge_party(
         loser.deleted_at = datetime.datetime.now(datetime.UTC)
         await ctx.session.flush()
         console.item(f"{moved} transaction(s) moved; {loser.name} removed")
+        console.item(f"reversible with: erp unmerge {str(manifest.id)[:8]}")
         await AuditService(ctx.session).record(
             ctx.org_id,
             ctx.actor.id,
@@ -478,6 +502,101 @@ def merge_purchase(
                 entity_id=winning.id,
                 before_state={"merged": losing.invoice_no},
                 after_state={"into": winning.invoice_no, "lines": len(losing_lines)},
+                channel="cli",
+            )
+
+    run(action)
+
+
+# --- reversals --------------------------------------------------------
+
+
+@cli.command("reversals")
+def reversals() -> None:
+    """Operations that can still be put back."""
+
+    async def action(ctx: AdminContext) -> None:
+        service = ReversalService(ctx.session)
+        manifests = await service.open_manifests(ctx.org_id)
+        if not manifests:
+            console.warn("nothing reversible recorded yet")
+            return
+        console.table(
+            [
+                [
+                    str(m.id)[:8],
+                    m.created_at.strftime("%Y-%m-%d %H:%M"),
+                    m.operation,
+                    m.subject,
+                    str(len(m.payload.get("moved", []))),
+                ]
+                for m in manifests
+            ],
+            headers=["id", "when", "what", "subject", "rows"],
+        )
+        console.say()
+        console.item(console.dim("erp unmerge <id>   — put one back"))
+
+    run(action)
+
+
+@cli.command("unmerge")
+def unmerge(
+    reference: Annotated[str, typer.Argument(help="Reversal id, from `erp reversals`")],
+) -> None:
+    """Undo a merge, if the books still allow it.
+
+    Every row the merge moved is checked against where it is now before
+    anything is touched. Rows edited since still go back; rows that were
+    moved again, purged, or have had money allocated against them do
+    not, and the whole reversal refuses rather than doing the honest
+    half and leaving the rest wrong."""
+
+    async def action(ctx: AdminContext) -> None:
+        service = ReversalService(ctx.session)
+        manifest = await service.get(ctx.org_id, reference)
+        plan = await service.plan(manifest)
+
+        console.head(f"Reverse: {manifest.subject}")
+        console.item(f"{manifest.operation}, {manifest.created_at:%d %b %Y}")
+
+        counts: dict[str, int] = {}
+        for row in plan.rows:
+            counts[row.state] = counts.get(row.state, 0) + 1
+        for state in ("intact", "modified", "re-pointed", "missing", "entangled"):
+            if counts.get(state):
+                line = f"{counts[state]} {state}"
+                console.item(line) if state in {"intact", "modified"} else console.bad(line)
+
+        if not plan.ok:
+            console.say()
+            for row in plan.blocked:
+                console.bad(f"{row.table} {str(row.row_id)[:8]}: {row.detail}")
+            console.say()
+            console.warn("Nothing was changed. To clear the blockers:")
+            if any(r.state == "entangled" for r in plan.blocked):
+                console.item(console.dim("erp payment reverse <id>   — then run this again"))
+            if any(r.state == "re-pointed" for r in plan.blocked):
+                console.item(
+                    console.dim("something moved these again; that has to be undone first")
+                )
+            if any(r.state == "missing" for r in plan.blocked):
+                console.item(console.dim("erp restore-purged <kind> <ref>   — for anything purged"))
+            raise AdminError("reversal blocked.")
+
+        confirm(
+            ctx, expected=str(manifest.id)[:8], prompt=f"Type {str(manifest.id)[:8]} to confirm: "
+        )
+        async with guarded(ctx, what=f"reversal of {manifest.subject}"):
+            moved = await service.apply(plan, ctx.actor)
+            console.item(f"{moved} row(s) put back")
+            await AuditService(ctx.session).record(
+                ctx.org_id,
+                ctx.actor.id,
+                action=f"{manifest.operation}.reversed",
+                entity_type="reversal_manifests",
+                entity_id=manifest.id,
+                after_state={"subject": manifest.subject, "rows": moved},
                 channel="cli",
             )
 

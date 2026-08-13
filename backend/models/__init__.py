@@ -31,11 +31,13 @@ from backend.models.system import (
     AuditLog,
     ReconciliationRun,
     ReportJob,
+    ReversalManifest,
     Setting,
     WhatsappSession,
 )
 
 __all__ = [
+    "ReversalManifest",
     "AuditLog",
     "Attachment",
     "BankLedger",

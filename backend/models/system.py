@@ -156,3 +156,40 @@ class ReportJob(UUIDPkMixin, OrgScopedMixin, Base):
     created_by: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )
+
+
+class ReversalManifest(UUIDPkMixin, OrgScopedMixin, Base):
+    """What an operation moved, so it can be moved back.
+
+    See the migration (d9e4a17c2b68) for why this is not an audit row:
+    `reversed_at` has to be updated, and an audit log that can be
+    updated is not one. Both are written -- the audit log says a merge
+    happened, this says what it would take to undo it.
+
+    `payload` shape:
+
+        {"moved":   [{"table": ..., "id": ..., "column": ...,
+                      "from": ..., "to": ...}, ...],
+         "hidden":  [{"table": ..., "id": ...}, ...],
+         "created": [{"table": ..., "id": ...}, ...]}
+
+    Rows are named by primary key, never by a business key. An invoice
+    number can be changed and a party can be merged; that is precisely
+    the failure this table exists to prevent, so it must not depend on
+    either.
+    """
+
+    __tablename__ = "reversal_manifests"
+
+    operation: Mapped[str] = mapped_column(String, nullable=False)
+    #: Readable handle, so a manifest can be found without knowing an id.
+    subject: Mapped[str] = mapped_column(String, nullable=False)
+    actor_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(server_default=text("now()"))
+    #: Set once reversed. A manifest is usable exactly once: reversing
+    #: twice would move rows that are already home.
+    reversed_at: Mapped[datetime.datetime | None]
+    reversed_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
