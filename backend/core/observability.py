@@ -16,10 +16,18 @@ read is worth far less than the purchase that read belongs to, so every
 entry point here swallows its own failures, and `fail_safe=True` tells
 the SDK to do the same for the instrumentation it installs.
 
-What leaves the machine: the prompts, and the model's answer -- which is
-the transcribed sheet, so supplier names, invoice numbers, product codes
-and amounts. The sheet photo does not: AgentOps records only the `text`
+**No sheet contents leave the machine.** What the model was shown and
+what it answered are stripped from every span before export, because on
+a sheet read the answer *is* the bill -- supplier, invoice number,
+codes, weights, rates. What is left is metadata: model, token counts,
+latency, finish reason, and which sheet kind was being read. The photo
+was never sent in the first place; AgentOps records only the `text`
 blocks of a message, and the image is a separate block it skips.
+
+That stripping is not something AgentOps offers a switch for, so it
+reaches into the SDK's OpenTelemetry internals. If a version bump moves
+them, tracing switches itself off rather than start exporting bills --
+see `_install_redaction` and its caller.
 """
 
 from __future__ import annotations
@@ -41,6 +49,78 @@ logger = get_logger(__name__)
 _lock = threading.Lock()
 _enabled = False
 _configured = False
+
+
+#: Span attributes that carry what was actually said to and by the model.
+#: On a sheet read the completion *is* the bill -- supplier, invoice
+#: number, codes, weights, rates -- so none of it may leave the machine.
+#: Everything else the instrumentation records (model, token counts,
+#: latency, finish reason, roles) is metadata and is kept.
+_BULK_CONTENT_KEYS = frozenset(
+    {"gen_ai.prompt", "gen_ai.completion", "gen_ai.completion.chunk"}
+)
+_CONTENT_SUFFIXES = (".content", ".arguments")
+
+
+def _is_content(key: str) -> bool:
+    return key in _BULK_CONTENT_KEYS or key.endswith(_CONTENT_SUFFIXES)
+
+
+def _strip_content(span: Any) -> None:
+    """Drop the content attributes from one span, in place.
+
+    The attribute mapping on a finished span is immutable, so this
+    replaces it wholesale rather than deleting keys from it.
+    """
+    attributes = getattr(span, "_attributes", None)
+    if not attributes:
+        return
+    kept = {key: value for key, value in attributes.items() if not _is_content(key)}
+    if len(kept) != len(attributes):
+        span._attributes = kept
+
+
+def _install_redaction() -> None:
+    """Strip content from every span on its way out.
+
+    This sits on the exporter rather than on a span processor because a
+    processor's position in the chain decides whether it runs before or
+    after the batch processor has already queued the span, and that
+    ordering is not ours to control. The exporter is the single point
+    everything must pass through, whatever queued it.
+
+    Raises if it cannot find an exporter to wrap -- see the caller. It
+    must never fail open.
+    """
+    from opentelemetry import trace as otel_trace
+
+    provider = otel_trace.get_tracer_provider()
+    processors = getattr(
+        getattr(provider, "_active_span_processor", None), "_span_processors", ()
+    )
+
+    wrapped = 0
+    for processor in processors:
+        exporter = getattr(processor, "span_exporter", None)
+        if exporter is None or getattr(exporter.export, "_redacts_content", False):
+            continue
+
+        original = exporter.export
+
+        def export(spans: Any, *args: Any, _original: Any = original, **kwargs: Any) -> Any:
+            for span in spans:
+                _strip_content(span)
+            return _original(spans, *args, **kwargs)
+
+        export._redacts_content = True  # type: ignore[attr-defined]
+        exporter.export = export
+        wrapped += 1
+
+    if wrapped == 0:
+        raise RuntimeError(
+            "no span exporter found to wrap; AgentOps internals have moved "
+            "and prompts would be exported unredacted"
+        )
 
 
 def _preload_provider_sdks() -> None:
@@ -114,6 +194,18 @@ def configure_tracing(component: str) -> bool:
             logger.warning("agentops_init_failed", component=component, error=str(exc))
             return False
 
+        # Fails closed. AgentOps has no supported switch for suppressing
+        # prompt and completion content, so redaction reaches into its
+        # OTel internals; if a version bump moves them, the correct
+        # outcome is no telemetry, not a bill's contents leaving the
+        # machine. Tracing stays off and the ERP is otherwise unaffected.
+        try:
+            _install_redaction()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("agentops_redaction_failed", component=component, error=str(exc))
+            _shutdown_sdk()
+            return False
+
         _enabled = True
         logger.info("agentops_enabled", component=component, environment=settings.environment)
         return True
@@ -170,10 +262,21 @@ def shutdown_tracing() -> None:
     global _enabled
     if not _enabled:
         return
+    _shutdown_sdk()
+    _enabled = False
+
+
+def _shutdown_sdk() -> None:
+    """Stop the SDK, flushing whatever it still holds.
+
+    Also the way an unredactable AgentOps is switched back off, which is
+    why it is separate from `shutdown_tracing` and does not consult
+    `_enabled` -- at that point tracing was never enabled, but the SDK is
+    already running and has to be stopped.
+    """
     try:
         import agentops
 
         agentops.tracer.shutdown()
     except Exception as exc:  # noqa: BLE001 -- shutdown must not raise
         logger.warning("agentops_shutdown_failed", error=str(exc))
-    _enabled = False

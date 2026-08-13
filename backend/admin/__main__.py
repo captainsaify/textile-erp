@@ -7,7 +7,7 @@ imports are the wiring and are not unused.
 from __future__ import annotations
 
 from backend.admin.app import cli
-from backend.admin.commands import fix, safety, show, stock  # noqa: F401
+from backend.admin.commands import add, fix, manage, safety, show, stock  # noqa: F401
 
 __all__ = ["cli"]
 

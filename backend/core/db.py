@@ -7,7 +7,8 @@ sync ORM would block the FastAPI event loop.
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+import contextlib
+from collections.abc import AsyncGenerator, AsyncIterator
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -85,3 +86,29 @@ async def check_db_connection() -> bool:
         return True
     except Exception:  # noqa: BLE001 -- health check must never raise
         return False
+
+
+@contextlib.asynccontextmanager
+async def joined_transaction(session: AsyncSession) -> AsyncIterator[None]:
+    """Own the transaction, or join one the caller already opened.
+
+    `session.begin()` raises "a transaction is already begun" when one
+    is open, and a bare `select` autobegins one (HANDOFF.md §5). That is
+    fine while every caller is a request handler, and stops being fine
+    the moment a second caller wants to wrap several service calls in
+    one unit of work -- which is exactly what the admin CLI does, since
+    it commits only if reconciliation still passes afterwards
+    (docs/31_AdminCLI.md §3.1).
+
+    The alternative was a second public entry point per service. Two of
+    those exist already (`UndoService.undo_in_transaction`,
+    `ChargeService.add_in_transaction`) and were written before this
+    helper; they still work and are still tested, so they stay. New
+    cases use this instead -- it needs no duplicated signature, and a
+    signature duplicated by hand is one that drifts.
+    """
+    if session.in_transaction():
+        yield
+    else:
+        async with session.begin():
+            yield

@@ -19,11 +19,19 @@ from backend.core.config import get_settings
 
 
 @pytest.fixture(autouse=True)
-def _reset_module_state() -> Iterator[None]:
+def _reset_module_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """`configure_tracing` is once-per-process by design, so each test
-    has to start from an un-configured module."""
+    has to start from an un-configured module.
+
+    Redaction is stubbed out here because it reaches into a real
+    OpenTelemetry provider that the fake SDK below does not have. The
+    tests that care about it -- `test_strip_content_keeps_the_metadata`
+    and `test_tracing_refuses_to_run_unredacted` -- exercise it directly
+    or replace this stub.
+    """
     observability._enabled = False
     observability._configured = False
+    monkeypatch.setattr(observability, "_install_redaction", lambda: None)
     yield
     observability._enabled = False
     observability._configured = False
@@ -144,6 +152,82 @@ def test_export_failure_never_reaches_the_caller(
     with observability.trace("purchase_sheet_read"):
         result = "the sheet was read"
     assert result == "the sheet was read"
+
+
+class _Span:
+    """Just enough ReadableSpan to be redacted."""
+
+    def __init__(self, attributes: dict[str, object]) -> None:
+        self._attributes = attributes
+
+
+def test_content_attributes_are_recognised() -> None:
+    for key in (
+        "gen_ai.prompt.0.content",
+        "gen_ai.completion.0.content",
+        "gen_ai.prompt",
+        "gen_ai.completion",
+        "gen_ai.completion.chunk",
+        "gen_ai.completion.0.tool_calls.0.arguments",
+    ):
+        assert observability._is_content(key), key
+
+    # metadata -- the reason for having traces at all
+    for key in (
+        "gen_ai.usage.prompt_tokens",
+        "gen_ai.usage.completion_tokens",
+        "gen_ai.request.model",
+        "gen_ai.response.finish_reason",
+        "gen_ai.completion.0.role",
+        "model",
+    ):
+        assert not observability._is_content(key), key
+
+
+def test_strip_content_keeps_the_metadata() -> None:
+    span = _Span(
+        {
+            "gen_ai.prompt.0.content": "Transcribe every item row of this purchase sheet.",
+            "gen_ai.completion.0.content": '{"supplier_name": "ACME TEXTILES"}',
+            "gen_ai.usage.prompt_tokens": 2255,
+            "gen_ai.request.model": "claude-haiku-4-5",
+        }
+    )
+    observability._strip_content(span)
+
+    assert span._attributes == {
+        "gen_ai.usage.prompt_tokens": 2255,
+        "gen_ai.request.model": "claude-haiku-4-5",
+    }
+    blob = str(span._attributes)
+    assert "ACME TEXTILES" not in blob
+    assert "purchase sheet" not in blob
+
+
+def test_tracing_refuses_to_run_unredacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The property that matters most.
+
+    If AgentOps moves the internals redaction reaches into, the outcome
+    must be no telemetry -- never a bill's contents on the wire.
+    """
+    fake = _install(monkeypatch, _FakeAgentops())
+    fake.init = lambda **_: None  # type: ignore[attr-defined]
+    _with_key(monkeypatch, "key-1")
+
+    def _cannot_redact() -> None:
+        raise RuntimeError("no span exporter found to wrap")
+
+    monkeypatch.setattr(observability, "_install_redaction", _cannot_redact)
+
+    assert observability.configure_tracing("worker") is False
+    assert observability._enabled is False
+    # and the half-started SDK was stopped rather than left exporting
+    assert fake.shutdowns == 1
+
+    # a trace taken in that state is a plain no-op
+    with observability.trace("purchase_sheet_read"):
+        pass
+    assert fake.started == []
 
 
 def test_shutdown_flushes_once_and_only_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:

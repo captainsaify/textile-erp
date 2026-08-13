@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.core.db import joined_transaction
 from backend.core.exceptions import DuplicateSaleError, ValidationError
 from backend.models import Customer, SalesHeader, SalesLine, User, Warehouse
 from backend.models.enums import AccountCode, LedgerEntryType, SalePaymentType
@@ -465,7 +466,7 @@ class SalesService:
         whatsapp_message_id: str | None = None,
     ) -> ConfirmedSale:
         org_id = actor.org_id
-        async with self._session.begin():
+        async with joined_transaction(self._session):
             self.validate(draft)
             if draft.idempotency_key is not None:
                 existing = await self.find_by_idempotency_key(org_id, draft.idempotency_key)

@@ -3,10 +3,8 @@
 > The sheet to keep open. Design and reasoning live in
 > [`docs/31_AdminCLI.md`](docs/31_AdminCLI.md).
 >
-> **Status.** Built and working: `show`, `history`, `check`, `backup`,
-> `backups`, `restore`, `fix`, `stock recost`, `stock adjust`.
-> Not built yet: `add`, `charge`, `merge`, `purge`, `restore-purged` —
-> those sections are marked *(not yet)* below.
+> **Status: all of it works.** Run `erp --help` on the box for the
+> current list.
 
 ## Getting in
 
@@ -78,7 +76,7 @@ old party keeps its cash-ledger and journal entries there. If money had
 already come in under the wrong name, reverse the receipt first, then
 re-record it against the right one.
 
-### …add GST or packing to a bill already confirmed  *(not yet)*
+### …add GST or packing to a bill already confirmed
 
 ```bash
 erp charge purchase 007 GST 1200
@@ -94,7 +92,7 @@ a sale — not into expenses.
 erp fix purchase 007 --rate 107            # the bill
 ```
 
-### …enter a bill by hand  *(not yet)*
+### …enter a bill by hand
 
 ```bash
 erp add purchase \
@@ -104,11 +102,15 @@ erp add purchase \
   --charge "GST:1200"
 ```
 
-Format is `CODE:QTY:RATE:BRAND:DESCRIPTION`. Leave any flag off and it
-asks you one question at a time, like WhatsApp does. `erp add sale` is
-the same shape with `--customer`.
+Format is `CODE:QTY:RATE:BRAND:DESCRIPTION` — brand and description are
+optional. `--line` and `--charge` both repeat. `erp add sale` is the
+same shape with `--customer` and no invoice number.
 
-### …combine two parties that are the same person  *(not yet)*
+Products must already exist under the brand you name. That is on
+purpose: silently creating one here is how a typo ends up as a second
+product holding half your stock.
+
+### …combine two parties that are the same person
 
 ```bash
 erp merge supplier "Yakub Asif" into "Asif Panipat"
@@ -119,7 +121,7 @@ erp merge brand "TOP " into "TOP"
 Everything moves to the name on the right. The one on the left stops
 existing.
 
-### …combine two bills that are one bill  *(not yet)*
+### …combine two bills that are one bill
 
 ```bash
 erp merge purchase 007B into 007
@@ -127,7 +129,7 @@ erp merge purchase 007B into 007
 
 Lines join, charges add up, freight re-spreads across all of them.
 
-### …delete something completely  *(not yet)*
+### …delete something completely
 
 ```bash
 erp undo <id>                    # the gentle one: reverses it, keeps the record
@@ -170,7 +172,8 @@ allowed to commit.
 
 ```bash
 erp backup
-erp restore data/backups/cli/2026-08-13-purge-1051.dump
+erp backups                   # what can be restored
+erp restore <name>
 ```
 
 One is taken automatically before every command that changes anything.

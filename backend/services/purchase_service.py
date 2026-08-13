@@ -20,6 +20,7 @@ from rapidfuzz import fuzz
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.core.db import joined_transaction
 from backend.core.exceptions import (
     ExactDuplicateInvoiceError,
     FuzzyDuplicateInvoiceError,
@@ -552,7 +553,7 @@ class PurchaseService:
         whatsapp_message_id: str | None = None,
     ) -> ConfirmedPurchase:
         org_id = actor.org_id
-        async with self._session.begin():
+        async with joined_transaction(self._session):
             today = await business_today(self._session, org_id)
             self._validate(draft, today)
             await self._check_total_mismatch(org_id, draft)
