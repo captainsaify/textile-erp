@@ -14,6 +14,7 @@ import uuid
 from collections.abc import AsyncIterator
 
 import pytest
+import sqlalchemy as sa
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -949,3 +950,181 @@ async def test_a_movement_says_which_bill_it_came_from(
     assert response.status_code == 200, response.text
     movement = response.json()["items"][0]
     assert movement["origin"] == f"Purchase ORIG-{suffix} · Origin Co {suffix}"
+
+
+# --------------------------------------------------------------------
+# analytics
+# --------------------------------------------------------------------
+
+
+async def _sold_product(
+    session_factory: async_sessionmaker[AsyncSession],
+    owner: User,
+    *,
+    code: str,
+    rate: str,
+    cost_then: str,
+    qty: str = "10",
+    on_hand: str = "100",
+) -> None:
+    """One product with one sale, at a stated rate against a stated
+    cost-at-the-time."""
+    import decimal
+
+    from backend.models import (
+        Brand,
+        Customer,
+        Inventory,
+        Product,
+        ProductType,
+        SalesHeader,
+        SalesLine,
+    )
+    from backend.models.enums import SalePaymentType
+    from backend.tests.conftest import SEEDED_MAIN_WAREHOUSE_ID
+
+    D = decimal.Decimal
+    async with session_factory() as session, session.begin():
+        ptype = (
+            (await session.execute(sa.select(ProductType).where(ProductType.org_id == ORG)))
+            .scalars()
+            .first()
+        )
+        assert ptype is not None
+        brand = Brand(org_id=ORG, name=f"B{code}")
+        customer = Customer(org_id=ORG, name=f"Cust {code}", created_by=owner.id)
+        session.add_all([brand, customer])
+        await session.flush()
+        product = Product(
+            org_id=ORG,
+            product_type_id=ptype.id,
+            code=code,
+            description=f"{code} goods",
+            unit_id=ptype.default_unit_id,
+            brand_id=brand.id,
+            created_by=owner.id,
+        )
+        session.add(product)
+        await session.flush()
+        session.add(
+            Inventory(
+                org_id=ORG,
+                product_id=product.id,
+                warehouse_id=uuid.UUID(SEEDED_MAIN_WAREHOUSE_ID),
+                qty_on_hand=D(on_hand),
+                # Deliberately different from cost_then: today's average
+                # must not be what margin is computed from.
+                weighted_avg_cost=D("1"),
+            )
+        )
+        header = SalesHeader(
+            org_id=ORG,
+            customer_id=customer.id,
+            warehouse_id=uuid.UUID(SEEDED_MAIN_WAREHOUSE_ID),
+            sale_date=datetime.date.today(),
+            payment_type=SalePaymentType.CREDIT,
+            subtotal=D(rate) * D(qty),
+            grand_total=D(rate) * D(qty),
+            created_by=owner.id,
+        )
+        session.add(header)
+        await session.flush()
+        session.add(
+            SalesLine(
+                org_id=ORG,
+                sales_header_id=header.id,
+                line_no=1,
+                product_id=product.id,
+                qty=D(qty),
+                rate=D(rate),
+                line_total=D(rate) * D(qty),
+                avg_cost_at_sale_time=D(cost_then),
+            )
+        )
+
+
+async def test_product_performance_uses_the_cost_at_the_time_of_sale(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Margin must come from `avg_cost_at_sale_time`, not from today's
+    weighted average.
+
+    They differ the moment anything is bought since, and using today's
+    figure would silently re-price history -- a product looking more
+    profitable because the last purchase of it happened to be cheap. The
+    fixture sets today's average to 1, so a margin computed the wrong
+    way would be almost 100%.
+    """
+    await _sold_product(session_factory, owner, code="AAA", rate="200", cost_then="150")
+    token = await _token(client, owner)
+
+    response = await client.get("/api/v1/metrics/products", headers=_auth(token))
+    assert response.status_code == 200, response.text
+    rows = {row["code"]: row for row in response.json()["best_by_profit"]}
+    assert "AAA" in rows
+    row = rows["AAA"]
+    assert row["revenue"] == "2000.00"
+    assert row["cost"] == "1500.00"
+    assert row["profit"] == "500.00"
+    assert row["margin_pct"] == "25.0", (
+        "margin was computed against today's average, not the sale's"
+    )
+
+
+async def test_a_product_sold_below_cost_is_flagged_not_hidden(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await _sold_product(session_factory, owner, code="BBB", rate="70", cost_then="121")
+    token = await _token(client, owner)
+
+    body = (await client.get("/api/v1/metrics/products", headers=_auth(token))).json()
+    losing = {row["code"] for row in body["losing"]}
+    assert "BBB" in losing
+
+
+async def test_brand_metrics_group_by_label(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A code means nothing without a brand here -- three products share
+    55X on the real books -- so "is this label earning" is a question the
+    product view cannot answer."""
+    await _sold_product(session_factory, owner, code="CCC", rate="300", cost_then="100")
+    token = await _token(client, owner)
+
+    body = (await client.get("/api/v1/metrics/brands", headers=_auth(token))).json()
+    brands = {row["brand"]: row for row in body["brands"]}
+    assert "BCCC" in brands
+    assert brands["BCCC"]["profit"] == "2000.00"
+    assert brands["BCCC"]["codes"] == 1
+
+
+async def test_stock_health_says_how_thin_the_evidence_is(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Every rate-based figure carries the sample it came from.
+
+    A days-of-cover number built on one sale is a different object from
+    one built on fifty, and a dashboard that hides the difference is a
+    dashboard that lies confidently.
+    """
+    await _sold_product(session_factory, owner, code="DDD", rate="200", cost_then="150")
+    token = await _token(client, owner)
+
+    body = (await client.get("/api/v1/metrics/stock-health", headers=_auth(token))).json()
+    rows = body["reorder"] + body["dead_stock"]
+    for row in rows:
+        assert "sale_count" in row and "sold_over_days" in row
+
+
+async def test_analytics_are_owner_only(
+    client: AsyncClient, staff: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Margin is partner-level information (docs/14 #rbac)."""
+    token = await _token(client, staff)
+    for path in (
+        "/api/v1/metrics/products",
+        "/api/v1/metrics/brands",
+        "/api/v1/metrics/stock-health",
+    ):
+        response = await client.get(path, headers=_auth(token))
+        assert response.status_code == 403, f"{path} was readable by staff"

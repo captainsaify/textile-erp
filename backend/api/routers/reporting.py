@@ -15,7 +15,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from backend.api.amounts import money_str, qty_str
 from backend.api.deps import CurrentUser, OwnerUser, Paging, Session
@@ -374,4 +374,273 @@ async def export_status(job_id: str, user: CurrentUser, session: Session) -> dic
         "size_bytes": job.file_size_bytes,
         "error": job.error,
         "expires_at": job.expires_at.isoformat() if job.expires_at else None,
+    }
+
+
+@router.get("/metrics/products")
+async def product_performance(
+    user: OwnerUser,
+    session: Session,
+    days: Annotated[int, Query(ge=1, le=730)] = 90,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> dict[str, Any]:
+    """Which goods actually earn, over a window.
+
+    Margin is computed from `sales_lines.avg_cost_at_sale_time` -- the
+    cost snapshot taken when the goods went out -- not from today's
+    weighted average. Those differ whenever anything was bought since,
+    and using today's figure would silently re-price history: a product
+    would look more profitable simply because the last purchase of it
+    was cheap. The snapshot is what the sale actually cost.
+
+    Returns per product, so the two questions get different answers:
+    `margin_pct` is "does this sell well", `profit` is "does this
+    matter". A code with a 60% margin and nine kilos sold is a curiosity;
+    one at 8% carrying half the turnover is the business.
+
+    Owner-only: margin is partner-level information (docs/14 #rbac).
+    """
+    from backend.models import Brand, Product, SalesHeader, SalesLine
+
+    today = await business_today(session, user.org_id)
+    since = today - datetime.timedelta(days=days)
+
+    revenue = func.sum(SalesLine.line_total)
+    cost = func.sum(SalesLine.qty * SalesLine.avg_cost_at_sale_time)
+    sold = func.sum(SalesLine.qty)
+
+    rows = (
+        await session.execute(
+            select(
+                Product.code,
+                Brand.name,
+                Product.description,
+                sold.label("qty"),
+                revenue.label("revenue"),
+                cost.label("cost"),
+            )
+            .join(SalesLine, SalesLine.product_id == Product.id)
+            .join(SalesHeader, SalesHeader.id == SalesLine.sales_header_id)
+            .join(Brand, Brand.id == Product.brand_id, isouter=True)
+            .where(
+                SalesHeader.org_id == user.org_id,
+                SalesHeader.deleted_at.is_(None),
+                SalesHeader.sale_date >= since,
+                # Returned goods never earned anything; counting the
+                # sale without the return would show a margin on stock
+                # that came back through the door.
+                SalesLine.qty > SalesLine.returned_qty,
+            )
+            .group_by(Product.code, Brand.name, Product.description)
+            .having(sold > 0)
+        )
+    ).all()
+
+    items: list[dict[str, Any]] = []
+    for code, brand, description, qty, gross, spent in rows:
+        gross = decimal.Decimal(gross or 0)
+        spent = decimal.Decimal(spent or 0)
+        qty = decimal.Decimal(qty or 0)
+        profit = gross - spent
+        items.append(
+            {
+                "code": code,
+                "brand": brand,
+                "description": description,
+                "qty": str(qty.normalize()),
+                "revenue": money_str(gross),
+                "cost": money_str(spent),
+                "profit": money_str(profit),
+                "avg_rate": money_str(gross / qty) if qty else money_str(decimal.Decimal(0)),
+                "avg_cost": money_str(spent / qty) if qty else money_str(decimal.Decimal(0)),
+                # Margin on revenue, not on cost. "We keep 12% of what
+                # comes in" is the sentence a trader checks against a
+                # price; markup on cost answers a different question and
+                # reads about 40% higher for the same goods.
+                "margin_pct": (
+                    str((profit / gross * 100).quantize(decimal.Decimal("0.1"))) if gross else "0.0"
+                ),
+                "below_cost": profit < 0,
+            }
+        )
+
+    by_profit = sorted(items, key=lambda i: decimal.Decimal(i["profit"]), reverse=True)
+    by_margin = sorted(items, key=lambda i: decimal.Decimal(i["margin_pct"]), reverse=True)
+    return {
+        "days": days,
+        "best_by_profit": by_profit[:limit],
+        "best_by_margin": by_margin[:limit],
+        "losing": [i for i in by_profit if i["below_cost"]],
+    }
+
+
+@router.get("/metrics/brands")
+async def brand_performance(
+    user: OwnerUser,
+    session: Session,
+    days: Annotated[int, Query(ge=1, le=730)] = 90,
+) -> dict[str, Any]:
+    """The same question as `/metrics/products`, asked per label.
+
+    Brands are how this business thinks about its goods -- a code means
+    nothing without one, and three products share `55X` on these books.
+    So "is BSQ earning" is a question the product view cannot answer.
+    """
+    from backend.models import Brand, Product, SalesHeader, SalesLine
+
+    today = await business_today(session, user.org_id)
+    since = today - datetime.timedelta(days=days)
+
+    rows = (
+        await session.execute(
+            select(
+                # Grouped on the column, not on coalesce(...): the literal
+                # binds as a parameter and Postgres will not match the two
+                # expressions, so it demands brands.name in GROUP BY anyway.
+                # The null becomes a dash below, where it is a display concern.
+                Brand.name.label("brand"),
+                func.sum(SalesLine.qty).label("qty"),
+                func.sum(SalesLine.line_total).label("revenue"),
+                func.sum(SalesLine.qty * SalesLine.avg_cost_at_sale_time).label("cost"),
+                func.count(func.distinct(SalesHeader.id)).label("sales"),
+                func.count(func.distinct(Product.id)).label("codes"),
+            )
+            .join(SalesLine, SalesLine.product_id == Product.id)
+            .join(SalesHeader, SalesHeader.id == SalesLine.sales_header_id)
+            .join(Brand, Brand.id == Product.brand_id, isouter=True)
+            .where(
+                SalesHeader.org_id == user.org_id,
+                SalesHeader.deleted_at.is_(None),
+                SalesHeader.sale_date >= since,
+            )
+            .group_by(Brand.name)
+        )
+    ).all()
+
+    items: list[dict[str, Any]] = []
+    for brand, qty, gross_raw, cost_raw, sales, codes in rows:
+        gross = decimal.Decimal(gross_raw or 0)
+        spent = decimal.Decimal(cost_raw or 0)
+        profit = gross - spent
+        items.append(
+            {
+                "brand": brand or "—",
+                "qty": str(decimal.Decimal(qty or 0).normalize()),
+                "revenue": money_str(gross),
+                "profit": money_str(profit),
+                "margin_pct": (
+                    str((profit / gross * 100).quantize(decimal.Decimal("0.1"))) if gross else "0.0"
+                ),
+                "sales": sales,
+                "codes": codes,
+            }
+        )
+    items.sort(key=lambda i: decimal.Decimal(i["profit"]), reverse=True)
+    return {"days": days, "brands": items}
+
+
+@router.get("/metrics/stock-health")
+async def stock_health(
+    user: OwnerUser,
+    session: Session,
+    days: Annotated[int, Query(ge=7, le=730)] = 90,
+) -> dict[str, Any]:
+    """What to reorder, what is not moving, and how thin the evidence is.
+
+    Deliberately **not** a forecast, and that is a decision rather than
+    an omission. At this business's volume -- a fortnight of trading and
+    a couple of dozen sales -- a fitted trend is noise drawn
+    confidently, and it would look more authoritative on a dashboard
+    than the numbers it was made from.
+
+    What this does instead is arithmetic anyone can check: what sold,
+    over how many days, therefore how long the stock on hand lasts at
+    that rate. Every row carries `sale_count` and `sold_over_days`, so
+    a days-of-cover figure built on two sales is visibly a different
+    object from one built on fifty. Hiding that difference is what makes
+    a dashboard lie.
+    """
+    from backend.models import Brand, Inventory, Product, SalesHeader, SalesLine
+
+    today = await business_today(session, user.org_id)
+    since = today - datetime.timedelta(days=days)
+
+    movement = (
+        select(
+            SalesLine.product_id.label("product_id"),
+            func.sum(SalesLine.qty).label("sold"),
+            func.count(func.distinct(SalesHeader.id)).label("sale_count"),
+            func.max(SalesHeader.sale_date).label("last_sold"),
+        )
+        .join(SalesHeader, SalesHeader.id == SalesLine.sales_header_id)
+        .where(
+            SalesHeader.org_id == user.org_id,
+            SalesHeader.deleted_at.is_(None),
+            SalesHeader.sale_date >= since,
+        )
+        .group_by(SalesLine.product_id)
+        .subquery()
+    )
+
+    rows = (
+        await session.execute(
+            select(
+                Product.code,
+                Brand.name,
+                Product.description,
+                Product.reorder_level,
+                Inventory.qty_on_hand,
+                Inventory.weighted_avg_cost,
+                movement.c.sold,
+                movement.c.sale_count,
+                movement.c.last_sold,
+            )
+            .join(Inventory, Inventory.product_id == Product.id)
+            .join(Brand, Brand.id == Product.brand_id, isouter=True)
+            .join(movement, movement.c.product_id == Product.id, isouter=True)
+            .where(Product.org_id == user.org_id, Product.deleted_at.is_(None))
+        )
+    ).all()
+
+    window = decimal.Decimal(days)
+    reorder: list[dict[str, Any]] = []
+    dead: list[dict[str, Any]] = []
+    for code, brand, description, level, on_hand_raw, cost, sold_raw, sale_count, last in rows:
+        on_hand = decimal.Decimal(on_hand_raw or 0)
+        sold = decimal.Decimal(sold_raw or 0)
+        per_day = sold / window if sold else decimal.Decimal(0)
+        cover = int(on_hand / per_day) if per_day > 0 else None
+
+        row: dict[str, Any] = {
+            "code": code,
+            "brand": brand or "—",
+            "description": description,
+            "on_hand": str(on_hand.normalize()),
+            "value": money_str(on_hand * decimal.Decimal(cost or 0)),
+            "sold": str(sold.normalize()),
+            "sale_count": sale_count or 0,
+            "sold_over_days": days,
+            "last_sold": last.isoformat() if last else None,
+            "days_of_cover": cover,
+            "reorder_level": str(decimal.Decimal(level or 0).normalize()),
+        }
+        if on_hand <= 0 or (level and on_hand <= decimal.Decimal(level)):
+            row["reason"] = "at or below reorder level"
+            reorder.append(row)
+        elif cover is not None and cover <= 30:
+            row["reason"] = f"about {cover} days left at the recent rate"
+            reorder.append(row)
+        elif sold == 0 and on_hand > 0:
+            row["reason"] = f"nothing sold in {days} days"
+            dead.append(row)
+
+    reorder.sort(key=lambda r: (r["days_of_cover"] is None, r["days_of_cover"] or 0))
+    dead.sort(key=lambda r: decimal.Decimal(r["value"]), reverse=True)
+    return {
+        "days": days,
+        "reorder": reorder,
+        "dead_stock": dead,
+        "dead_value": money_str(
+            sum((decimal.Decimal(r["value"]) for r in dead), decimal.Decimal(0))
+        ),
     }
