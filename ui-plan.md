@@ -668,26 +668,23 @@ on a sale reduces **revenue**; one received on a purchase reduces the
 **cost of the goods**. Booking either as a negative charge puts it in the
 wrong half of the P&L, and the P&L is the number the partners read.
 
-*Fix, and it is four pieces, not one:*
+*Fixed. It is a deduction, and nothing more:*
 
-1. **`discount` column** (`NUMERIC`, default 0) on `purchase_headers`
-   and `sales_headers`, beside `freight` and `other_charges`. Header
-   level, not per line — a per-line discount is a different feature and
-   §15's open question can decide it later without redoing this.
-2. **Two account codes** — `PURCHASE_DISCOUNT` (income-ish, reduces
-   cost) and `SALES_DISCOUNT` (contra-revenue). Named separately
-   because netting them off would hide both.
-3. **Journal postings** on each side, and inclusion in
-   `grand_total = subtotal + freight + other_charges − discount`.
-4. **Cost effect on a purchase.** A purchase discount reduces what the
-   goods cost, so it flows into `landed_cost_per_unit` through the same
-   allocation `freight` and `other_charges` already use — otherwise
-   stock is valued at a price nobody paid. A *sales* discount touches no
-   cost at all.
+1. **`discount` column** (`NUMERIC`, default 0) on both headers, beside
+   `freight` and `other_charges`, constrained non-negative — a negative
+   discount is a surcharge and `other_charges` already says that.
+2. **No accounts.** A sale credits `SALES_REVENUE` with the *net*, a
+   purchase folds it into landed cost. A discount account would hold a
+   number that never happened — the gross was neither billed nor paid —
+   and every revenue total would read high until someone netted it off.
+3. `grand_total = subtotal + freight + other_charges − discount` on both
+   sides.
+4. **Cost effect on a purchase**: allocated across the lines by value,
+   like charges, and subtracted from `landed_cost_per_unit`, so stock is
+   worth what was paid for it. A sales discount touches no cost.
 
-Not hard, but it is real accounting work with a migration, and it must
-land before the form offers the field. A discount box that saves into
-`other_charges` would be worse than no discount box.
+Both sides end up symmetric, which is the sign it is right: less
+charged, less earned; less paid, less it cost.
 
 **16.3 Partial payment at sale time — two operations, no migration.**
 A sale is either `credit` (paid nothing) or `cash`/`bank` (paid in

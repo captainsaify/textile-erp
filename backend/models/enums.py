@@ -92,13 +92,6 @@ class AccountCode(enum.StrEnum):
     FREIGHT_EXPENSE = "freight_expense"
     OPERATING_EXPENSES = "operating_expenses"
     OTHER_INCOME = "other_income"
-    #: Contra-revenue: a discount given on a sale, carried on its own so
-    #: gross revenue stays gross. "Sold 12 lakh and gave away 40,000" is
-    #: a different sentence from "sold 11.6 lakh", and only one of them
-    #: tells you to stop. There is deliberately no purchase equivalent --
-    #: a discount received reduces what the goods cost, which is a
-    #: balance-sheet fact that belongs in the landed cost, not here.
-    SALES_DISCOUNT = "sales_discount"
     DAMAGE_LOSS = "damage_loss"
 
 

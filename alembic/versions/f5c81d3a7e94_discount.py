@@ -4,29 +4,21 @@ Revision ID: f5c81d3a7e94
 Revises: e1b73f4a92c5
 Create Date: 2026-08-14
 
-There was no discount anywhere -- not a column, not an account, not a
-service -- and it could not be smuggled in as a negative `other_charges`
-because the two sides are not the same kind of thing:
+There was no discount anywhere -- not a column, not a service. It is a
+deduction and nothing more: on a sale less was charged, so revenue is
+lower; on a purchase less was paid, so the goods cost less.
 
-  * A discount *given* on a sale reduces revenue. It belongs on the
-    profit and loss, and it is worth seeing on its own: "we sold
-    12 lakh and gave away 40,000" is a different sentence from "we sold
-    11.6 lakh", and only one of them tells you to stop.
+No account either side. A discount account would carry a figure that
+never happened -- the gross was not billed and not paid -- and every
+revenue total downstream would read high until someone remembered to
+net it off. Both effects are already visible where they belong: lower
+revenue on the P&L, lower stock value on the balance sheet, and the
+amount itself on the header for anyone who wants to see it.
 
-  * A discount *received* on a purchase reduces what the goods cost.
-    That is a balance-sheet fact, not a P&L one -- the stock is worth
-    what was paid for it, so the discount flows into the landed cost
-    alongside freight and charges and there is nothing to put in an
-    income account.
-
-So the accounting is deliberately asymmetric, and only the sale side
-gets a new account:
-
-    SALES_DISCOUNT   contra-revenue, debit balance.
-                     Dr AR (net) + Dr SALES_DISCOUNT = Cr SALES_REVENUE (gross)
-
-`journal_lines.account_code` is a plain String with no check constraint,
-so the new code needs no schema change of its own.
+What it must not be is a negative `other_charges`. That column holds
+amounts genuinely charged on top -- GST, packing -- and a price
+reduction sharing it would give two things one column and let them
+disagree about the sign.
 
 Header level, not per line. A per-line discount is a different feature
 with a different UI, and this column does not stand in its way.

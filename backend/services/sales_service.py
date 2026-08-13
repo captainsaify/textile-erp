@@ -624,17 +624,14 @@ class SalesService:
             # number these two partners actually steer by.
             charges = draft.freight + draft.other_charges
             debits = [(money_account, draft.grand_total)]
-            credits = [(AccountCode.SALES_REVENUE, draft.subtotal)]
+            # Revenue is what was charged for the goods, and a discount
+            # means less was charged. It is not a giveaway to carry in
+            # its own account: the gross was never billed, so posting it
+            # would put a number in the books that never happened, and
+            # every revenue figure downstream would read high.
+            credits = [(AccountCode.SALES_REVENUE, draft.subtotal - draft.discount)]
             if charges > ZERO:
                 credits.append((AccountCode.OTHER_INCOME, charges))
-            # A discount is contra-revenue, not a negative charge. The
-            # customer is debited the net; SALES_REVENUE keeps the gross
-            # and the giveaway sits in its own account, so "sold 12 lakh
-            # and gave away 40,000" stays a sentence you can read off the
-            # P&L. Netting it into revenue would hide exactly the number
-            # worth watching.
-            if draft.discount > ZERO:
-                debits.append((AccountCode.SALES_DISCOUNT, draft.discount))
             if cogs > ZERO:
                 debits.append((AccountCode.COGS, cogs))
                 credits.append((AccountCode.INVENTORY, cogs))

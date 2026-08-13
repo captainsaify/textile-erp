@@ -56,9 +56,7 @@ _configured = False
 #: number, codes, weights, rates -- so none of it may leave the machine.
 #: Everything else the instrumentation records (model, token counts,
 #: latency, finish reason, roles) is metadata and is kept.
-_BULK_CONTENT_KEYS = frozenset(
-    {"gen_ai.prompt", "gen_ai.completion", "gen_ai.completion.chunk"}
-)
+_BULK_CONTENT_KEYS = frozenset({"gen_ai.prompt", "gen_ai.completion", "gen_ai.completion.chunk"})
 _CONTENT_SUFFIXES = (".content", ".arguments")
 
 
@@ -95,9 +93,7 @@ def _install_redaction() -> None:
     from opentelemetry import trace as otel_trace
 
     provider = otel_trace.get_tracer_provider()
-    processors = getattr(
-        getattr(provider, "_active_span_processor", None), "_span_processors", ()
-    )
+    processors = getattr(getattr(provider, "_active_span_processor", None), "_span_processors", ())
 
     wrapped = 0
     for processor in processors:

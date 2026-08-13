@@ -1,18 +1,20 @@
-"""Discount, and why the two sides are deliberately not symmetric.
+"""Discount is a deduction, on both sides, and nothing more.
 
-A discount *given* on a sale reduces revenue: it is a profit-and-loss
-fact, and it is worth seeing on its own, because "we sold 12 lakh and
-gave away 40,000" is a different sentence from "we sold 11.6 lakh" and
-only one of them tells you to stop.
+A discount is a lower price. On a sale less was charged, so revenue is
+lower; on a purchase less was paid, so the goods cost less. Neither is
+an event needing an account of its own -- the gross figure was never
+billed and never paid, and putting it in the books would be recording
+something that did not happen. Every revenue figure downstream would
+then read high, and the correction would live in a second account
+nobody thinks to net off.
 
-A discount *received* on a purchase reduces what the goods cost: a
-balance-sheet fact, which belongs in the landed cost beside freight.
-There is no income account involved, and inventing one would value the
-stock at a price nobody paid.
+What it must *not* become is a negative `other_charges`. That would put
+a price reduction in the same bucket as GST and packing, which are
+amounts genuinely charged on top -- two different things sharing one
+column and disagreeing about the sign.
 
-Netting either into `other_charges` -- the shortcut this avoids -- puts
-both in the wrong half of the P&L, which is the number the partners
-actually steer by.
+The amount stays visible on the header either way, which is where a
+person looks for it: on the bill.
 """
 
 from __future__ import annotations
@@ -63,43 +65,41 @@ def test_allocation_never_loses_a_paisa() -> None:
     assert sum(shares) == D("1000")
 
 
-def test_the_sale_side_has_its_own_account_and_the_purchase_side_does_not() -> None:
-    """The asymmetry, asserted so it cannot be 'tidied up' later.
+def test_neither_side_gets_an_account_of_its_own() -> None:
+    """Asserted so it cannot be "improved" into existence later.
 
-    SALES_DISCOUNT exists because a giveaway belongs on the P&L on its
-    own line. There is deliberately no PURCHASE_DISCOUNT: that one is
-    already visible as a lower inventory value and a lower payable, and
-    an income account for it would double-count the benefit.
+    A discount account would hold a number that never happened: the
+    gross was not billed on a sale and not paid on a purchase. Both
+    sides are already visible -- lower revenue, lower stock value -- and
+    the amount itself is on the header for anyone who wants it.
     """
     codes = {code.value for code in AccountCode}
-    assert "sales_discount" in codes
-    assert "purchase_discount" not in codes, (
-        "a purchase discount reduces the cost of the goods; it is not income"
-    )
+    assert "sales_discount" not in codes
+    assert "purchase_discount" not in codes
 
 
-def test_a_sale_debits_the_customer_net_and_credits_revenue_gross() -> None:
+def test_a_sale_posts_revenue_at_what_was_actually_charged() -> None:
     """The posting shape, as arithmetic.
 
-        Dr customer        net
-        Dr SALES_DISCOUNT  discount
-           Cr SALES_REVENUE      gross
+        Dr customer  net
+           Cr SALES_REVENUE  net
 
-    Both sides balance, revenue stays gross, and the discount is a line
-    someone can read.
+    One line each side, and revenue equals the bill. Crediting the gross
+    and debiting the difference elsewhere would balance too -- and would
+    put 12 lakh of revenue in a month where 11.6 lakh was charged.
     """
     subtotal = D("1200000")
     discount = D("40000")
     charges = D("0")
     grand_total = subtotal + charges - discount
 
-    debits = [("customer", grand_total), (AccountCode.SALES_DISCOUNT, discount)]
-    credits = [(AccountCode.SALES_REVENUE, subtotal)]
+    debits = [("customer", grand_total)]
+    credits = [(AccountCode.SALES_REVENUE, subtotal - discount)]
 
     assert sum(amount for _, amount in debits) == sum(amount for _, amount in credits)
     assert grand_total == D("1160000")
-    assert dict(credits)[AccountCode.SALES_REVENUE] == D("1200000"), (
-        "revenue was netted down; the giveaway is now invisible"
+    assert dict(credits)[AccountCode.SALES_REVENUE] == D("1160000"), (
+        "revenue was posted at a gross figure that was never billed"
     )
 
 
