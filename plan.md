@@ -410,7 +410,18 @@ button is a promise, and this one would not be kept. The `warehouse_id`
 columns stay where they are — they cost nothing and mean a second
 warehouse is a migration rather than a rewrite.
 
-**10.5 And the point of the whole thing.** The request was not primarily
+**11.6 Both halves are in scope — confirmed after being offered the
+cut.** Phases 3–9 were offered for removal on the grounds that they are
+not "a second input method": merge, purge and rebuild are operations
+WhatsApp never had, they already exist in `erp`, and dropping them would
+have cost convenience rather than capability. Keeping them is a
+deliberate choice, made knowing that. The repair console is roughly
+two-thirds of the remaining work and none of the daily value, so if
+delivery ever has to be cut short, **it is the half to cut** — phases
+0–2 stand alone and phases 3–9 have `erp` as a working fallback that
+does not go away.
+
+**11.5 And the point of the whole thing.** The request was not primarily
 a repair console; it was *"a proper sale/purchase input invoice like
 Vyapar"*. That is §5, and it moved to the front of §9. The first
 version of this plan had it as phase 3 of 7, behind machinery that
