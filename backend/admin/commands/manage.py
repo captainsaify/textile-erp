@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime
 import decimal
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from sqlalchemy import func, select, update
@@ -22,6 +22,7 @@ from backend.models import (
     Customer,
     Product,
     PurchaseHeader,
+    ReversalManifest,
     SalesHeader,
     Supplier,
 )
@@ -134,17 +135,52 @@ def purge(
         )
 
         async with guarded(ctx, what=f"purge of {kind} {label}"):
+            reversal_movements: list[dict[str, str]] = []
             if live:
+                # Undoing *adds* compensating movements rather than
+                # deleting the originals, so the exact set it creates is
+                # what a restore has to remove. Captured by diffing the
+                # movement ids around the call rather than by matching on
+                # type and time, which would be a guess.
+                before_ids = await _movement_ids(ctx, header.id, kind)
                 await UndoService(ctx.session).undo_in_transaction(
                     ctx.actor, entity=kind, reference=reference
                 )
-                console.item("reversed: stock and journal entries unwound")
+                after = await _movements(ctx, header.id, kind)
+                reversal_movements = [
+                    {
+                        "table": "inventory_movements",
+                        "id": str(m.id),
+                        "created_at": m.created_at.isoformat(),
+                        "product_id": str(m.product_id),
+                        "warehouse_id": str(m.warehouse_id),
+                    }
+                    for m in after
+                    if m.id not in before_ids
+                ]
+                console.item(
+                    f"reversed: stock and journal unwound ({len(reversal_movements)} movement(s))"
+                )
 
             now = datetime.datetime.now(datetime.UTC)
             header.deleted_at = now
             header.purged_at = now
             await ctx.session.flush()
             console.item("hidden from every report, total and reconciliation")
+
+            await ReversalService(ctx.session).record(
+                ctx.org_id,
+                ctx.actor,
+                operation="purge",
+                subject=f"{kind} {label}",
+                hidden=[
+                    {
+                        "table": "purchase_headers" if kind == "purchase" else "sales_headers",
+                        "id": str(header.id),
+                    }
+                ],
+                created=reversal_movements,
+            )
 
             await AuditService(ctx.session).record(
                 ctx.org_id,
@@ -184,11 +220,71 @@ def restore_purged(
             label = str(header.id)[:8]
 
         console.head(f"Restore {kind} {label}")
+
+        # The purge recorded which compensating movements it created.
+        # Without that this could only unhide the record, and the stock
+        # would stay reversed -- a bill visible in every total with none
+        # of its goods behind it.
+        manifest = (
+            (
+                await ctx.session.execute(
+                    select(ReversalManifest).where(
+                        ReversalManifest.org_id == ctx.org_id,
+                        ReversalManifest.operation == "purge",
+                        ReversalManifest.reversed_at.is_(None),
+                        ReversalManifest.payload["hidden"].contains([{"id": str(header.id)}]),
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+
         async with guarded(ctx, what=f"restore of {kind} {label}"):
             header.deleted_at = None
             header.purged_at = None
             await ctx.session.flush()
             console.item("visible again in reports and totals")
+
+            if manifest is None:
+                console.warn(
+                    "no purge record found — this was purged before purges were "
+                    "recorded, so its stock stays reversed. Re-enter the lines to "
+                    "put the goods back."
+                )
+            else:
+                from backend.models import InventoryMovement
+                from backend.services.cost_replay_service import CostReplayService
+
+                created = manifest.payload.get("created", [])
+                touched: set[tuple[uuid.UUID, uuid.UUID]] = set()
+                for entry in created:
+                    movement = (
+                        (
+                            await ctx.session.execute(
+                                select(InventoryMovement).where(
+                                    InventoryMovement.id == uuid.UUID(str(entry["id"]))
+                                )
+                            )
+                        )
+                        .scalars()
+                        .first()
+                    )
+                    if movement is None:
+                        continue
+                    touched.add((movement.product_id, movement.warehouse_id))
+                    await ctx.session.delete(movement)
+                await ctx.session.flush()
+
+                replay = CostReplayService(ctx.session)
+                for product_id, warehouse_id in sorted(touched, key=str):
+                    await replay.replay(ctx.org_id, product_id, warehouse_id)
+                console.item(
+                    f"{len(created)} reversing movement(s) removed, "
+                    f"{len(touched)} product(s) recosted — the stock is back"
+                )
+                manifest.reversed_at = datetime.datetime.now(datetime.UTC)
+                manifest.reversed_by = ctx.actor.id
             await AuditService(ctx.session).record(
                 ctx.org_id,
                 ctx.actor.id,
@@ -199,11 +295,7 @@ def restore_purged(
                 channel="cli",
             )
 
-        console.warn(
-            "the record is back, but its stock is NOT. Purging reversed the "
-            "movements, and restoring does not replay them."
-        )
-        console.item(f"to put the goods back: erp show {kind} {label}, then re-enter the lines")
+        console.item(f"check it: erp show {kind} {label}")
 
     run(action)
 
@@ -829,3 +921,44 @@ def split(
             )
 
     run(action)
+
+
+async def _movements(ctx: AdminContext, header_id: uuid.UUID, kind: str) -> list[Any]:
+    """Every stock movement belonging to a bill's or sale's lines."""
+    from backend.models import InventoryMovement, PurchaseLine, SalesLine
+
+    if kind == "purchase":
+        line_ids = list(
+            (
+                await ctx.session.execute(
+                    select(PurchaseLine.id).where(PurchaseLine.purchase_header_id == header_id)
+                )
+            ).scalars()
+        )
+        source = "purchase_line"
+    else:
+        line_ids = list(
+            (
+                await ctx.session.execute(
+                    select(SalesLine.id).where(SalesLine.sales_header_id == header_id)
+                )
+            ).scalars()
+        )
+        source = "sales_line"
+    if not line_ids:
+        return []
+    return list(
+        (
+            await ctx.session.execute(
+                select(InventoryMovement).where(
+                    InventoryMovement.org_id == ctx.org_id,
+                    InventoryMovement.source_type == source,
+                    InventoryMovement.source_id.in_(line_ids),
+                )
+            )
+        ).scalars()
+    )
+
+
+async def _movement_ids(ctx: AdminContext, header_id: uuid.UUID, kind: str) -> set[uuid.UUID]:
+    return {m.id for m in await _movements(ctx, header_id, kind)}
