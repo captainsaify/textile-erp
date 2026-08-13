@@ -28,9 +28,11 @@ from backend.admin.app import cli, run
 from backend.admin.harness import AdminContext, AdminError, guarded
 from backend.models import (
     Brand,
+    Customer,
     InventoryMovement,
     Product,
     PurchaseLine,
+    SalesHeader,
     SalesLine,
 )
 from backend.services.audit_service import AuditService
@@ -127,6 +129,45 @@ async def _replay_both(ctx: AdminContext, *product_ids: object) -> None:
                 )
 
 
+async def _move_sales_of(
+    ctx: AdminContext, *, old: Product, new: Product
+) -> list[tuple[str, str, decimal.Decimal]]:
+    """Re-point every sale line that sold the old product.
+
+    There is no lot tracking -- stock is a weighted-average pool, so
+    nothing records that *this* sale drew on *that* purchase. Rather
+    than guess a linkage that does not exist, this moves every sale of
+    the product and prints each one, so the operator confirms against
+    what they know. The guard then checks both sides for negative stock,
+    which is the part that can be verified mechanically.
+    """
+    lines = list(
+        (
+            await ctx.session.execute(
+                select(SalesLine)
+                .join(SalesHeader, SalesHeader.id == SalesLine.sales_header_id)
+                .where(
+                    SalesLine.product_id == old.id,
+                    SalesHeader.org_id == ctx.org_id,
+                    SalesHeader.deleted_at.is_(None),
+                )
+                .order_by(SalesHeader.sale_date)
+            )
+        ).scalars()
+    )
+    moved: list[tuple[str, str, decimal.Decimal]] = []
+    for line in lines:
+        sale = await ctx.session.get(SalesHeader, line.sales_header_id)
+        if sale is None:
+            continue
+        customer = await ctx.session.get(Customer, sale.customer_id)
+        await _move_movements(ctx, source_type="sales_line", source_id=line.id, to_product=new)
+        line.product_id = new.id
+        moved.append((str(sale.id)[:8], customer.name if customer else "—", line.qty))
+    await ctx.session.flush()
+    return moved
+
+
 @fix.command("purchase")
 def fix_purchase(
     invoice: Annotated[str, typer.Argument(help="Invoice number")],
@@ -146,8 +187,24 @@ def fix_purchase(
         str | None, typer.Option("--invoice-no", help="Renumber the bill")
     ] = None,
     date: Annotated[str | None, typer.Option("--date", help="Invoice date, YYYY-MM-DD")] = None,
+    with_sales: Annotated[
+        bool,
+        typer.Option(
+            "--with-sales",
+            help="Also move every sale made from that product. For goods bought under the "
+            "wrong label that have already gone out.",
+        ),
+    ] = False,
 ) -> None:
-    """Correct a confirmed purchase: its header, or one of its lines."""
+    """Correct a confirmed purchase: its header, or one of its lines.
+
+    `--with-sales` is for the one case where the bill and the sales have
+    to move together: the goods were recorded under the wrong item *and*
+    some have already been sold. Without it that repair strands the old
+    product below zero and the guard throws the whole thing away -- which
+    is correct, and is why this flag exists rather than the command
+    quietly doing it every time. If only the *sale* was wrong, fix the
+    sale on its own; the bill is right and should not move."""
 
     async def action(ctx: AdminContext) -> None:
         header = resolve.confirmed_only(
@@ -211,6 +268,14 @@ def fix_purchase(
                             f"line {line_no}: {old_product.code} → {new_product.code}, "
                             f"{moved} movement(s) moved"
                         )
+                        if with_sales:
+                            moved_sales = await _move_sales_of(
+                                ctx, old=old_product, new=new_product
+                            )
+                            if not moved_sales:
+                                console.item("no sales had gone out against it")
+                            for ref, who, qty in moved_sales:
+                                console.item(f"sale {ref} ({who}): {console.qty(qty)} moved too")
                         await _replay_both(ctx, old_product.id, new_product.id)
 
             if rate is not None:
