@@ -13,8 +13,10 @@ from collections.abc import Coroutine
 from typing import Any
 
 from celery import Celery
+from celery.signals import worker_process_init, worker_process_shutdown
 
 from backend.core.config import get_settings
+from backend.core.observability import configure_tracing, shutdown_tracing
 from backend.workers.schedule import CELERYBEAT_SCHEDULE
 
 settings = get_settings()
@@ -44,6 +46,21 @@ celery_app.conf.update(
 # merely *defined* and never assigned produces a Beat process that
 # starts cleanly and fires nothing -- forever, and silently.
 celery_app.conf.beat_schedule = CELERYBEAT_SCHEDULE
+
+
+# AgentOps exports spans from a background thread, and a thread does not
+# survive a fork. The prefork pool imports this module in the parent and
+# then forks its children, so initialising at import time would leave
+# every child holding an exporter that never runs -- traces would be
+# recorded and silently never sent. Each child starts its own here.
+@worker_process_init.connect
+def _start_tracing(**_: Any) -> None:
+    configure_tracing("worker")
+
+
+@worker_process_shutdown.connect
+def _stop_tracing(**_: Any) -> None:
+    shutdown_tracing()
 
 
 def run_async[T](coro: Coroutine[Any, Any, T]) -> T:

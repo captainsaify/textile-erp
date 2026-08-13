@@ -75,6 +75,13 @@ module = ["celery.*", "openpyxl.*"]
 ignore_missing_imports = true
 disallow_untyped_decorators = false
 
+# agentops ships no py.typed. It is reached only through
+# backend/core/observability.py, which is fully typed and swallows every
+# failure the SDK can produce.
+[[tool.mypy.overrides]]
+module = ["agentops.*"]
+ignore_missing_imports = true
+
 [[tool.mypy.overrides]]
 module = ["backend.workers.*"]
 disallow_untyped_decorators = false

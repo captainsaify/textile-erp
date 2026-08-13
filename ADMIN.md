@@ -3,7 +3,10 @@
 > The sheet to keep open. Design and reasoning live in
 > [`docs/31_AdminCLI.md`](docs/31_AdminCLI.md).
 >
-> **Status: proposed, not built yet.** Nothing below works today.
+> **Status.** Built and working: `show`, `history`, `check`, `backup`,
+> `backups`, `restore`, `fix`, `stock recost`, `stock adjust`.
+> Not built yet: `add`, `charge`, `merge`, `purge`, `restore-purged` —
+> those sections are marked *(not yet)* below.
 
 ## Getting in
 
@@ -42,7 +45,7 @@ erp history 007                  # every change ever made to it, and by whom
 *Bill 002 was labelled MKD; it was actually LALA.*
 
 ```bash
-erp fix purchase 002 line 3 --brand LALA
+erp fix purchase 002 --line 3 --brand LALA
 ```
 
 Moves the stock with it and recomputes the average cost on **both**
@@ -54,8 +57,8 @@ and names them rather than leaving one side negative.
 *The TRP under MKD is 003P, not 003B.*
 
 ```bash
-erp fix purchase 007 line 2 --code 003P
-erp fix sale 12 line 1 --code 003P --brand MKD
+erp fix purchase 007 --line 2 --code 003P
+erp fix sale 12 --line 1 --code 003P --brand MKD
 ```
 
 ### …move a sale to the right customer
@@ -66,10 +69,16 @@ erp fix sale 12 line 1 --code 003P --brand MKD
 erp fix sale 12 --customer "Sohail Bhai Lucknow"
 ```
 
-Takes the receivable and any payments already matched against it along
-to the new party.
+The sale and its unpaid balance move with it: the receivable is derived
+from the sale's customer, so both parties' outstanding figures correct
+themselves immediately.
 
-### …add GST or packing to a bill already confirmed
+One thing it does **not** move — a receipt already banked against the
+old party keeps its cash-ledger and journal entries there. If money had
+already come in under the wrong name, reverse the receipt first, then
+re-record it against the right one.
+
+### …add GST or packing to a bill already confirmed  *(not yet)*
 
 ```bash
 erp charge purchase 007 GST 1200
@@ -82,11 +91,10 @@ a sale — not into expenses.
 ### …correct the price after the fact
 
 ```bash
-erp fix purchase 007 line 1 --rate 107     # one line
-erp fix purchase 007 --rate 107            # whole bill
+erp fix purchase 007 --rate 107            # the bill
 ```
 
-### …enter a bill by hand
+### …enter a bill by hand  *(not yet)*
 
 ```bash
 erp add purchase \
@@ -100,7 +108,7 @@ Format is `CODE:QTY:RATE:BRAND:DESCRIPTION`. Leave any flag off and it
 asks you one question at a time, like WhatsApp does. `erp add sale` is
 the same shape with `--customer`.
 
-### …combine two parties that are the same person
+### …combine two parties that are the same person  *(not yet)*
 
 ```bash
 erp merge supplier "Yakub Asif" into "Asif Panipat"
@@ -111,7 +119,7 @@ erp merge brand "TOP " into "TOP"
 Everything moves to the name on the right. The one on the left stops
 existing.
 
-### …combine two bills that are one bill
+### …combine two bills that are one bill  *(not yet)*
 
 ```bash
 erp merge purchase 007B into 007
@@ -119,7 +127,7 @@ erp merge purchase 007B into 007
 
 Lines join, charges add up, freight re-spreads across all of them.
 
-### …delete something completely
+### …delete something completely  *(not yet)*
 
 ```bash
 erp undo <id>                    # the gentle one: reverses it, keeps the record

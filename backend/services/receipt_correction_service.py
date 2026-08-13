@@ -539,24 +539,46 @@ class ChargeService:
         note: str | None = None,
         whatsapp_message_id: str | None = None,
     ) -> ChargeAdded:
-        if amount <= ZERO:
-            raise ValidationError("A charge has to be more than zero.")
-        label = " ".join(label.split()).upper()
-
         # One transaction around the lookup *and* the work. Opening it
         # after the lookup raises "a transaction is already begun" -- the
         # select autobegins one (HANDOFF.md §5) -- and opening none at
         # all silently discards the change on session close.
         async with self._session.begin():
-            header = await self._find_purchase(actor.org_id, reference)
-            if header is not None:
-                return await self._on_purchase(
-                    actor, header, label, amount, note, whatsapp_message_id
-                )
-            sale = await self._find_sale(actor.org_id, reference)
-            if sale is not None:
-                return await self._on_sale(actor, sale, label, amount, note, whatsapp_message_id)
-            raise NotFoundError("bill", reference)
+            return await self.add_in_transaction(
+                actor,
+                reference=reference,
+                label=label,
+                amount=amount,
+                note=note,
+                whatsapp_message_id=whatsapp_message_id,
+            )
+
+    async def add_in_transaction(
+        self,
+        actor: User,
+        *,
+        reference: str,
+        label: str,
+        amount: decimal.Decimal,
+        note: str | None = None,
+        whatsapp_message_id: str | None = None,
+    ) -> ChargeAdded:
+        """The same work, for a caller that already holds the transaction.
+
+        The admin CLI commits only if reconciliation still passes, so the
+        charge and the check have to share one transaction it can roll
+        back (docs/31_AdminCLI.md §3.1)."""
+        if amount <= ZERO:
+            raise ValidationError("A charge has to be more than zero.")
+        label = " ".join(label.split()).upper()
+
+        header = await self._find_purchase(actor.org_id, reference)
+        if header is not None:
+            return await self._on_purchase(actor, header, label, amount, note, whatsapp_message_id)
+        sale = await self._find_sale(actor.org_id, reference)
+        if sale is not None:
+            return await self._on_sale(actor, sale, label, amount, note, whatsapp_message_id)
+        raise NotFoundError("bill", reference)
 
     async def _find_purchase(self, org_id: uuid.UUID, reference: str) -> PurchaseHeader | None:
         return (

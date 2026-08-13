@@ -48,6 +48,10 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str = ""
 
+    #: AgentOps tracing for the vision reader (backend/core/observability.py).
+    #: Empty means tracing is simply off -- nothing else changes.
+    agentops_api_key: str = ""
+
     backup_encryption_key: str = ""
 
     attachments_dir: str = "./data/attachments"

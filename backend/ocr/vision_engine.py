@@ -29,6 +29,7 @@ import numpy as np
 
 from backend.core.config import get_settings
 from backend.core.logging import get_logger
+from backend.core.observability import trace
 from backend.ocr.extract import ExtractedField, ExtractedRow
 
 logger = get_logger(__name__)
@@ -396,7 +397,9 @@ class VisionSheetReader:
         weights, and asking one prompt to cover both is how a rate ends
         up in a weight column.
         """
-        payload = self._call(data, mime_type, SALE_SCHEMA, SALE_SYSTEM_PROMPT, SALE_USER_PROMPT)
+        payload = self._call(
+            data, mime_type, SALE_SCHEMA, SALE_SYSTEM_PROMPT, SALE_USER_PROMPT, "sale_sheet_read"
+        )
         rows = [
             VisionSaleRow(
                 code=str(row.get("code", "")).strip(),
@@ -426,6 +429,7 @@ class VisionSheetReader:
         schema: dict[str, Any],
         system_prompt: str,
         user_prompt: str,
+        trace_name: str,
     ) -> dict[str, Any]:
         """One request/response path for both sheet kinds."""
         import json
@@ -434,15 +438,16 @@ class VisionSheetReader:
             raise VisionUnavailableError("no ANTHROPIC_API_KEY configured")
         block = self._content_block(data, mime_type)
         try:
-            response = self._get_client().messages.create(
-                model=self._model,
-                max_tokens=16000,
-                system=system_prompt,
-                output_config={"format": {"type": "json_schema", "schema": schema}},
-                messages=[
-                    {"role": "user", "content": [block, {"type": "text", "text": user_prompt}]}
-                ],
-            )
+            with trace(trace_name, model=self._model, mime_type=mime_type):
+                response = self._get_client().messages.create(
+                    model=self._model,
+                    max_tokens=16000,
+                    system=system_prompt,
+                    output_config={"format": {"type": "json_schema", "schema": schema}},
+                    messages=[
+                        {"role": "user", "content": [block, {"type": "text", "text": user_prompt}]}
+                    ],
+                )
         except Exception as exc:  # noqa: BLE001 -- any failure falls back
             raise VisionUnavailableError(str(exc)) from exc
         if getattr(response, "stop_reason", None) == "refusal":
@@ -500,15 +505,16 @@ class VisionSheetReader:
             }
 
         try:
-            response = self._get_client().messages.create(
-                model=self._model,
-                max_tokens=16000,
-                system=SYSTEM_PROMPT,
-                output_config={"format": {"type": "json_schema", "schema": SHEET_SCHEMA}},
-                messages=[
-                    {"role": "user", "content": [block, {"type": "text", "text": USER_PROMPT}]}
-                ],
-            )
+            with trace("purchase_sheet_read", model=self._model, mime_type=mime_type):
+                response = self._get_client().messages.create(
+                    model=self._model,
+                    max_tokens=16000,
+                    system=SYSTEM_PROMPT,
+                    output_config={"format": {"type": "json_schema", "schema": SHEET_SCHEMA}},
+                    messages=[
+                        {"role": "user", "content": [block, {"type": "text", "text": USER_PROMPT}]}
+                    ],
+                )
         except Exception as exc:  # noqa: BLE001 -- any failure falls back to local OCR
             raise VisionUnavailableError(str(exc)) from exc
 

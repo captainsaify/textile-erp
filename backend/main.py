@@ -18,6 +18,7 @@ from backend.api.routers import auth, catalog, exports, reconciliation, reportin
 from backend.core.db import check_db_connection
 from backend.core.lifecycle import release_all
 from backend.core.logging import configure_logging, get_logger
+from backend.core.observability import configure_tracing, shutdown_tracing
 
 logger = get_logger(__name__)
 
@@ -25,11 +26,15 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     configure_logging()
+    configure_tracing("api")
     logger.info("app_startup")
     yield
     # the same registry the workers use, so shutdown can't drift from
     # task cleanup (backend/core/lifecycle.py)
     await release_all()
+    # after the singletons: this only flushes buffered spans, and doing
+    # it first would drop whatever those releases logged
+    shutdown_tracing()
     logger.info("app_shutdown")
 
 

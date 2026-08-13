@@ -15,6 +15,9 @@ data/reports/
 # hostnames -- operational noise that has no business in the history of
 # the code, and one of them was tracked by accident.
 data/logs/
+# Written by the AgentOps SDK into whatever directory the process started
+# in. Operational noise, same as the rest.
+agentops.log
 # Migration packages: a plaintext copy of .env, the tunnel credentials
 # and the whole database. Never committable (docs/30_VpsMigration.md).
 data/migration/
