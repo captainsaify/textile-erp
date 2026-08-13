@@ -249,6 +249,7 @@ operation does not exist anywhere yet.
 | | state | notes |
 |---|---|---|
 | Parties → Merge | **CLI** | `erp merge supplier/customer` |
+| Parties → **De-merge** | **New** | merge is one-way today: the losing party is soft-deleted and its transactions re-pointed, with nothing recording *which* ones moved. Splitting them back apart needs the merge to write that list first — a small change to the merge, made before it is used again, not after |
 | Parties → Transfer | **New** | move *selected* transactions to another party without merging — the "three sales were his, the rest weren't" case |
 | Parties → Recalculate | **New** | recompute outstanding from source rows. Cheap, because **every balance here is derived** — there are no opening balances to preserve (§11.2) |
 | Parties → Delete | **CLI** | soft delete exists; blocked when transactions reference it |

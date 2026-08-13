@@ -171,31 +171,59 @@ The centrepiece. Everything else in this document is in service of it.
 │                                                                        │
 │  ──────────────────────────────────────────────────────────────────    │
 │                                                                        │
-│   #  Item                            Qty        Rate       Amount      │
-│  ┌──┬──────────────────────────────┬─────────┬──────────┬───────────┬─┐│
-│  │ 1│ 55X · BSQ        0 on hand ▾ │     800 │   120.00 │ 96,000.00 │×││
-│  │ 2│ 44D · MKD     1,520 on hand ▾│     640 │   107.00 │ 68,480.00 │×││
-│  │ 3│ Type a code or name…       ▾ │         │          │           │ ││
-│  └──┴──────────────────────────────┴─────────┴──────────┴───────────┴─┘│
-│                                          ↵ adds a row                  │
-│                                                                        │
-│  ──────────────────────────────────────────────────────────────────    │
-│                                                                        │
-│  Charges                                     Subtotal    1,64,480.00   │
-│  ┌─────────┬──────────┐  [+ add]             GST             1,200.00  │
-│  │ GST     │  1,200   │                      Packing           800.00  │
-│  │ Packing │    800   │                      ─────────────────────────  │
-│  └─────────┴──────────┘                      TOTAL        1,66,480.00  │
-│                                                                        │
-│  Notes ┌──────────────────────────────────────────────────────────┐    │
-│        │                                                          │    │
-│        └──────────────────────────────────────────────────────────┘    │
-│                                                                        │
-│                                    [ Discard ]      [ Save bill ]      │
-└────────────────────────────────────────────────────────────────────────┘
+│   #  Item                    Qty    KG    Total KG   Rate     Amount    │
+│  ┌──┬────────────────────────┬─────┬──────┬─────────┬────────┬─────────┐│
+│  │ 1│ 55X · BSQ  ZIPPER SW. ▾│  10 │ 80.0 │     800 │ 120.00 │96,000.00││
+│  │ 2│ 44D · MKD  SPORTS PT. ▾│   8 │ 80.0 │     640 │ 107.00 │68,480.00││
+│  │ 3│ Type a code or name…  ▾│     │      │         │        │         ││
+│  └──┴────────────────────────┴─────┴──────┴─────────┴────────┴─────────┘│
+│      bales    kg per bale   derived     per kg      derived             │
+│                                          ↵ adds a row                   │
+│                                                                         │
+│  ───────────────────────────────────────────────────────────────────    │
+│                                                                         │
+│  Charges                                     Subtotal    1,64,480.00    │
+│  ┌─────────┬──────────┐  [+ add]             GST             1,200.00   │
+│  │ GST     │  1,200   │                      Packing           800.00   │
+│  │ Packing │    800   │                      Discount        − 500.00   │
+│  └─────────┴──────────┘                      ──────────────────────────  │
+│  Discount [    500 ]                         TOTAL        1,65,980.00   │
+│                                                                         │
+│  Paid now  [   50,000 ]  via [ Cash ▾ ]      Balance        1,15,980.00 │
+│                                                                         │
+│  Notes ┌───────────────────────────────────────────────────────────┐    │
+│        │                                                           │    │
+│        └───────────────────────────────────────────────────────────┘    │
+│                                                                         │
+│                                    [ Discard ]      [ Save bill ]       │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 5.1 The item picker is the whole point
+### 5.0 The three quantity columns
+
+This is the sheet's own shape, not an invention: **Qty is bales, KG is
+kilograms per bale, Total KG is the two multiplied.** The rate is per
+kilogram, so the line amount is `Total KG × Rate` — never `bales ×
+rate`.
+
+It matters because the two numbers are used by different people for
+different things. A loading bay counts bales; the cost of the goods is
+carried by weight. `receive 007 55X 9` corrects a short delivery in
+*bales* for exactly that reason, and derives the kilograms from the
+line's own per-bale weight.
+
+**Total KG and Amount are derived, and are not inputs.** They are
+styled with `--derived-ink` on `--derived-bg` so the difference between
+what you type and what the machine works out is visible without
+reading. Typing over a derived cell is not possible, which removes the
+whole class of bug where a total and its parts disagree.
+
+**What the database already holds:** `purchase_lines.weight_kg` (per
+bale) and `total_weight_kg`, with `qty` being the costing quantity in
+kilograms. Bales are *derived* — `qty ÷ weight_kg` — which is why the
+grid can offer the column without a migration.
+
+### 5.1 The item picker is the whole point### 5.1 The item picker is the whole point
 
 This one control is why the web form beats the chat.
 
@@ -217,7 +245,12 @@ delivery entered as two bills, 007 and 007B. On a screen it is a list
 you look at. The stock figure is there because it is the number that
 tells you which one you meant.
 
-Search matches code *and* description, so `zipper` finds all three.
+**It searches both ways, and fills both.** Type `55x` and you get the
+codes; type `zipper` and you get the same rows found by description.
+Selecting one fills the code *and* the description *and* the brand from
+the product — the three are one choice, not three fields to keep in
+step. There is no case where you type a code and then type the
+description that goes with it.
 
 **Creating an item from inside the bill is allowed here** — the CLI
 refuses it, and the difference is that a form has a person looking at
@@ -285,7 +318,30 @@ hide which.
 - Failure keeps every field exactly as typed. A validation error that
   clears a fourteen-line form is worse than no validation.
 
-### 5.5 Drafts
+### 5.5 Money taken with the bill
+
+`Paid now` is a field on the form, not a second screen. Fill it and the
+save does two things in one transaction: records the sale, and records
+the receipt against it.
+
+- **Nothing new is invented.** The receipt goes through
+  `SettlementService.receive_from_customer`, the same path `received
+  40000 from Hanif` takes over WhatsApp — so the cash or bank ledger
+  moves, the journal balances, the customer's outstanding drops, and the
+  payment document is generated exactly as it is today.
+- **`via` picks the ledger** — Cash or Bank. It is required as soon as
+  an amount is entered, because money that arrived somewhere unnamed is
+  not recorded, it is asserted.
+- **Balance is shown, not just the total.** `Total − Paid` is the number
+  the customer owes when they walk out, and it is the number worth
+  seeing before saving.
+- **Leaving it blank is a credit sale**, which is the common case and
+  needs no extra click.
+- **Both halves or neither.** The sale and the receipt share one
+  transaction. A sale that saved while its payment failed would show
+  money owed that was already handed over.
+
+### 5.6 Drafts
 
 A half-entered bill survives a closed laptop.
 
@@ -310,6 +366,9 @@ acceptable:
   that was abandoned for a reason.
 - **Never for repair operations.** Master Control forms have no drafts.
   A half-finished merge is not a thing that should be resumable.
+- **The `Paid now` amount is never drafted.** A restored draft that
+  quietly still says money changed hands is the one field where being
+  wrong costs real money.
 
 ---
 
@@ -515,7 +574,7 @@ Two deliberate calls:
 - **No inline editing on list pages.** Editing happens on an edit
   screen, with a save button. A grid where clicking a cell changes the
   books is how you change the books by accident.
-- **No drafts for repair operations.** Entry forms get them (§5.5); a
+- **No drafts for repair operations.** Entry forms get them (§5.6); a
   half-finished merge does not, because resuming one is a way to apply
   half a decision you no longer remember making.
 
@@ -527,7 +586,7 @@ Two deliberate calls:
 |---|---|
 | **F0** | Split `app.js` into modules; no visible change. Prove the no-build-step module setup on the existing pages first |
 | **F1** | Tokens, `combo`, `grid`, `money-input` — with a static harness page |
-| **F2** | Purchase entry, wired to `POST /purchases`, incl. drafts (§5.5) and inline item creation (§5.1) |
+| **F2** | Purchase entry, wired to `POST /purchases`, incl. drafts (§5.6) and inline item creation (§5.1) |
 | **F3** | Sale entry |
 | **F4** | `control.html` shell, auth, left rail |
 | **F5** | `preview` + `confirm-typed`, one operation end to end |
@@ -567,17 +626,47 @@ create anything), it opens a real form with description and brand
 required rather than being one click, and the new item is marked `NEW`
 on the line until the bill saves.
 
-**15.3 Drafts: yes**, for entry only. §5.5. This is the one place in the
+**15.3 Drafts: yes**, for entry only. §5.6. This is the one place in the
 plan where business data lives outside Postgres, so: only what was
 typed, never server-fetched figures; restoration offered in a bar rather
 than applied silently; cleared the moment a save succeeds; expired after
 seven days. **Not** for Master Control — a half-finished merge is not a
 thing that should be resumable.
 
+---
+
+## 16. Three things in this that the database does not do yet
+
+Checked against the schema rather than assumed, because each one is
+backend work hiding inside a UI request.
+
+**16.1 Sales carry no weight.** `purchase_lines` has `weight_kg` and
+`total_weight_kg`; `sales_lines` has only `qty`, `rate` and
+`line_total`. So the Qty/KG/Total-KG grid works on a purchase today and
+needs **two nullable columns plus a migration** on the sale side. Small,
+but it is a schema change and it should be made once, before either
+entry screen ships, so the two forms are not different shapes.
+
+**16.2 Discount does not exist anywhere.** Not a column, not a service,
+not an account. It cannot be smuggled in as a negative `other_charges`:
+a discount given on a sale reduces revenue, and one received on a
+purchase reduces the cost of the goods — booking either as a negative
+charge puts it in the wrong half of the P&L, and the P&L is the number
+the partners read. This needs a column on the header, an account code,
+and journal postings on both sides. **It is the largest single item in
+this document that is not already built**, and it deserves its own
+decision rather than riding along with the form.
+
+**16.3 Partial payment at sale time is not a thing today.** A sale is
+either `credit` (paid nothing) or `cash`/`bank` (paid in full) — there
+is no "paid 50,000 of 1,65,980 at the counter". §5.5 gets there without
+a schema change, by recording the sale as credit and immediately calling
+the existing settlement path for the part-payment inside the same
+transaction. Worth stating plainly because it looks like one field and
+is two operations.
+
 ### Still open
 
-Nothing blocking. Two that will answer themselves once F2 is in your
-hands: whether the entry grid wants more than the four columns above
-(discount? per-line notes?), and whether the picker's stock figure
-should show all warehouses once there is more than one — which §11.4 of
-`plan.md` says there will not be.
+Nothing blocking. One that will answer itself once F2 is in your hands:
+whether the grid wants per-line notes or a per-line discount, which
+16.2 would have to settle first anyway.
