@@ -219,6 +219,36 @@ tells you which one you meant.
 
 Search matches code *and* description, so `zipper` finds all three.
 
+**Creating an item from inside the bill is allowed here** — the CLI
+refuses it, and the difference is that a form has a person looking at
+the screen while a script does not. But it is the single easiest way to
+turn a typo into a second product quietly holding half your stock, so it
+is fenced:
+
+```
+┌ 55Y                                          ▾ ┐
+├────────────────────────────────────────────────┤
+│  ⚠ Nothing matches 55Y.                        │
+│                                                │
+│     Did you mean?                              │
+│       55X · MKD   ZIPPER SWEATER   160 on hand │
+│       55X · BSQ   ZIPPER SWEATER     0 on hand │
+├────────────────────────────────────────────────┤
+│  + Create 55Y as a new item…                   │
+└────────────────────────────────────────────────┘
+```
+
+- **Near-matches are shown first, creation last.** The server already
+  fuzzy-matches codes (`rapidfuzz`, the same path OCR uses); the picker
+  calls it and puts what it found above the escape hatch.
+- **Creation is never the highlighted option**, so `Enter` on a typo
+  cannot create anything.
+- **It opens a small form, not a one-click action** — code, description,
+  brand and unit, all required. A product with a blank description is
+  one nobody can identify in a stock list three weeks later.
+- **The new item is marked on the line** (`NEW`) until the bill saves,
+  so it is visible in the final read-through rather than blending in.
+
 ### 5.2 What the form does while you type
 
 | trigger | shows |
@@ -254,6 +284,32 @@ hide which.
   document the partners receive.
 - Failure keeps every field exactly as typed. A validation error that
   clears a fourteen-line form is worse than no validation.
+
+### 5.5 Drafts
+
+A half-entered bill survives a closed laptop.
+
+This is worth being careful about, because it is the one place in this
+plan where business data lives outside Postgres. The rules that make it
+acceptable:
+
+- **`localStorage`, one draft per form type**, keyed by org. Not the
+  refresh token's storage problem — a draft is data you typed and can
+  see, not a credential, and the XSS argument that keeps tokens out of
+  `localStorage` does not transfer to a bill you are looking at.
+- **Only what was typed.** Codes, quantities, rates, the text of the
+  charges. No server-fetched prices, no stock figures, no party details
+  — those are re-fetched, so a stale draft cannot show a stale balance.
+- **Restoration is offered, never silent.** Opening the form with a
+  draft present shows a bar: *"Unsaved bill from 2:41 pm — 6 lines.
+  [Restore] [Discard]"*. A form that silently repopulates is how you
+  save yesterday's bill today.
+- **Cleared on successful save**, immediately, before the confirmation
+  is shown.
+- **Expires after 7 days**, because a draft older than that is a bill
+  that was abandoned for a reason.
+- **Never for repair operations.** Master Control forms have no drafts.
+  A half-finished merge is not a thing that should be resumable.
 
 ---
 
@@ -347,7 +403,37 @@ later decision, deliberately not made now.
 
 ---
 
-## 10. Accessibility
+## 10. Print
+
+A bill sometimes needs to leave the building on paper.
+
+**The printed page is the same document the partners receive**, not a
+screenshot of the app. The sheet generator already exists and produces
+what goes to WhatsApp; print CSS renders the same content and layout so
+that a bill printed from the browser and one forwarded on WhatsApp are
+recognisably the same artefact. Two different-looking versions of one
+invoice is a way to end up arguing about which is real.
+
+Mechanically:
+
+- One `print.css`, loaded `media="print"`.
+- Everything chrome — nav, buttons, the left rail, warnings — is
+  `display: none`. What remains is the bill.
+- Black on white, no `--surface`. Ink is expensive and a warm grey
+  background prints as a grey smear.
+- Borders instead of shadows; `--shadow` does not print.
+- Line items must not break across pages mid-row; the totals block stays
+  with the last line.
+- The footer carries invoice number, date and page `n of m`, because a
+  loose second page with no identifier is worthless.
+
+Print is available on a saved bill, never on the entry form — printing
+something not yet saved produces a document with no counterpart in the
+books.
+
+---
+
+## 11. Accessibility
 
 Not for compliance — for the 3 a.m. case.
 
@@ -367,7 +453,7 @@ Not for compliance — for the 3 a.m. case.
 
 ---
 
-## 11. Frontend architecture
+## 12. Frontend architecture
 
 `app.js` is 1,504 lines in a single IIFE. Adding entry and a repair
 console would take it past 4,000, and that is the point where one file
@@ -413,7 +499,7 @@ Two deliberate calls:
 
 ---
 
-## 12. Deliberately not doing
+## 13. Deliberately not doing
 
 - **No framework, no npm, no build step.** Restated because the pressure
   to add one arrives exactly when the combo component gets fiddly.
@@ -429,20 +515,24 @@ Two deliberate calls:
 - **No inline editing on list pages.** Editing happens on an edit
   screen, with a save button. A grid where clicking a cell changes the
   books is how you change the books by accident.
+- **No drafts for repair operations.** Entry forms get them (§5.5); a
+  half-finished merge does not, because resuming one is a way to apply
+  half a decision you no longer remember making.
 
 ---
 
-## 13. Build order and how it is tested
+## 14. Build order and how it is tested
 
 | step | contents |
 |---|---|
 | **F0** | Split `app.js` into modules; no visible change. Prove the no-build-step module setup on the existing pages first |
 | **F1** | Tokens, `combo`, `grid`, `money-input` — with a static harness page |
-| **F2** | Purchase entry, wired to `POST /purchases` |
+| **F2** | Purchase entry, wired to `POST /purchases`, incl. drafts (§5.5) and inline item creation (§5.1) |
 | **F3** | Sale entry |
 | **F4** | `control.html` shell, auth, left rail |
 | **F5** | `preview` + `confirm-typed`, one operation end to end |
 | **F6** | The rest of Master Control, screen by screen |
+| **F7** | `print.css` (§10) — last, because it renders saved bills and nothing depends on it |
 
 **Testing**, given there is no framework and no test runner in the
 frontend today:
@@ -451,23 +541,43 @@ frontend today:
   every warning the form shows has a server-side test behind it.
 - **Playwright** for three flows only, run in CI: enter a purchase
   without touching the mouse, enter a sale below cost and see the
-  warning, purge a bill and confirm the typed-confirmation gate. Three
-  tests that fail loudly beat forty that nobody runs.
+  warning, purge a bill and confirm the typed-confirmation gate, and restore a
+  draft after a simulated reload. Four tests that fail loudly beat
+  forty that nobody runs.
 - **A contrast and palette check** in CI for the new tokens, matching
   how the chart colours are already validated rather than judged.
 
 ---
 
-## 14. Open questions
+## 15. Answered
 
-1. **Print.** Do you ever print a bill from the browser, or is the
-   WhatsApp sheet always the artefact? Changes whether print CSS is
-   worth writing.
-2. **Item creation from the entry form.** The picker offers *"create
-   under a new brand"*. Should it also create an entirely unknown code
-   mid-bill, or must products exist first? The CLI deliberately refuses;
-   the form has a person watching, which is a different situation.
-3. **Draft bills.** If the browser closes mid-entry, should the form
-   come back? Local draft storage is easy and means an unsaved bill
-   survives a closed laptop — but it is another place business data
-   lives, which cuts against everything else here.
+**15.1 Print: yes.** §10. The printed page renders the *same document*
+the partners already receive rather than a screenshot of the app — two
+different-looking versions of one invoice is a way to end up arguing
+about which is real. Available on a saved bill only; printing an unsaved
+one produces paper with no counterpart in the books.
+
+**15.2 Create an unknown item mid-bill: yes**, and fenced. §5.1. The CLI
+refuses this and the difference is that a form has a person looking at
+the screen while a script does not — but it remains the easiest way to
+turn a typo into a second product quietly holding half the stock. So
+near-matches are searched first and shown above the escape hatch,
+creation is never the highlighted option (so `Enter` on a typo cannot
+create anything), it opens a real form with description and brand
+required rather than being one click, and the new item is marked `NEW`
+on the line until the bill saves.
+
+**15.3 Drafts: yes**, for entry only. §5.5. This is the one place in the
+plan where business data lives outside Postgres, so: only what was
+typed, never server-fetched figures; restoration offered in a bar rather
+than applied silently; cleared the moment a save succeeds; expired after
+seven days. **Not** for Master Control — a half-finished merge is not a
+thing that should be resumable.
+
+### Still open
+
+Nothing blocking. Two that will answer themselves once F2 is in your
+hands: whether the entry grid wants more than the four columns above
+(discount? per-line notes?), and whether the picker's stock figure
+should show all warehouses once there is more than one — which §11.4 of
+`plan.md` says there will not be.
