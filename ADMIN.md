@@ -47,8 +47,15 @@ erp fix purchase 002 --line 3 --brand LALA
 ```
 
 Moves the stock with it and recomputes the average cost on **both**
-brands. If sales already went out against the wrong brand, it says so
-and names them rather than leaving one side negative.
+brands.
+
+**Fix whichever one is actually wrong — the bill or the sale — not
+both.** If you bought `55X AR` correctly and then *sold* it under the
+wrong code, the bill is right and only the sale needs moving; the
+purchase stays where it is and `55X AR` goes back to holding the stock
+you still have. The two are only linked by one thing: stock cannot go
+below zero. If the item you are moving *to* does not have enough on
+hand, the command rolls back and says which product and by how much.
 
 ### …fix a code that was read wrongly
 
@@ -58,6 +65,20 @@ and names them rather than leaving one side negative.
 erp fix purchase 007 --line 2 --code 003P
 erp fix sale 12 --line 1 --code 003P --brand MKD
 ```
+
+### …fix an item that was sold under the wrong code
+
+*You have `55X AR`, but the sale went out as `55X AR` when it was
+really `003B`.*
+
+```bash
+erp show stock 003B                    # which brand has enough?
+erp --dry-run fix sale <ref> --line 2 --code 003B --brand MKD
+```
+
+The purchase bill is not involved. Check the stock first — moving a
+sale of 800 onto a product holding 560 is the one thing that will be
+refused.
 
 ### …move a sale to the right customer
 
