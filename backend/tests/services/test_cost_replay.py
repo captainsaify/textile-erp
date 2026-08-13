@@ -265,3 +265,134 @@ async def test_replay_creates_the_inventory_row_when_a_movement_arrives_first(
         assert inventory is not None
         assert inventory.qty_on_hand == decimal.Decimal("5.000")
         assert inventory.weighted_avg_cost == decimal.Decimal("200.0000")
+
+
+async def test_a_sale_return_does_not_reweight_the_average(
+    cww: Product, staff_user: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The second bug, from the live books.
+
+    A sale return has a *positive* quantity and carries the sale-time
+    cost snapshot in unit_cost -- 121.45 against an average of 106.70.
+    Replaying it as an inbound purchase weights the cost basis towards
+    what the goods sold for. This is CWW's real history, trimmed:
+    replaying by sign gives 106.85, which is what was reported to the
+    owner as drift. It was not drift.
+    """
+    async with session_factory() as session:
+        await _movement(
+            session,
+            cww,
+            staff_user,
+            minutes=0,
+            kind=MovementType.PURCHASE,
+            qty="8910",
+            unit_cost="106.70",
+        )
+        await _movement(
+            session,
+            cww,
+            staff_user,
+            minutes=10,
+            kind=MovementType.SALE,
+            qty="-90",
+            unit_cost="121.45",
+        )
+        await _movement(
+            session,
+            cww,
+            staff_user,
+            minutes=20,
+            kind=MovementType.SALE_RETURN,
+            qty="90",
+            unit_cost="121.45",
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        result = await CostReplayService(session).replay(ORG, cww.id, WAREHOUSE)
+        await session.commit()
+
+    assert result.qty_after == decimal.Decimal("8910.000")
+    assert result.avg_after == decimal.Decimal("106.7000"), (
+        "the sale return was weighted in at the selling price"
+    )
+
+
+async def test_a_purchase_return_unwinds_the_average(
+    cww: Product, staff_user: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Unlike a sale return, goods going *back to a supplier* leave at
+    their landed cost, so the remaining average moves."""
+    async with session_factory() as session:
+        await _movement(
+            session,
+            cww,
+            staff_user,
+            minutes=0,
+            kind=MovementType.PURCHASE,
+            qty="100",
+            unit_cost="100",
+        )
+        await _movement(
+            session,
+            cww,
+            staff_user,
+            minutes=10,
+            kind=MovementType.PURCHASE,
+            qty="100",
+            unit_cost="120",
+        )
+        # average is now 110; sending back the dear half must lower it
+        await _movement(
+            session,
+            cww,
+            staff_user,
+            minutes=20,
+            kind=MovementType.PURCHASE_RETURN,
+            qty="-100",
+            unit_cost="120",
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        result = await CostReplayService(session).replay(ORG, cww.id, WAREHOUSE)
+        await session.commit()
+
+    # (200*110 - 100*120) / 100 = 100
+    assert result.qty_after == decimal.Decimal("100.000")
+    assert result.avg_after == decimal.Decimal("100.0000")
+
+
+async def test_an_unwind_that_would_go_negative_holds_the_average(
+    cww: Product, staff_user: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Same approximation, and the same reason, as the inventory
+    service: a negative cost basis would poison every later sale."""
+    async with session_factory() as session:
+        await _movement(
+            session,
+            cww,
+            staff_user,
+            minutes=0,
+            kind=MovementType.PURCHASE,
+            qty="100",
+            unit_cost="50",
+        )
+        await _movement(
+            session,
+            cww,
+            staff_user,
+            minutes=10,
+            kind=MovementType.PURCHASE_RETURN,
+            qty="-90",
+            unit_cost="500",
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        result = await CostReplayService(session).replay(ORG, cww.id, WAREHOUSE)
+        await session.commit()
+
+    assert result.qty_after == decimal.Decimal("10.000")
+    assert result.avg_after == decimal.Decimal("50.0000"), "invented a negative cost basis"

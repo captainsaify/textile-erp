@@ -16,14 +16,51 @@ made. That exact bug, in an ad-hoc script, threw away corrections across
 28 products and overstated stock by roughly 1.3 lakh; it was caught only
 because the owner knew what one product had cost.
 
-The three cases, in full:
+**The second rule, learned the same way.**
 
-    qty_delta == 0   restatement. avg = unit_cost. qty unchanged.
-    qty_delta  > 0   inbound. weighted average of old stock and new.
-    qty_delta  < 0   outbound. qty falls; **the average does not move**.
-                     Cost leaves at the current average by definition, so
-                     recomputing it here would drift the books every time
-                     something was sold.
+The sign of `qty_delta` does not determine what happens to the average --
+the *movement type* does. A `sale_return` has a positive quantity and
+carries the **selling** price in `unit_cost`, so replaying it as an
+inbound purchase weights the cost basis up towards the sale price. On
+the live books that turned three products' averages into plausible,
+slightly-too-high numbers (CWW: 106.70 recorded, 106.85 replayed) and I
+reported them as drift the recorded figures should be corrected *to*.
+They were not drift. They were this bug.
+
+The cases, in full:
+
+    qty_delta == 0        restatement. avg = unit_cost, qty unchanged.
+                          `restate_cost` writes the new average here
+                          outright; skipping these discards every rate
+                          correction ever made.
+
+    SALE                  qty falls, average unchanged. Cost leaves at
+                          the current average by definition.
+
+    SALE_RETURN           qty rises, average unchanged. Stock comes back
+                          at the cost it left at (docs/03_Inventory.md
+                          §2) -- `unit_cost` here is the sale-time
+                          snapshot, not a purchase price.
+
+    other, qty > 0        inbound. Weighted average of old and new. This
+                          is `purchase`, and `adjustment_increase` from
+                          a receipt correction, which carries the landed
+                          cost. A manual adjust-up carries the current
+                          average, so the weighting is a no-op -- one
+                          rule, right for both.
+
+    other, qty < 0        outbound *with* cost information: unwind the
+                          purchase's contribution,
+                            (old_qty*old_avg - qty*unit_cost) / new_qty
+                          falling back to leaving the average alone when
+                          that would drive value or quantity negative --
+                          the same approximation, and the same reason,
+                          as `record_purchase_return_movement`. Covers
+                          `purchase_return`, `damage`, and the
+                          `adjustment_decrease` a receipt correction
+                          writes. A manual adjust-down carries the
+                          current average, where the unwind is again a
+                          no-op.
 """
 
 from __future__ import annotations
@@ -36,6 +73,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import Inventory, InventoryMovement
+from backend.models.enums import MovementType
 
 FOUR_PLACES = decimal.Decimal("0.0001")
 THREE_PLACES = decimal.Decimal("0.001")
@@ -105,9 +143,17 @@ class CostReplayService:
         avg = ZERO
         for movement in movements:
             delta = movement.qty_delta
+            kind = movement.movement_type
             if delta == ZERO:
                 # Restatement -- see the module docstring. Never skip.
                 avg = movement.unit_cost.quantize(FOUR_PLACES)
+            elif kind is MovementType.SALE_RETURN:
+                # Positive quantity, but `unit_cost` is the sale-time
+                # snapshot, not a purchase price. Weighting it in pulls
+                # the cost basis towards what the goods sold for.
+                qty = (qty + delta).quantize(THREE_PLACES)
+            elif kind is MovementType.SALE:
+                qty = (qty + delta).quantize(THREE_PLACES)
             elif delta > ZERO:
                 new_qty = (qty + delta).quantize(THREE_PLACES)
                 if qty <= ZERO:
@@ -119,7 +165,13 @@ class CostReplayService:
                     )
                 qty = new_qty
             else:
-                qty = (qty + delta).quantize(THREE_PLACES)
+                new_qty = (qty + delta).quantize(THREE_PLACES)
+                remaining = qty * avg + delta * movement.unit_cost
+                if new_qty > ZERO and remaining >= ZERO:
+                    avg = (remaining / new_qty).quantize(FOUR_PLACES)
+                # else: cannot unwind exactly -- hold the average and let
+                # value fall with quantity, as the inventory service does
+                qty = new_qty
             movement.resulting_qty_on_hand = qty
             movement.resulting_avg_cost = avg
 
