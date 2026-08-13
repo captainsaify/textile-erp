@@ -31,6 +31,8 @@ from backend.services.receipt_correction_service import ChargeService
 from backend.services.reversal_service import ReversalService
 from backend.services.undo_service import UndoService
 
+ZERO = decimal.Decimal("0")
+
 merge = typer.Typer(no_args_is_help=True, help="Combine two things that are one thing.")
 cli.add_typer(merge, name="merge")
 
@@ -597,6 +599,140 @@ def unmerge(
                 entity_type="reversal_manifests",
                 entity_id=manifest.id,
                 after_state={"subject": manifest.subject, "rows": moved},
+                channel="cli",
+            )
+
+    run(action)
+
+
+# --- split ------------------------------------------------------------
+
+
+@cli.command("split")
+def split(
+    kind: Annotated[str, typer.Argument(help="sale (purchase not yet)")],
+    reference: Annotated[str, typer.Argument(help="First characters of the sale id")],
+    lines: Annotated[str, typer.Option("--lines", help="Line numbers to move, e.g. 2,3")],
+    to: Annotated[str, typer.Option("--to", help="The party the moved lines belong to")],
+) -> None:
+    """Split one entry into two, across two parties.
+
+    A sale recorded to one customer where half of it was really
+    another's. Distinct from un-merging: nothing is being put back, one
+    transaction is becoming two.
+
+    **Stock is untouched.** Same products, same quantities, same day --
+    the goods left the building either way. Only who owes for them
+    changes, which is what makes this far safer than it sounds and why
+    it does not go near the costing.
+    """
+
+    async def action(ctx: AdminContext) -> None:
+        if kind != "sale":
+            raise AdminError("only `sale` for now — purchases split the same way, unbuilt.")
+        try:
+            wanted = {int(n) for n in lines.replace(" ", "").split(",") if n}
+        except ValueError as exc:
+            raise AdminError("--lines takes line numbers, e.g. --lines 2,3") from exc
+        if not wanted:
+            raise AdminError("--lines cannot be empty.")
+
+        header = await resolve.sale_by_reference(ctx.session, ctx.org_id, reference)
+        party = await resolve.customer_by_name(ctx.session, ctx.org_id, to)
+        if party.id == header.customer_id:
+            raise AdminError("those lines are already on that customer.")
+        if header.amount_paid > 0:
+            raise AdminError(
+                f"{console.money(header.amount_paid)} has been received against this sale. "
+                "Splitting it would leave the money on one half and the goods on both. "
+                "Reverse the receipt first: erp payment reverse <id>"
+            )
+
+        from backend.models import SalesLine
+
+        all_lines = list(
+            (
+                await ctx.session.execute(
+                    select(SalesLine)
+                    .where(SalesLine.sales_header_id == header.id)
+                    .order_by(SalesLine.line_no)
+                )
+            ).scalars()
+        )
+        moving = [ln for ln in all_lines if ln.line_no in wanted]
+        staying = [ln for ln in all_lines if ln.line_no not in wanted]
+        missing = wanted - {ln.line_no for ln in all_lines}
+        if missing:
+            raise AdminError(f"no line {', '.join(str(n) for n in sorted(missing))} on that sale.")
+        if not staying:
+            raise AdminError(
+                "that moves every line — this is a change of customer, not a split: "
+                f"erp fix sale {reference} --customer {to!r}"
+            )
+
+        moved_total = sum((ln.line_total for ln in moving), ZERO)
+        console.head(f"Split sale {str(header.id)[:8]}")
+        console.item(f"{len(moving)} line(s), {console.money(moved_total)} → {party.name}")
+        console.item(f"{len(staying)} line(s) stay")
+        console.item("stock is not affected — the goods left either way")
+        confirm(ctx, expected=party.name, prompt=f"Type {party.name} to confirm: ")
+
+        async with guarded(ctx, what=f"split of sale {str(header.id)[:8]}"):
+            new_header = SalesHeader(
+                org_id=ctx.org_id,
+                customer_id=party.id,
+                warehouse_id=header.warehouse_id,
+                sale_date=header.sale_date,
+                payment_type=header.payment_type,
+                subtotal=moved_total,
+                grand_total=moved_total,
+                notes=f"split from {str(header.id)[:8]}",
+                created_by=ctx.actor.id,
+            )
+            ctx.session.add(new_header)
+            await ctx.session.flush()
+
+            for position, line in enumerate(moving, start=1):
+                line.sales_header_id = new_header.id
+                line.line_no = position
+            # Charges are not split: they were agreed on the original
+            # bill as a whole, and dividing them would invent a number
+            # nobody agreed to. They stay with the original, and can be
+            # moved deliberately with `erp charge` afterwards.
+            header.subtotal = sum((ln.line_total for ln in staying), ZERO)
+            header.grand_total = (
+                header.subtotal + header.freight + header.other_charges - header.discount
+            )
+            await ctx.session.flush()
+
+            manifest = await ReversalService(ctx.session).record(
+                ctx.org_id,
+                ctx.actor,
+                operation="split",
+                subject=f"sale {str(header.id)[:8]} → {party.name}",
+                moved=[
+                    {
+                        "table": "sales_lines",
+                        "id": str(line.id),
+                        "column": "sales_header_id",
+                        "from": str(header.id),
+                        "to": str(new_header.id),
+                    }
+                    for line in moving
+                ],
+                created=[{"table": "sales_headers", "id": str(new_header.id)}],
+            )
+            console.item(f"new sale {str(new_header.id)[:8]} for {party.name}")
+            console.item(f"original now {console.money(header.grand_total)}")
+            console.item(f"reversible with: erp unmerge {str(manifest.id)[:8]}")
+
+            await AuditService(ctx.session).record(
+                ctx.org_id,
+                ctx.actor.id,
+                action="sale.split",
+                entity_type="sales_headers",
+                entity_id=header.id,
+                after_state={"into": str(new_header.id), "lines": len(moving)},
                 channel="cli",
             )
 
