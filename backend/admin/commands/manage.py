@@ -395,6 +395,40 @@ def merge_brand(
         confirm(ctx, expected=winning.name, prompt=f"Type the surviving brand ({winning.name}): ")
 
         async with guarded(ctx, what=f"merge of brand {losing.name} into {winning.name}"):
+            billed = list(
+                (
+                    await ctx.session.execute(
+                        select(PurchaseHeader.id).where(PurchaseHeader.brand_id == losing.id)
+                    )
+                ).scalars()
+            )
+            manifest = await ReversalService(ctx.session).record(
+                ctx.org_id,
+                ctx.actor,
+                operation="merge_brand",
+                subject=f"{losing.name} → {winning.name}",
+                moved=[
+                    {
+                        "table": "products",
+                        "id": str(p.id),
+                        "column": "brand_id",
+                        "from": str(losing.id),
+                        "to": str(winning.id),
+                    }
+                    for p in products
+                ]
+                + [
+                    {
+                        "table": "purchase_headers",
+                        "id": str(header_id),
+                        "column": "brand_id",
+                        "from": str(losing.id),
+                        "to": str(winning.id),
+                    }
+                    for header_id in billed
+                ],
+                hidden=[{"table": "brands", "id": str(losing.id)}],
+            )
             await ctx.session.execute(
                 update(Product).where(Product.brand_id == losing.id).values(brand_id=winning.id)
             )
@@ -406,6 +440,7 @@ def merge_brand(
             losing.deleted_at = datetime.datetime.now(datetime.UTC)
             await ctx.session.flush()
             console.item(f"{len(products)} product(s) moved; {losing.name} removed")
+            console.item(f"reversible with: erp unmerge {str(manifest.id)[:8]}")
             await AuditService(ctx.session).record(
                 ctx.org_id,
                 ctx.actor.id,
@@ -483,6 +518,38 @@ def merge_purchase(
         confirm(ctx, expected=winning.invoice_no, prompt=f"Type {winning.invoice_no} to confirm: ")
 
         async with guarded(ctx, what=f"merge of {losing.invoice_no} into {winning.invoice_no}"):
+            manifest = await ReversalService(ctx.session).record(
+                ctx.org_id,
+                ctx.actor,
+                operation="merge_purchase",
+                subject=f"{losing.invoice_no} → {winning.invoice_no}",
+                # Two entries per line: where it lived, and what it was
+                # numbered. The merge renumbers moved lines onto the end
+                # of the surviving bill, and a reversal that put them
+                # back under those numbers would leave the original with
+                # lines starting at 15.
+                moved=[
+                    {
+                        "table": "purchase_lines",
+                        "id": str(line.id),
+                        "column": "purchase_header_id",
+                        "from": str(losing.id),
+                        "to": str(winning.id),
+                    }
+                    for line in losing_lines
+                ]
+                + [
+                    {
+                        "table": "purchase_lines",
+                        "id": str(line.id),
+                        "column": "line_no",
+                        "from": str(line.line_no),
+                        "to": str(highest + offset),
+                    }
+                    for offset, line in enumerate(losing_lines, start=1)
+                ],
+                hidden=[{"table": "purchase_headers", "id": str(losing.id)}],
+            )
             for offset, line in enumerate(losing_lines, start=1):
                 line.purchase_header_id = winning.id
                 line.line_no = highest + offset
@@ -496,6 +563,7 @@ def merge_purchase(
             await ctx.session.flush()
             console.item(f"{len(losing_lines)} line(s) moved; {losing.invoice_no} removed")
             console.item(f"new total {console.money(winning.grand_total)}")
+            console.item(f"reversible with: erp unmerge {str(manifest.id)[:8]}")
             await AuditService(ctx.session).record(
                 ctx.org_id,
                 ctx.actor.id,
@@ -592,6 +660,30 @@ def unmerge(
         async with guarded(ctx, what=f"reversal of {manifest.subject}"):
             moved = await service.apply(plan, ctx.actor)
             console.item(f"{moved} row(s) put back")
+
+            # A bill's totals are derived from its lines, so they are
+            # recomputed rather than stored and replayed -- storing them
+            # would give two sources for one number and a way for them
+            # to disagree.
+            if manifest.operation == "merge_purchase":
+                from backend.admin.commands.fix import _retotal
+
+                touched = {
+                    uuid.UUID(str(entry["from"]))
+                    for entry in manifest.payload.get("moved", [])
+                    if entry.get("column") == "purchase_header_id"
+                } | {
+                    uuid.UUID(str(entry["to"]))
+                    for entry in manifest.payload.get("moved", [])
+                    if entry.get("column") == "purchase_header_id"
+                }
+                for header_id in touched:
+                    header = await ctx.session.get(PurchaseHeader, header_id)
+                    if header is not None:
+                        await _retotal(ctx, header)
+                        console.item(
+                            f"{header.invoice_no} re-added: {console.money(header.grand_total)}"
+                        )
             await AuditService(ctx.session).record(
                 ctx.org_id,
                 ctx.actor.id,

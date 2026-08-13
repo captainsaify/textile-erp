@@ -268,3 +268,23 @@ async def test_rows_created_after_the_merge_are_never_touched(
         assert untouched.customer_id == winner.id, "a later sale was dragged back"
         await session.execute(sa.text("DELETE FROM sales_headers WHERE id = :i"), {"i": later_id})
         await session.commit()
+
+
+def test_restoring_reads_the_type_off_the_column_not_the_manifest() -> None:
+    """The manifest is JSON, so every value comes back as text.
+
+    A merge moves UUIDs *and* renumbers lines. Restoring `line_no` from
+    the string "3" would fail in the database rather than in Python,
+    which is a worse place to find out — so the type is read off what
+    the column holds now.
+    """
+    import decimal as _decimal
+
+    from backend.services.reversal_service import _coerce
+
+    assert _coerce(uuid.UUID(int=1), str(uuid.UUID(int=2))) == uuid.UUID(int=2)
+    assert _coerce(7, "3") == 3
+    assert isinstance(_coerce(7, "3"), int)
+    assert _coerce(_decimal.Decimal("1.00"), "2.50") == _decimal.Decimal("2.50")
+    assert _coerce("anything", "text") == "text"
+    assert _coerce(uuid.UUID(int=1), None) is None

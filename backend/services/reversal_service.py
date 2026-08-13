@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import decimal
 import uuid
 from typing import Any
 
@@ -32,8 +33,10 @@ from backend.models import (
     Customer,
     Product,
     PurchaseHeader,
+    PurchaseLine,
     ReversalManifest,
     SalesHeader,
+    SalesLine,
     Supplier,
     User,
 )
@@ -43,7 +46,9 @@ from backend.models import (
 #: arbitrary table.
 TABLES: dict[str, Any] = {
     "purchase_headers": PurchaseHeader,
+    "purchase_lines": PurchaseLine,
     "sales_headers": SalesHeader,
+    "sales_lines": SalesLine,
     "products": Product,
     "brands": Brand,
     "suppliers": Supplier,
@@ -52,6 +57,28 @@ TABLES: dict[str, Any] = {
 
 #: Headers can have money allocated against them; the others cannot.
 SETTLEABLE = {"purchase_headers", "sales_headers"}
+
+
+def _coerce(current: Any, previous: str | None) -> Any:
+    """Turn a stored string back into whatever that column holds.
+
+    The manifest is JSON, so every value comes back as text. Which type
+    to restore is read off the value that is there now -- a merge moves
+    UUIDs, but it also renumbers lines, and an integer column set to the
+    string "3" fails at the database rather than in Python, which is a
+    worse place to find out.
+    """
+    if previous is None:
+        return None
+    if isinstance(current, uuid.UUID):
+        return uuid.UUID(previous)
+    if isinstance(current, bool):
+        return previous.lower() in {"true", "1"}
+    if isinstance(current, int):
+        return int(previous)
+    if isinstance(current, decimal.Decimal):
+        return decimal.Decimal(previous)
+    return previous
 
 
 @dataclasses.dataclass(frozen=True)
@@ -252,11 +279,7 @@ class ReversalService:
             record = await self._session.get(model, row.row_id)
             if record is None:
                 continue
-            setattr(
-                record,
-                row.column,
-                uuid.UUID(row.previous) if row.previous else None,
-            )
+            setattr(record, row.column, _coerce(getattr(record, row.column), row.previous))
             moved += 1
 
         for entry in plan.manifest.payload.get("hidden", []):
