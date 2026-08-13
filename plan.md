@@ -249,7 +249,8 @@ operation does not exist anywhere yet.
 | | state | notes |
 |---|---|---|
 | Parties → Merge | **CLI** | `erp merge supplier/customer` |
-| Parties → **De-merge** | **New** | merge is one-way today: the losing party is soft-deleted and its transactions re-pointed, with nothing recording *which* ones moved. Splitting them back apart needs the merge to write that list first — a small change to the merge, made before it is used again, not after |
+| Parties → **Un-merge** | **New** | §10 — needs the merge to write a manifest first |
+| Transactions → **Split** | **New** | §11 — one sale becoming two, across two parties |
 | Parties → Transfer | **New** | move *selected* transactions to another party without merging — the "three sales were his, the rest weren't" case |
 | Parties → Recalculate | **New** | recompute outstanding from source rows. Cheap, because **every balance here is derived** — there are no opening balances to preserve (§11.2) |
 | Parties → Delete | **CLI** | soft delete exists; blocked when transactions reference it |
@@ -361,9 +362,179 @@ screen instead of in a chat, and read them back. If nothing after phase
 Phase 3 is the one to resist skipping once repair work starts. It is the
 least visible and everything from 4 onward rests on it.
 
+
 ---
 
-## 10. What could go wrong
+## 10. Reversibility, and why "restore it" is the hard part
+
+The question that produced this section: *merge two parties, and two
+months later decide to restore them.* By then the books have moved on —
+new sales, payments received, ledger entries, an outstanding balance
+that is a blend of two people's trading. Which rows go back?
+
+**Today the answer is: none of them can.** The merge records
+`{"merged": "Yakub Asif", "into": "Asif Panipat", "moved": 7}` — a
+*count*, not a list. Nothing anywhere records which seven rows moved, so
+there is nothing to put back. Every operation in this plan that claims
+to be reversible has to earn that claim, and the mechanism is the same
+for all of them.
+
+### 10.1 A reversal manifest, written at the time
+
+Every reversible operation records the exact rows it touched, by
+primary key, with their before-values:
+
+```
+reversal_manifests
+  id, org_id, operation, performed_at, actor_id, reversed_at
+  payload {
+    moved:   [{table, id, column, from, to}, …]
+    hidden:  [{table, id}, …]
+    created: [{table, id}, …]
+  }
+```
+
+Not the audit log. `audit_logs` is append-only and partitioned by time,
+which is right for "what happened" and wrong for "what must I look up
+and then mark as undone". The manifest is queried by operation, updated
+when reversed, and is small.
+
+Writing it is cheap. Not writing it is the difference between an
+operation being reversible and merely *sounding* reversible, which is
+the worse of the two because it is believed.
+
+### 10.2 The rows drift, so reversal must classify before it acts
+
+Two months is long enough for anything. Each row in the manifest is
+checked against current state and lands in one of five states:
+
+| state | meaning | what reversal does |
+|---|---|---|
+| **intact** | exists, still points where the merge put it, `updated_at` unchanged | move it back |
+| **modified** | moved, then edited — a rate corrected, a charge added | move it back, **and say so**, listing what changed |
+| **re-pointed** | something *later* moved it somewhere else — a second merge, a `fix --customer` | **conflict** |
+| **missing** | purged or hard-deleted since | **conflict** |
+| **entangled** | has dependants created after the merge (§10.3) | **conflict** |
+
+**Rows created after the merge are never touched.** They were never the
+restored party's; they belong where they are. This is the rule that
+keeps restore from inventing history.
+
+### 10.3 Entanglement — the case that actually bites
+
+The hard one is money.
+
+> ₹1,10,000 arrives from Asif Panipat in July and is allocated across
+> three bills. One of those bills was originally Yakub's. Restoring
+> Yakub moves that bill back — and the payment, which is Asif's, is now
+> settling a bill belonging to someone else.
+
+There is no arithmetic that fixes this, because the payment genuinely
+happened and genuinely covered that bill. Three options, and only one is
+honest:
+
+- Split the receipt proportionally — **invents a payment that never
+  happened.** No.
+- Move the bill and leave the allocation — **the ledger and the bill
+  disagree.** No.
+- **Refuse, name the payment, and give the command that resolves it.**
+
+So: reversal stops, and says
+
+```
+✗ Cannot restore Yakub Asif — 1 payment stands across the split.
+
+  receipt a41f2c · 8 Jul · ₹1,10,000 from Asif Panipat
+    ₹40,000 of it settles bill 007, which would move to Yakub.
+
+  Reverse that receipt first, restore, then re-record it:
+    erp payment reverse a41f2c
+    erp restore-merge <manifest-id>
+    erp received 110000 from "Asif Panipat"
+```
+
+Each of those already exists. The tool's job is knowing which to name,
+not doing something clever.
+
+### 10.4 A live bug this exposed
+
+Allocations are stored in the audit payload as
+`{"reference": "007", "applied": "40000"}` and resolved back to a bill
+by **party plus invoice number**:
+
+```python
+...where PurchaseHeader.supplier_id == entry.entity_id,
+        func.lower(PurchaseHeader.invoice_no) == reference.lower()
+```
+
+Any operation that changes either half breaks that lookup — and it
+breaks *quietly*, finding no bill and unwinding no allocation. `merge`
+changes the party. `fix --invoice-no` changes the number. Both exist
+today and both can already orphan a future payment reversal.
+
+**Fix, before any of this ships:** record `header_id` in the allocation
+payload alongside the reference. Reversal resolves by id and falls back
+to the reference for entries written before the change. Backward
+compatible, and it closes the class rather than the instance.
+
+### 10.5 What this applies to
+
+Not just merges. Every operation claiming reversibility gets a manifest
+and the §10.2 check:
+
+| operation | reverses to |
+|---|---|
+| merge party / brand / product | both parties, transactions re-pointed |
+| merge purchase | two bills again |
+| purge | `restore-purged`, which today only unhides — the manifest is what lets it restore the *stock* too |
+| split (§11) | one transaction again |
+| `fix --code/--brand`, `--with-sales` | the previous product |
+
+### 10.6 The honest limit
+
+**Some restores are genuinely impossible**, and the system's job is to
+say which and why rather than approximate. A merged party whose bills
+were later purged, re-invoiced, part-paid and merged again is not
+recoverable by any amount of cleverness — the information is gone.
+
+What is *not* acceptable is a restore that succeeds and leaves the books
+subtly wrong. That is why every path above ends in refuse-and-name
+rather than best-effort, and why the whole thing still runs inside the
+reconcile-or-rollback guard even when the manifest says it should be
+safe.
+
+---
+
+## 11. Split — one entry becoming two
+
+Distinct from reversing a merge, and more useful day to day:
+
+> A sale was recorded to Party A. Half of it was actually Party B's.
+
+```
+erp split sale efc8e4cb --lines 2,3 --to "Sohail Bhai Lucknow"
+```
+
+- **Stock is untouched.** Same products, same quantities, same day —
+  the goods left the building either way. Only *who owes for them*
+  changes, which is why this is far safer than it sounds.
+- The named lines move to a **new sale header** for B, dated the same.
+  A's header keeps the rest and both are re-totalled.
+- **Receivable splits** — A's outstanding drops by exactly what moved,
+  B's appears.
+- **Blocked when payment is allocated** to the lines being moved, with
+  the same message shape as §10.3.
+- Both headers get audit rows naming the other, and a manifest, so the
+  split is itself reversible — splitting back is a merge of two sales.
+- The new header gets its own reference and its own sheet. The partners
+  receive two documents because there were, in truth, two sales.
+
+Same operation applies to a purchase split across two suppliers, which
+is rarer but is the shape bill 007/007B was in before it was merged.
+
+---
+
+## 12. What could go wrong
 
 - **The guard gets bypassed by accident.** A new endpoint written in a
   hurry that forgets `guarded()`. *Mitigation:* one router-level
@@ -382,7 +553,7 @@ least visible and everything from 4 onward rests on it.
 
 ---
 
-## 11. Answered
+## 13. Answered
 
 **10.1 Owner only.** One account, yours. No role editor and no second
 tier of access — a permission system with a single user is surface area

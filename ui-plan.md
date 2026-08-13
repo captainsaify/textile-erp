@@ -635,35 +635,80 @@ thing that should be resumable.
 
 ---
 
-## 16. Three things in this that the database does not do yet
+## 16. Three things the database does not do yet — and how each is fixed
 
 Checked against the schema rather than assumed, because each one is
 backend work hiding inside a UI request.
 
-**16.1 Sales carry no weight.** `purchase_lines` has `weight_kg` and
-`total_weight_kg`; `sales_lines` has only `qty`, `rate` and
-`line_total`. So the Qty/KG/Total-KG grid works on a purchase today and
-needs **two nullable columns plus a migration** on the sale side. Small,
-but it is a schema change and it should be made once, before either
-entry screen ships, so the two forms are not different shapes.
+**16.1 Sales carry no weight — two columns, one migration.**
+`purchase_lines` has `weight_kg` and `total_weight_kg`; `sales_lines`
+has only `qty`, `rate` and `line_total`.
 
-**16.2 Discount does not exist anywhere.** Not a column, not a service,
-not an account. It cannot be smuggled in as a negative `other_charges`:
-a discount given on a sale reduces revenue, and one received on a
-purchase reduces the cost of the goods — booking either as a negative
-charge puts it in the wrong half of the P&L, and the P&L is the number
-the partners read. This needs a column on the header, an account code,
-and journal postings on both sides. **It is the largest single item in
-this document that is not already built**, and it deserves its own
-decision rather than riding along with the form.
+*Fix:* add `weight_kg` and `total_weight_kg` to `sales_lines`, both
+nullable, mirroring the purchase side exactly — same names, same types,
+so the two lines read the same in every query that touches both. `qty`
+stays the costing quantity in kilograms, and bales stay derived
+(`qty ÷ weight_kg`), which is what makes the grid column free.
 
-**16.3 Partial payment at sale time is not a thing today.** A sale is
-either `credit` (paid nothing) or `cash`/`bank` (paid in full) — there
-is no "paid 50,000 of 1,65,980 at the counter". §5.5 gets there without
-a schema change, by recording the sale as credit and immediately calling
-the existing settlement path for the part-payment inside the same
-transaction. Worth stating plainly because it looks like one field and
-is two operations.
+Nullable because every sale recorded so far has no weight and inventing
+one would be fabrication. The grid shows blank cells for those, which is
+honest — and `receive`-style bale corrections simply are not offered on
+a line that has no per-bale weight, exactly as the purchase side already
+behaves.
+
+**Do it before either form ships.** Shipping purchase entry with three
+quantity columns and sale entry with one produces two screens that look
+like different products.
+
+**16.2 Discount does not exist anywhere — the largest unbuilt item.**
+Not a column, not a service, not an account.
+
+It cannot be smuggled in as a negative `other_charges`. A discount given
+on a sale reduces **revenue**; one received on a purchase reduces the
+**cost of the goods**. Booking either as a negative charge puts it in the
+wrong half of the P&L, and the P&L is the number the partners read.
+
+*Fix, and it is four pieces, not one:*
+
+1. **`discount` column** (`NUMERIC`, default 0) on `purchase_headers`
+   and `sales_headers`, beside `freight` and `other_charges`. Header
+   level, not per line — a per-line discount is a different feature and
+   §15's open question can decide it later without redoing this.
+2. **Two account codes** — `PURCHASE_DISCOUNT` (income-ish, reduces
+   cost) and `SALES_DISCOUNT` (contra-revenue). Named separately
+   because netting them off would hide both.
+3. **Journal postings** on each side, and inclusion in
+   `grand_total = subtotal + freight + other_charges − discount`.
+4. **Cost effect on a purchase.** A purchase discount reduces what the
+   goods cost, so it flows into `landed_cost_per_unit` through the same
+   allocation `freight` and `other_charges` already use — otherwise
+   stock is valued at a price nobody paid. A *sales* discount touches no
+   cost at all.
+
+Not hard, but it is real accounting work with a migration, and it must
+land before the form offers the field. A discount box that saves into
+`other_charges` would be worse than no discount box.
+
+**16.3 Partial payment at sale time — two operations, no migration.**
+A sale is either `credit` (paid nothing) or `cash`/`bank` (paid in
+full). There is no "paid ₹50,000 of ₹1,65,980 at the counter".
+
+*Fix:* record the sale as `credit`, then immediately call
+`SettlementService.receive_from_customer` for the amount, **in the same
+transaction**. The receipt allocates against the sale that was just
+created, the cash or bank ledger moves, the journal balances, and the
+payment document generates — all through the path `received 50000 from
+…` already takes.
+
+Two details that are not optional:
+
+- **The allocation must record the new sale's `header_id`**, per
+  `plan.md` §10.4. This is the first code written after that fix, and
+  writing it the old way would create exactly the orphaned-reversal
+  problem that section exists to close.
+- **Paid-in-full still uses `payment_type` cash/bank** rather than
+  going the settlement route, so the common case keeps behaving exactly
+  as it does today and the new path handles only what it must.
 
 ### Still open
 
