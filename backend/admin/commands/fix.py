@@ -324,8 +324,24 @@ def fix_purchase(
                         await ctx.session.delete(movement)
                     await ctx.session.delete(line)
                     await ctx.session.flush()
-                    # Renumber what is left, so `--line N` keeps meaning
-                    # what `erp show` prints.
+                    # Deliberately NOT renumbered. Two reasons, one
+                    # practical and one that matters more.
+                    #
+                    # Practical: line_no is unique per bill, and
+                    # renumbering row by row collides -- SQLAlchemy's
+                    # unit of work reorders the UPDATEs, so 3->2 can be
+                    # emitted before 2->1 and the constraint fires. That
+                    # is fixable with a two-pass shuffle.
+                    #
+                    # The real reason is that a line number is an
+                    # identifier people have already used. It is printed
+                    # on the sheet sent to the partners and quoted in
+                    # WhatsApp messages, and silently sliding every
+                    # later line up one would make an instruction like
+                    # "line 4 is wrong" point at different goods
+                    # depending on when it was read. A gap in the
+                    # numbering is visible and harmless; a renumber is
+                    # invisible and is not.
                     survivors = list(
                         (
                             await ctx.session.execute(
@@ -335,15 +351,16 @@ def fix_purchase(
                             )
                         ).scalars()
                     )
-                    for position, row in enumerate(survivors, start=1):
-                        row.line_no = position
                     await _retotal(ctx, header)
                     await ctx.session.flush()
                     console.item(
                         f"line {line_no} removed ({old_product.code}, "
                         f"{console.qty(line.qty)}), {len(gone)} movement(s) deleted"
                     )
-                    console.item(f"{len(survivors)} line(s) left, renumbered")
+                    console.item(
+                        f"{len(survivors)} line(s) left; the rest keep their "
+                        "numbers, so a gap is expected"
+                    )
                     console.item(f"bill total → {console.money(header.grand_total)}")
                     await _replay_both(ctx, old_product.id)
 
