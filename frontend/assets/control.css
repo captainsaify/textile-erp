@@ -338,3 +338,25 @@ button:focus-visible {
     gap: 1rem;
   }
 }
+
+/* The admin pages stack cards; the entry form does not. Spacing only —
+ * the card, grid-2 and table styles all come from the dashboard's
+ * stylesheet, which control.html loads first. One visual language. */
+#page-money .card,
+#page-stock .card,
+#page-system .card {
+  margin-bottom: 1rem;
+  display: grid;
+  gap: 0.6rem;
+  align-content: start;
+}
+#page-money h2,
+#page-stock h2,
+#page-system h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+#page-stock .card button,
+#page-money .card button {
+  justify-self: start;
+}

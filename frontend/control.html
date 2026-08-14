@@ -6,7 +6,7 @@
     <meta name="robots" content="noindex, nofollow" />
     <title>Master Control</title>
     <link rel="stylesheet" href="/assets/styles.css?v=14" />
-    <link rel="stylesheet" href="/assets/control.css?v=3" />
+    <link rel="stylesheet" href="/assets/control.css?v=4" />
   </head>
   <body>
     <!-- A separate document from the dashboard, not a route inside it.
@@ -37,6 +37,9 @@
           <button data-page="purchase" class="active">New purchase</button>
           <button data-page="sale">New sale</button>
           <button data-page="records">Records</button>
+          <button data-page="money">Money</button>
+          <button data-page="stock">Stock</button>
+          <button data-page="system">System</button>
         </nav>
         <div class="topbar-end">
           <span id="books-health" class="muted"></span>
@@ -53,6 +56,114 @@
       </div>
 
       <main>
+        <section id="page-money" hidden>
+          <div class="grid-2">
+            <section class="card">
+              <h2>Money in</h2>
+              <p class="muted">
+                From a customer. Left without a bill number it settles the oldest
+                open ones first, which is what a payment on account does.
+              </p>
+              <div class="field"><label>Customer</label><input id="rc-party" /></div>
+              <div class="field narrow"><label>Amount</label><input id="rc-amount" inputmode="decimal" /></div>
+              <div class="field narrow"><label>Into</label>
+                <select id="rc-via"><option value="cash">Cash</option><option value="bank">Bank</option></select>
+              </div>
+              <div class="field"><label>Against bill (optional)</label><input id="rc-against" /></div>
+              <button type="button" id="rc-go" class="primary">Record receipt</button>
+              <div id="rc-out" class="hint"></div>
+            </section>
+
+            <section class="card">
+              <h2>Money out</h2>
+              <p class="muted">To a supplier, or an expense.</p>
+              <div class="field"><label>Supplier</label><input id="pay-party" /></div>
+              <div class="field narrow"><label>Amount</label><input id="pay-amount" inputmode="decimal" /></div>
+              <div class="field narrow"><label>From</label>
+                <select id="pay-via"><option value="cash">Cash</option><option value="bank">Bank</option></select>
+              </div>
+              <button type="button" id="pay-go" class="primary">Record payment</button>
+              <div id="pay-out" class="hint"></div>
+              <hr />
+              <div class="field"><label>Expense category</label><input id="ex-cat" placeholder="freight, tea, rent…" /></div>
+              <div class="field narrow"><label>Amount</label><input id="ex-amount" inputmode="decimal" /></div>
+              <div class="field"><label>Note</label><input id="ex-note" /></div>
+              <button type="button" id="ex-go" class="primary">Record expense</button>
+              <div id="ex-out" class="hint"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="page-stock" hidden>
+          <section class="card">
+            <h2>Correct a line on a bill</h2>
+            <p class="muted">
+              Changing the item or its label moves the stock with it and recosts
+              both products — a relabelled line is a different product, not an
+              edited field.
+            </p>
+            <div class="field narrow"><label>Invoice</label><input id="fx-invoice" /></div>
+            <div class="field narrow"><label>Line no</label><input id="fx-line" inputmode="numeric" /></div>
+            <div class="field narrow"><label>New code</label><input id="fx-code" /></div>
+            <div class="field narrow"><label>New label</label><input id="fx-brand" /></div>
+            <div class="field narrow"><label>New rate</label><input id="fx-rate" inputmode="decimal" /></div>
+            <button type="button" id="fx-go" class="primary">Correct it</button>
+            <div id="fx-out" class="hint"></div>
+          </section>
+
+          <section class="card">
+            <h2>Adjust stock</h2>
+            <p class="muted">
+              A typed movement, never an edit of the balance: the balance is
+              worked out from movements, and writing it directly makes the two
+              disagree.
+            </p>
+            <div class="field narrow"><label>Code</label><input id="sa-code" /></div>
+            <div class="field narrow"><label>Label</label><input id="sa-brand" /></div>
+            <div class="field narrow"><label>Change</label><input id="sa-qty" placeholder="-5" /></div>
+            <div class="field narrow"><label>Reason</label>
+              <select id="sa-reason">
+                <option value="damaged">Damaged</option>
+                <option value="adjust-up">Adjust up</option>
+                <option value="adjust-down">Adjust down</option>
+              </select>
+            </div>
+            <div class="field"><label>Note</label><input id="sa-note" /></div>
+            <button type="button" id="sa-go" class="primary">Adjust</button>
+            <div id="sa-out" class="hint"></div>
+          </section>
+
+          <section class="card">
+            <h2>Rebuild costs</h2>
+            <p class="muted">
+              Replays every average from movement history. Safe to run: it
+              computes rather than destroys, and rolls back if anything stops
+              balancing.
+            </p>
+            <button type="button" id="rc-all" class="primary">Rebuild</button>
+            <div id="rc-all-out" class="hint"></div>
+          </section>
+        </section>
+
+        <section id="page-system" hidden>
+          <div class="grid-2">
+            <section class="card">
+              <h2>Can be undone</h2>
+              <p class="muted">Merges and removals, newest first.</p>
+              <div id="reversals"></div>
+            </section>
+            <section class="card">
+              <h2>Backups</h2>
+              <button type="button" id="bk-go" class="primary">Take one now</button>
+              <div id="backups"></div>
+            </section>
+          </div>
+          <section class="card">
+            <h2>What has happened</h2>
+            <div id="audit"></div>
+          </section>
+        </section>
+
         <!-- Removing a bill starts from a list, not from remembering an
              invoice number. Preview first, then the number typed back:
              a checkbox is clicked before it is read, and this is the
@@ -155,6 +266,6 @@
     </div>
 
     <script src="/assets/money.js?v=14"></script>
-    <script src="/assets/control.js?v=3"></script>
+    <script src="/assets/control.js?v=4"></script>
   </body>
 </html>

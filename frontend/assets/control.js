@@ -538,18 +538,21 @@
 
   // ------------------------------------------------------------- mode
 
+  const PAGES = { records: "page-records", money: "page-money", stock: "page-stock", system: "page-system" };
+
   function setKind(next) {
-    if (next === "records") {
+    if (PAGES[next]) {
       document.querySelectorAll("#nav button").forEach((button) => {
-        button.classList.toggle("active", button.dataset.page === "records");
+        button.classList.toggle("active", button.dataset.page === next);
       });
       $("entry").hidden = true;
-      $("page-records").hidden = false;
-      loadRecords().catch((exc) => banner(exc.message));
+      Object.values(PAGES).forEach((id) => ($(id).hidden = id !== PAGES[next]));
+      if (next === "records") loadRecords().catch((exc) => banner(exc.message));
+      if (next === "system") loadSystem().catch((exc) => banner(exc.message));
       return;
     }
     $("entry").hidden = false;
-    $("page-records").hidden = true;
+    Object.values(PAGES).forEach((id) => ($(id).hidden = true));
     kind = next;
     document.querySelectorAll("#nav button").forEach((button) => {
       button.classList.toggle("active", button.dataset.page === kind);
@@ -757,6 +760,208 @@
       panel.replaceChildren(el("p", "error", exc.message));
     }
   }
+
+  // ------------------------------------------------------------ money
+
+  /** Every action here reports what the server said, not what was
+   *  typed. They differ whenever an allocation lands somewhere other
+   *  than expected, and the server's answer is the true one. */
+  function wire(buttonId, outId, run) {
+    $(buttonId).addEventListener("click", async () => {
+      const out = $(outId);
+      $(buttonId).disabled = true;
+      out.textContent = "Working…";
+      out.classList.remove("warn");
+      try {
+        out.textContent = await run();
+      } catch (exc) {
+        out.textContent = exc.message;
+        out.classList.add("warn");
+      } finally {
+        $(buttonId).disabled = false;
+      }
+    });
+  }
+
+  wire("rc-go", "rc-out", async () => {
+    const result = await api("/control/receive", {
+      method: "POST",
+      body: JSON.stringify({
+        party: $("rc-party").value.trim(),
+        amount: $("rc-amount").value.trim(),
+        via: $("rc-via").value,
+        against: $("rc-against").value.trim() || null,
+      }),
+    });
+    const applied = result.allocations
+      .map((a) => `${a.reference} ${Money.format(a.applied)}`)
+      .join(", ");
+    ["rc-party", "rc-amount", "rc-against"].forEach((id) => ($(id).value = ""));
+    return (
+      `Received ${Money.format(result.amount)} from ${result.party}. ` +
+      (applied ? `Settled ${applied}. ` : "") +
+      (Money.isZero(result.advance) ? "" : `${Money.format(result.advance)} on account. `) +
+      `Now owes ${Money.format(result.outstanding_after)}.`
+    );
+  });
+
+  wire("pay-go", "pay-out", async () => {
+    const result = await api("/control/pay", {
+      method: "POST",
+      body: JSON.stringify({
+        party: $("pay-party").value.trim(),
+        amount: $("pay-amount").value.trim(),
+        via: $("pay-via").value,
+      }),
+    });
+    ["pay-party", "pay-amount"].forEach((id) => ($(id).value = ""));
+    return `Paid ${Money.format(result.amount)} to ${result.party}. Owing ${Money.format(result.outstanding_after)}.`;
+  });
+
+  wire("ex-go", "ex-out", async () => {
+    const result = await api("/control/expenses", {
+      method: "POST",
+      body: JSON.stringify({
+        category: $("ex-cat").value.trim(),
+        amount: $("ex-amount").value.trim(),
+        description: $("ex-note").value.trim() || null,
+      }),
+    });
+    ["ex-cat", "ex-amount", "ex-note"].forEach((id) => ($(id).value = ""));
+    // The service spots a category that looks like one already in use.
+    // Two buckets for one thing splits the reporting silently, so the
+    // warning is worth more than the tidiness of hiding it.
+    const similar = result.similar_category
+      ? ` — note: you already use “${result.similar_category}”.`
+      : "";
+    return `Recorded ${Money.format(result.amount)} on ${result.category}.${similar}`;
+  });
+
+  // -------------------------------------------------- fixes and stock
+
+  wire("fx-go", "fx-out", async () => {
+    const result = await api("/control/purchases/fix-line", {
+      method: "POST",
+      body: JSON.stringify({
+        invoice_no: $("fx-invoice").value.trim(),
+        line_no: Number($("fx-line").value || 0),
+        code: $("fx-code").value.trim() || null,
+        brand: $("fx-brand").value.trim() || null,
+        rate: $("fx-rate").value.trim() || null,
+      }),
+    });
+    return `${result.invoice_no} line ${result.line_no}: ${result.notes.join("; ")}`;
+  });
+
+  wire("sa-go", "sa-out", async () => {
+    const result = await api("/control/stock/adjust", {
+      method: "POST",
+      body: JSON.stringify({
+        code: $("sa-code").value.trim(),
+        brand: $("sa-brand").value.trim() || null,
+        qty_delta: $("sa-qty").value.trim(),
+        reason: $("sa-reason").value,
+        note: $("sa-note").value.trim() || null,
+      }),
+    });
+    return `${result.code}: ${result.on_hand} on hand at ${Money.format(result.avg_cost)}.`;
+  });
+
+  wire("rc-all", "rc-all-out", async () => {
+    const result = await api("/control/stock/recost", { method: "POST" });
+    if (!result.changed.length) return "Nothing moved — the books already agreed with history.";
+    return result.changed
+      .map((c) => `${c.code}: ${c.avg_before} → ${c.avg_after}`)
+      .join("; ");
+  });
+
+  // ----------------------------------------------------------- system
+
+  function rowsTable(headers, items, cells) {
+    const table = el("table", "grid");
+    const head = table.createTHead().insertRow();
+    headers.forEach((label) => {
+      const th = document.createElement("th");
+      th.textContent = label;
+      head.append(th);
+    });
+    const body = table.createTBody();
+    if (!items.length) {
+      const cell = body.insertRow().insertCell();
+      cell.colSpan = headers.length;
+      cell.className = "muted";
+      cell.textContent = "Nothing here.";
+      return table;
+    }
+    items.forEach((item) => {
+      const tr = body.insertRow();
+      cells(item).forEach((value) => {
+        const cell = tr.insertCell();
+        if (value instanceof Node) cell.append(value);
+        else cell.textContent = value;
+      });
+    });
+    return table;
+  }
+
+  async function loadSystem() {
+    const [reversals, audit, backups] = await Promise.all([
+      api("/control/reversals"),
+      api("/control/audit?limit=40"),
+      api("/control/backups"),
+    ]);
+
+    $("reversals").replaceChildren(
+      rowsTable(["When", "What", "Subject", ""], reversals.items, (item) => {
+        const undo = el("button", "link", "Undo");
+        undo.type = "button";
+        undo.addEventListener("click", () => previewReversal(item.id));
+        return [item.when.slice(0, 16).replace("T", " "), item.operation, item.subject, undo];
+      }),
+    );
+
+    $("audit").replaceChildren(
+      rowsTable(["When", "What", "How", "Who"], audit.items, (item) => [
+        item.when.slice(0, 16).replace("T", " "),
+        item.action,
+        item.channel,
+        item.who,
+      ]),
+    );
+
+    $("backups").replaceChildren(
+      rowsTable(["Name", "Taken", "Size"], backups.items, (item) => [
+        item.name,
+        item.taken.slice(0, 16).replace("T", " "),
+        `${item.size_kb} KB`,
+      ]),
+    );
+  }
+
+  /** Row by row, before anything moves. A reversal that puts some rows
+   *  back and leaves the rest is worse than one that refuses. */
+  async function previewReversal(reference) {
+    const plan = await api(`/control/reversals/${reference}/preview`, { method: "POST" });
+    const lines = plan.rows.map((r) => `${r.state}${r.detail ? ` — ${r.detail}` : ""}`);
+    if (!plan.ok) {
+      banner(`Blocked: ${plan.blocked.join("; ")}`);
+      return;
+    }
+    if (!window.confirm(`Undo “${plan.subject}”?\n\n${lines.join("\n")}`)) return;
+    try {
+      const done = await api(`/control/reversals/${reference}`, { method: "POST" });
+      banner(`${done.subject}: ${done.moved} row(s) put back.`, true);
+      await loadSystem();
+    } catch (exc) {
+      banner(exc.message);
+    }
+  }
+
+  wire("bk-go", "backups", async () => {
+    const made = await api("/control/backups", { method: "POST" });
+    await loadSystem();
+    return `Took ${made.name} (${made.size_kb} KB).`;
+  });
 
   // ------------------------------------------------------------- boot
 
