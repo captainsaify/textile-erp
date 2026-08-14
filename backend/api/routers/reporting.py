@@ -17,7 +17,7 @@ from fastapi import APIRouter, Query, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from backend.api.amounts import money_str, qty_str
+from backend.api.amounts import money_str, qty_display, qty_str
 from backend.api.deps import CurrentUser, OwnerUser, Paging, Session
 from backend.repositories.accounting_repository import LedgerRepository, business_today
 from backend.services.dashboard_service import DashboardService
@@ -377,17 +377,6 @@ async def export_status(job_id: str, user: CurrentUser, session: Session) -> dic
     }
 
 
-def _qty(value: decimal.Decimal | None) -> str:
-    """A quantity a person can read.
-
-    `Decimal.normalize()` alone renders 2480 as `2.48E+3` -- correct,
-    and unreadable on a dashboard next to a rupee figure. `format(..,
-    "f")` keeps it positional while still dropping the trailing zeros
-    that make a count look like a measurement.
-    """
-    return format(decimal.Decimal(value or 0).normalize(), "f")
-
-
 @router.get("/metrics/products")
 async def product_performance(
     user: OwnerUser,
@@ -458,7 +447,7 @@ async def product_performance(
                 "code": code,
                 "brand": brand,
                 "description": description,
-                "qty": _qty(qty),
+                "qty": qty_display(qty),
                 "revenue": money_str(gross),
                 "cost": money_str(spent),
                 "profit": money_str(profit),
@@ -536,7 +525,7 @@ async def brand_performance(
         items.append(
             {
                 "brand": brand or "—",
-                "qty": _qty(qty),
+                "qty": qty_display(qty),
                 "revenue": money_str(gross),
                 "profit": money_str(profit),
                 "margin_pct": (
@@ -626,14 +615,14 @@ async def stock_health(
             "code": code,
             "brand": brand or "—",
             "description": description,
-            "on_hand": _qty(on_hand),
+            "on_hand": qty_display(on_hand),
             "value": money_str(on_hand * decimal.Decimal(cost or 0)),
-            "sold": _qty(sold),
+            "sold": qty_display(sold),
             "sale_count": sale_count or 0,
             "sold_over_days": days,
             "last_sold": last.isoformat() if last else None,
             "days_of_cover": cover,
-            "reorder_level": _qty(level),
+            "reorder_level": qty_display(level),
         }
         if on_hand <= 0 or (level and on_hand <= decimal.Decimal(level)):
             row["reason"] = "at or below reorder level"

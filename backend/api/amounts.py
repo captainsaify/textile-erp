@@ -56,5 +56,24 @@ def money_str(value: decimal.Decimal) -> str:
 
 
 def qty_str(value: decimal.Decimal) -> str:
-    """Quantities carry 3dp (docs/02_Database.md NUMERIC(12,3))."""
+    """Quantities carry 3dp (docs/02_Database.md NUMERIC(12,3)).
+
+    Full fidelity, for anything a client might compute with. Use
+    `qty_display` for figures that only get read.
+    """
     return str(value.quantize(decimal.Decimal("0.001")))
+
+
+def qty_display(value: decimal.Decimal | None) -> str:
+    """The same quantity, for a person to read.
+
+    `qty_str` gives "2480.000", which reads as a measurement taken to
+    the gram rather than a count of kilos, and sits badly in a table
+    beside a rupee figure. `normalize()` alone gives "2.48E+3" -- correct
+    and unreadable, which is how it reached the live dashboard once.
+    `format(.., "f")` is positional and drops the trailing zeros.
+
+    Two helpers on purpose: one is a wire format, one is a label. What
+    would be wrong is having them and not knowing which is which.
+    """
+    return format(decimal.Decimal(value or 0).normalize(), "f")

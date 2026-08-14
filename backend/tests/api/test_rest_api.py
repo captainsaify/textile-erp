@@ -1235,3 +1235,166 @@ async def test_staff_cannot_reach_master_control_even_with_a_password(
         json={"email": staff.email, "password": "a-long-generated-secret"},
     )
     assert response.status_code == 401
+
+
+# --------------------------------------------------------------------
+# master control: writes
+# --------------------------------------------------------------------
+
+
+async def _control(client: AsyncClient, owner: User) -> dict[str, str]:
+    signin = await client.post(
+        "/api/v1/auth/control/login",
+        json={"email": owner.email, "password": "a-long-generated-secret"},
+    )
+    assert signin.status_code == 200, signin.text
+    return _auth(signin.json()["token"])
+
+
+@pytest.fixture
+async def stocked_code(owner: User, session_factory: async_sessionmaker[AsyncSession]) -> str:
+    """One supplier, one product, no stock movement yet."""
+    import decimal
+
+    from backend.models import Brand, Product, ProductType, Supplier
+
+    code = f"W{uuid.uuid4().hex[:4].upper()}"
+    async with session_factory() as session, session.begin():
+        ptype = (
+            (await session.execute(sa.select(ProductType).where(ProductType.org_id == ORG)))
+            .scalars()
+            .first()
+        )
+        assert ptype is not None
+        brand = Brand(org_id=ORG, name=f"BR{code}")
+        supplier = Supplier(org_id=ORG, name=f"Supp {code}", created_by=owner.id)
+        session.add_all([brand, supplier])
+        await session.flush()
+        session.add(
+            Product(
+                org_id=ORG,
+                product_type_id=ptype.id,
+                code=code,
+                description="Web entry probe",
+                unit_id=ptype.default_unit_id,
+                brand_id=brand.id,
+                reorder_level=decimal.Decimal("0"),
+                created_by=owner.id,
+            )
+        )
+    return code
+
+
+async def test_a_purchase_can_be_entered_from_the_web(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The form is a second way in, never a second implementation --
+    this goes through the same PurchaseService.confirm WhatsApp calls."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    invoice = f"WEB-{uuid.uuid4().hex[:5]}"
+
+    response = await client.post(
+        "/api/v1/control/purchases",
+        headers=headers,
+        json={
+            "supplier": f"Supp {stocked_code}",
+            "invoice_no": invoice,
+            "invoice_date": "2026-08-14",
+            "lines": [
+                {
+                    "code": stocked_code,
+                    "qty": "800",
+                    "rate": "120",
+                    "pieces": "10",
+                    "weight_kg": "80",
+                }
+            ],
+            "charges": {"GST": "1200"},
+            "discount": "200",
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    # 800 x 120 = 96,000, plus 1,200 GST, less 200 discount
+    assert body["grand_total"] == "97000.00"
+    assert body["already_existed"] is False
+
+
+async def test_submitting_the_same_bill_twice_returns_the_first_one(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A form can be submitted twice by a slow connection and an
+    impatient thumb; a terminal command cannot.
+
+    A purchase is uniquely a supplier plus an invoice number, so the
+    natural key is the idempotency key. The second submission gets the
+    bill that already exists rather than an error about a duplicate --
+    it is the same bill, and that is what was asked for.
+    """
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    invoice = f"WEB-{uuid.uuid4().hex[:5]}"
+    payload = {
+        "supplier": f"Supp {stocked_code}",
+        "invoice_no": invoice,
+        "invoice_date": "2026-08-14",
+        "lines": [{"code": stocked_code, "qty": "800", "rate": "120"}],
+    }
+
+    first = await client.post("/api/v1/control/purchases", headers=headers, json=payload)
+    second = await client.post("/api/v1/control/purchases", headers=headers, json=payload)
+
+    assert first.status_code == 201
+    assert second.json()["already_existed"] is True
+    assert second.json()["purchase_id"] == first.json()["purchase_id"]
+
+
+async def test_an_ambiguous_code_is_named_not_guessed(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Three products share 55X on the real books, and picking one
+    silently is what produced bills 007 and 007B."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+
+    response = await client.post(
+        "/api/v1/control/purchases",
+        headers=headers,
+        json={
+            "supplier": f"Supp {stocked_code}",
+            "invoice_no": f"WEB-{uuid.uuid4().hex[:5]}",
+            "invoice_date": "2026-08-14",
+            "lines": [{"code": "NOPE-NOT-A-CODE", "qty": "1", "rate": "1"}],
+        },
+    )
+    assert response.status_code == 422
+    assert "NOPE-NOT-A-CODE" in response.text
+
+
+async def test_writes_need_the_control_credential(
+    client: AsyncClient, owner: User, stocked_code: str
+) -> None:
+    """Entry writes to the books, so it sits behind the strong password
+    rather than the dashboard's."""
+    dashboard = _auth(await _token(client, owner))
+    response = await client.post(
+        "/api/v1/control/purchases",
+        headers=dashboard,
+        json={
+            "supplier": f"Supp {stocked_code}",
+            "invoice_no": "X",
+            "invoice_date": "2026-08-14",
+            "lines": [{"code": stocked_code, "qty": "1", "rate": "1"}],
+        },
+    )
+    assert response.status_code == 401
