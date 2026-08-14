@@ -31,6 +31,7 @@ from backend.services.admin.fixline import PurchaseLineFixService
 from backend.services.admin.guard import GuardRegression, guarded
 from backend.services.admin.merge import PartyMergeService
 from backend.services.admin.purge import PurgeService
+from backend.services.admin.salefix import SaleFixService
 from backend.services.admin.stock import StockAdminService
 from backend.services.backup_service import BackupService
 from backend.services.money_service import MoneyService
@@ -1083,3 +1084,71 @@ async def create_party(body: NewPartyIn, user: ControlUser, session: Session) ->
     customer = await sales.create_customer(user, name)
     await session.commit()
     return {"id": str(customer.id), "name": customer.name, "created": True}
+
+
+class FixSaleIn(BaseModel):
+    """Correcting a sale after the fact.
+
+    The commonest repair here by some distance -- three sales went to the
+    wrong customer in one month. Moving a sale touches no stock, since
+    the goods left either way; changing the item does, and the guard
+    checks the result.
+    """
+
+    reference: str = Field(min_length=1)
+    customer: str | None = None
+    line_no: int | None = Field(default=None, ge=1)
+    code: str | None = None
+    brand: str | None = None
+
+
+@router.post("/sales/fix")
+async def fix_sale(body: FixSaleIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    result = await SaleFixService(session).fix(
+        user.org_id,
+        user,
+        reference=body.reference,
+        customer=body.customer,
+        line_no=body.line_no,
+        code=body.code,
+        brand=body.brand,
+    )
+    await session.commit()
+    return result
+
+
+@router.get("/sales/recent")
+async def recent_sales(
+    user: ControlUser,
+    session: Session,
+    limit: Annotated[int, Query(ge=1, le=50)] = 15,
+) -> dict[str, Any]:
+    from backend.models import Customer, SalesHeader
+
+    rows = (
+        await session.execute(
+            select(
+                SalesHeader.id,
+                SalesHeader.sale_date,
+                Customer.name,
+                SalesHeader.grand_total,
+                SalesHeader.amount_paid,
+            )
+            .join(Customer, Customer.id == SalesHeader.customer_id)
+            .where(SalesHeader.org_id == user.org_id, SalesHeader.deleted_at.is_(None))
+            .order_by(SalesHeader.created_at.desc())
+            .limit(limit)
+        )
+    ).all()
+    return {
+        "items": [
+            {
+                "reference": str(sale_id)[:8],
+                "date": date.isoformat(),
+                "customer": customer,
+                "grand_total": money_str(total),
+                "amount_paid": money_str(paid),
+            }
+            for sale_id, date, customer, total, paid in rows
+        ]
+    }

@@ -6,7 +6,7 @@
     <meta name="robots" content="noindex, nofollow" />
     <title>Master Control</title>
     <link rel="stylesheet" href="/assets/styles.css?v=14" />
-    <link rel="stylesheet" href="/assets/control.css?v=4" />
+    <link rel="stylesheet" href="/assets/control.css?v=5" />
   </head>
   <body>
     <!-- A separate document from the dashboard, not a route inside it.
@@ -175,7 +175,25 @@
             stock, and can be undone.
           </p>
           <div id="recent"></div>
+
+          <h2>Recent sales</h2>
+          <p class="muted">
+            Moving a sale to another customer touches no stock — the goods left
+            either way — so only who owes for them changes.
+          </p>
+          <div id="recent-sales"></div>
           <div id="purge-preview" class="card" hidden></div>
+
+          <section class="card">
+            <h3>Correct a sale</h3>
+            <div class="field narrow"><label>Sale ref</label><input id="sf-ref" /></div>
+            <div class="field"><label>Move to customer</label><input id="sf-customer" /></div>
+            <div class="field narrow"><label>Line no</label><input id="sf-line" inputmode="numeric" /></div>
+            <div class="field narrow"><label>New code</label><input id="sf-code" /></div>
+            <div class="field narrow"><label>New label</label><input id="sf-brand" /></div>
+            <button type="button" id="sf-go" class="primary">Correct it</button>
+            <div id="sf-out" class="hint"></div>
+          </section>
         </section>
 
         <!-- Purchase and sale share one form. The only differences are
@@ -266,6 +284,6 @@
     </div>
 
     <script src="/assets/money.js?v=14"></script>
-    <script src="/assets/control.js?v=4"></script>
+    <script src="/assets/control.js?v=5"></script>
   </body>
 </html>

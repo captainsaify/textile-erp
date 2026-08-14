@@ -70,10 +70,10 @@ class PurgeService:
         self._session = session
 
     async def plan(self, org_id: uuid.UUID, *, kind: str, reference: str) -> PurgePlan:
+        if kind == "sale":
+            return await self._sale_plan(org_id, reference)
         if kind != "purchase":
-            # Sales purge the same way and the service is not built yet.
-            # Said plainly rather than offered and refused deeper in.
-            raise ValidationError("only purchases can be purged from the web so far")
+            raise ValidationError("kind must be 'purchase' or 'sale'")
 
         header = (
             (
@@ -118,14 +118,78 @@ class PurgeService:
             blockers=blockers,
         )
 
-    async def _movements(self, org_id: uuid.UUID, header_id: uuid.UUID) -> list[Any]:
-        line_ids = list(
+    async def _sale_plan(self, org_id: uuid.UUID, reference: str) -> PurgePlan:
+        """A sale, found by the first characters of its id -- which is
+        what every message the system sends already shows."""
+        from sqlalchemy import String, cast
+
+        from backend.models import SalesHeader, SalesLine
+
+        rows = list(
             (
                 await self._session.execute(
-                    select(PurchaseLine.id).where(PurchaseLine.purchase_header_id == header_id)
+                    select(SalesHeader)
+                    .where(
+                        SalesHeader.org_id == org_id,
+                        SalesHeader.deleted_at.is_(None),
+                        cast(SalesHeader.id, String).ilike(f"{reference.strip().lower()}%"),
+                    )
+                    .limit(5)
                 )
             ).scalars()
         )
+        if not rows:
+            raise NotFoundError("sale", reference)
+        if len(rows) > 1:
+            raise ValidationError(f"{reference!r} matches {len(rows)} sales — use more characters")
+        header = rows[0]
+
+        lines = len(
+            (
+                await self._session.execute(
+                    select(SalesLine.id).where(SalesLine.sales_header_id == header.id)
+                )
+            ).all()
+        )
+        blockers: list[str] = []
+        if header.amount_paid > ZERO:
+            blockers.append(
+                f"{header.amount_paid} has been received against it — reverse that receipt first"
+            )
+        return PurgePlan(
+            kind="sale",
+            header_id=header.id,
+            label=str(header.id)[:8],
+            grand_total=header.grand_total,
+            amount_paid=header.amount_paid,
+            lines=lines,
+            live=header.status == "confirmed",
+            blockers=blockers,
+        )
+
+    async def _movements(
+        self, org_id: uuid.UUID, header_id: uuid.UUID, kind: str = "purchase"
+    ) -> list[Any]:
+        from backend.models import SalesLine
+
+        if kind == "purchase":
+            line_ids = list(
+                (
+                    await self._session.execute(
+                        select(PurchaseLine.id).where(PurchaseLine.purchase_header_id == header_id)
+                    )
+                ).scalars()
+            )
+            source = "purchase_line"
+        else:
+            line_ids = list(
+                (
+                    await self._session.execute(
+                        select(SalesLine.id).where(SalesLine.sales_header_id == header_id)
+                    )
+                ).scalars()
+            )
+            source = "sales_line"
         if not line_ids:
             return []
         return list(
@@ -133,7 +197,7 @@ class PurgeService:
                 await self._session.execute(
                     select(InventoryMovement).where(
                         InventoryMovement.org_id == org_id,
-                        InventoryMovement.source_type == "purchase_line",
+                        InventoryMovement.source_type == source,
                         InventoryMovement.source_id.in_(line_ids),
                     )
                 )
@@ -154,7 +218,7 @@ class PurgeService:
                 # restore has to remove. Captured by diffing ids around
                 # the call, not by matching type and time -- that would
                 # be a guess, wrong the day two operations share a second.
-                before = {m.id for m in await self._movements(org_id, plan.header_id)}
+                before = {m.id for m in await self._movements(org_id, plan.header_id, plan.kind)}
                 await UndoService(self._session).undo_in_transaction(
                     actor, entity=plan.kind, reference=plan.label
                 )
@@ -165,14 +229,23 @@ class PurgeService:
                         "product_id": str(m.product_id),
                         "warehouse_id": str(m.warehouse_id),
                     }
-                    for m in await self._movements(org_id, plan.header_id)
+                    for m in await self._movements(org_id, plan.header_id, plan.kind)
                     if m.id not in before
                 ]
                 report.note(f"stock and journal unwound ({len(created)} movement(s))")
 
-            header = await self._session.get(PurchaseHeader, plan.header_id)
+            from backend.models import SalesHeader
+
+            # Fetched per branch rather than through a variable model:
+            # both carry deleted_at and purged_at, but a `type[Base]`
+            # loses that and mypy is right to say so.
+            header: PurchaseHeader | SalesHeader | None
+            if plan.kind == "purchase":
+                header = await self._session.get(PurchaseHeader, plan.header_id)
+            else:
+                header = await self._session.get(SalesHeader, plan.header_id)
             if header is None:
-                raise NotFoundError("purchase", plan.label)
+                raise NotFoundError(plan.kind, plan.label)
             now = datetime.datetime.now(datetime.UTC)
             header.deleted_at = now
             header.purged_at = now
@@ -184,14 +257,19 @@ class PurgeService:
                 actor,
                 operation="purge",
                 subject=f"{plan.kind} {plan.label}",
-                hidden=[{"table": "purchase_headers", "id": str(plan.header_id)}],
+                hidden=[
+                    {
+                        "table": "purchase_headers" if plan.kind == "purchase" else "sales_headers",
+                        "id": str(plan.header_id),
+                    }
+                ],
                 created=created,
             )
             await AuditService(self._session).record(
                 org_id,
                 actor.id,
                 action=f"{plan.kind}.purged",
-                entity_type="purchase_headers",
+                entity_type="purchase_headers" if plan.kind == "purchase" else "sales_headers",
                 entity_id=plan.header_id,
                 after_state={"reference": plan.label, "stock_reversed": plan.live},
                 channel="cli",

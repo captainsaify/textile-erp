@@ -657,6 +657,29 @@
   // ---------------------------------------------------------- records
 
   async function loadRecords() {
+    await Promise.all([loadPurchaseRecords(), loadSaleRecords()]);
+  }
+
+  async function loadSaleRecords() {
+    const data = await api("/control/sales/recent");
+    $("recent-sales").replaceChildren(
+      rowsTable(["Ref", "Date", "Customer", "Total", "Paid", ""], data.items, (item) => {
+        const remove = el("button", "link", "Remove");
+        remove.type = "button";
+        remove.addEventListener("click", () => previewPurge(item.reference, "sale"));
+        return [
+          item.reference,
+          item.date,
+          item.customer,
+          Money.format(item.grand_total),
+          Money.format(item.amount_paid),
+          remove,
+        ];
+      }),
+    );
+  }
+
+  async function loadPurchaseRecords() {
     const data = await api("/control/purchases/recent");
     const host = $("recent");
     host.replaceChildren();
@@ -695,14 +718,14 @@
   /** Preview is mandatory and is a real dry run: the removal genuinely
    *  happens inside a transaction that is thrown away, so the figures
    *  shown are the ones the commit would produce. */
-  async function previewPurge(reference) {
+  async function previewPurge(reference, kind = "purchase") {
     const panel = $("purge-preview");
     panel.hidden = false;
     panel.replaceChildren(el("p", "muted", "Working out what this would do…"));
     try {
       const plan = await api("/control/purge/preview", {
         method: "POST",
-        body: JSON.stringify({ kind: "purchase", reference }),
+        body: JSON.stringify({ kind, reference }),
       });
       panel.replaceChildren();
       panel.append(el("h3", null, `Remove ${plan.reference}?`));
@@ -733,11 +756,7 @@
         try {
           const done = await api("/control/purge", {
             method: "POST",
-            body: JSON.stringify({
-              kind: "purchase",
-              reference,
-              confirm: input.value.trim(),
-            }),
+            body: JSON.stringify({ kind, reference, confirm: input.value.trim() }),
           });
           banner(
             `${done.reference} removed. Undo with the reversal id ${done.reversal}.`,
@@ -956,6 +975,21 @@
       banner(exc.message);
     }
   }
+
+  wire("sf-go", "sf-out", async () => {
+    const result = await api("/control/sales/fix", {
+      method: "POST",
+      body: JSON.stringify({
+        reference: $("sf-ref").value.trim(),
+        customer: $("sf-customer").value.trim() || null,
+        line_no: $("sf-line").value ? Number($("sf-line").value) : null,
+        code: $("sf-code").value.trim() || null,
+        brand: $("sf-brand").value.trim() || null,
+      }),
+    });
+    await loadRecords();
+    return `${result.sale_id}: ${result.notes.join("; ")}`;
+  });
 
   wire("bk-go", "backups", async () => {
     const made = await api("/control/backups", { method: "POST" });
