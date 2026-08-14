@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Master Control</title>
+    <link rel="stylesheet" href="/assets/styles.css?v=13" />
+    <link rel="stylesheet" href="/assets/control.css?v=1" />
+  </head>
+  <body>
+    <!-- A separate document from the dashboard, not a route inside it.
+         Different credential, different session length, different
+         lifetime: one page that is sometimes privileged is one bug away
+         from being always privileged (ui-plan.md §12). -->
+
+    <div id="signin" class="login">
+      <form id="signin-form" class="card login-card">
+        <h1>Master Control</h1>
+        <p class="muted">
+          A separate password from the dashboard. This side can enter, correct
+          and remove records.
+        </p>
+        <label for="email">Email</label>
+        <input id="email" type="email" autocomplete="username" required />
+        <label for="password">Master Control password</label>
+        <input id="password" type="password" autocomplete="current-password" required />
+        <button type="submit" class="primary">Sign in</button>
+        <p id="signin-error" class="error" hidden></p>
+      </form>
+    </div>
+
+    <div id="app" hidden>
+      <header class="topbar">
+        <strong>Master Control</strong>
+        <nav id="nav">
+          <button data-page="purchase" class="active">New purchase</button>
+          <button data-page="sale">New sale</button>
+        </nav>
+        <div class="topbar-end">
+          <span id="books-health" class="muted"></span>
+          <span id="whoami" class="muted"></span>
+          <button id="signout" class="link">Sign out</button>
+        </div>
+      </header>
+
+      <div id="banner" class="banner" hidden></div>
+      <div id="draft-bar" class="draft-bar" hidden>
+        <span id="draft-label"></span>
+        <button id="draft-restore" class="link">Restore</button>
+        <button id="draft-discard" class="link">Discard</button>
+      </div>
+
+      <main>
+        <!-- Purchase and sale share one form. The only differences are
+             the party label, the invoice fields, and whether money can
+             be taken at the counter -- so they are one template with
+             three toggles rather than two that drift apart. -->
+        <form id="entry" class="entry" autocomplete="off">
+          <div class="entry-head">
+            <div class="field wide">
+              <label for="party" id="party-label">Supplier</label>
+              <input id="party" type="text" required placeholder="Type a name…" />
+              <div id="party-list" class="combo-list" hidden></div>
+              <p id="party-note" class="hint"></p>
+            </div>
+            <div class="field" id="invoice-field">
+              <label for="invoice">Invoice no</label>
+              <input id="invoice" type="text" />
+              <p id="invoice-note" class="hint"></p>
+            </div>
+            <div class="field">
+              <label for="entry-date" id="date-label">Date</label>
+              <input id="entry-date" type="date" required />
+            </div>
+            <div class="field" id="payment-field" hidden>
+              <label for="payment-type">Payment</label>
+              <select id="payment-type">
+                <option value="credit">Credit</option>
+                <option value="cash">Cash</option>
+                <option value="bank">Bank</option>
+              </select>
+            </div>
+          </div>
+
+          <table class="grid" id="grid">
+            <thead>
+              <tr>
+                <th class="num">#</th>
+                <th>Item</th>
+                <th class="num">Qty<span class="unit">bales</span></th>
+                <th class="num">KG<span class="unit">per bale</span></th>
+                <th class="num">Total KG<span class="unit">derived</span></th>
+                <th class="num">Rate<span class="unit">per kg</span></th>
+                <th class="num">Amount</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+          <p class="hint">Enter on the last row adds another. Total KG and Amount are worked out.</p>
+
+          <div class="entry-foot">
+            <section class="charges">
+              <h3>Charges</h3>
+              <div id="charge-rows"></div>
+              <button type="button" id="add-charge" class="link">+ add a charge</button>
+              <div class="field narrow">
+                <label for="discount">Discount</label>
+                <input id="discount" type="text" inputmode="decimal" placeholder="0" />
+              </div>
+              <div class="field narrow">
+                <label for="freight">Freight</label>
+                <input id="freight" type="text" inputmode="decimal" placeholder="0" />
+              </div>
+              <div id="paid-block" hidden>
+                <div class="field narrow">
+                  <label for="paid-now">Paid now</label>
+                  <input id="paid-now" type="text" inputmode="decimal" placeholder="0" />
+                </div>
+                <div class="field narrow">
+                  <label for="paid-via">Into</label>
+                  <select id="paid-via">
+                    <option value="cash">Cash</option>
+                    <option value="bank">Bank</option>
+                  </select>
+                </div>
+              </div>
+            </section>
+
+            <section class="totals" id="totals"></section>
+          </div>
+
+          <div class="entry-actions">
+            <button type="button" id="discard" class="link">Discard</button>
+            <button type="submit" class="primary" id="save">Save</button>
+          </div>
+        </form>
+      </main>
+    </div>
+
+    <script src="/assets/money.js?v=13"></script>
+    <script src="/assets/control.js?v=1"></script>
+  </body>
+</html>

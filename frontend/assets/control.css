@@ -1,0 +1,340 @@
+/* Master Control — ui-plan.md §3.
+ *
+ * Extends the dashboard's tokens rather than restating them. Only what
+ * a dense entry grid needs that a read-only dashboard did not.
+ */
+
+:root {
+  --row-h: 34px;
+  --field-h: 30px;
+  --focus: #2f6f9f;
+  --focus-ring:
+    0 0 0 2px var(--surface),
+    0 0 0 4px var(--focus);
+  /* The most useful distinction on a data-entry screen: what you type
+     in, and what the machine worked out. Derived cells are never
+     inputs, and they do not look like them. */
+  --derived-ink: var(--ink-muted);
+  /* Not --bad. That already means overdue money, which is ordinary.
+     This means "this destroys things". */
+  --danger: #8c1d18;
+  --danger-bg: #fdf3f2;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --danger: #e08a82;
+    /* A stain, not a highlight: a pink tint on a dark surface reads as
+       decoration rather than warning. */
+    --danger-bg: #2a1a19;
+  }
+}
+
+/* Every number in a column has to line up or the eye cannot scan it. */
+.num,
+.grid input,
+.totals b {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.login-card {
+  max-width: 26rem;
+  margin: 12vh auto;
+  display: grid;
+  gap: 0.5rem;
+}
+.login-card h1 {
+  margin: 0;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-raised);
+}
+.topbar-end {
+  margin-left: auto;
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+}
+#nav button {
+  background: none;
+  border: 0;
+  color: var(--ink-muted);
+  padding: 0.35rem 0.6rem;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+#nav button.active {
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+main {
+  padding: 1rem;
+  max-width: 72rem;
+  margin: 0 auto;
+}
+
+.entry-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+.field {
+  display: grid;
+  gap: 0.2rem;
+  position: relative;
+}
+.field.wide {
+  flex: 1 1 18rem;
+}
+.field.narrow input {
+  width: 8rem;
+}
+label {
+  font-size: 0.8rem;
+  color: var(--ink-muted);
+}
+input,
+select {
+  height: var(--field-h);
+  padding: 0 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  font: inherit;
+}
+input:focus-visible,
+select:focus-visible,
+button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.hint {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--ink-muted);
+  min-height: 1.1em;
+}
+.hint.warn {
+  color: var(--warn);
+}
+
+/* The picker. A code names a product only with its brand — three share
+   55X — so the list shows both and the stock that tells them apart. */
+.combo-list {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  max-height: 16rem;
+  overflow-y: auto;
+}
+.combo-item {
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+}
+.combo-item[aria-selected="true"] {
+  background: var(--surface);
+}
+.combo-item .code {
+  font-weight: 600;
+  min-width: 4.5rem;
+}
+.combo-item .brand {
+  color: var(--ink-muted);
+  min-width: 5rem;
+}
+.combo-item .desc {
+  color: var(--ink-muted);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.combo-item .stock {
+  color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+.combo-item.create {
+  border-top: 1px solid var(--border);
+  color: var(--series-1);
+}
+
+.grid {
+  width: 100%;
+  border-collapse: collapse;
+}
+.grid th {
+  font-size: 0.75rem;
+  color: var(--ink-muted);
+  text-align: left;
+  font-weight: 500;
+  padding: 0 0.4rem 0.3rem;
+  border-bottom: 1px solid var(--border);
+}
+.grid th .unit {
+  display: block;
+  font-size: 0.68rem;
+  opacity: 0.7;
+}
+.grid td {
+  padding: 2px 0.2rem;
+  height: var(--row-h);
+}
+.grid input {
+  width: 100%;
+  border-color: transparent;
+  background: transparent;
+}
+.grid input:hover {
+  border-color: var(--border);
+}
+.grid input:focus {
+  background: var(--surface-raised);
+}
+/* Derived, so not an input at all. */
+.grid .derived {
+  color: var(--derived-ink);
+  padding-right: 0.5rem;
+}
+.grid .line-note {
+  font-size: 0.75rem;
+  color: var(--warn);
+  padding: 0 0.4rem 0.3rem;
+}
+.grid .drop {
+  background: none;
+  border: 0;
+  color: var(--ink-muted);
+  cursor: pointer;
+  font-size: 1rem;
+}
+.grid .drop:hover {
+  color: var(--danger);
+}
+
+.entry-foot {
+  display: flex;
+  gap: 2rem;
+  margin-top: 1.5rem;
+  flex-wrap: wrap;
+}
+.charges {
+  flex: 1 1 20rem;
+  display: grid;
+  gap: 0.5rem;
+  align-content: start;
+}
+.charges h3 {
+  margin: 0;
+  font-size: 0.9rem;
+}
+.charge-row {
+  display: flex;
+  gap: 0.4rem;
+}
+.charge-row input:first-child {
+  flex: 1;
+}
+.charge-row input:last-of-type {
+  width: 7rem;
+}
+.totals {
+  flex: 0 0 20rem;
+  display: grid;
+  gap: 0.3rem;
+  align-content: start;
+}
+.totals div {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.totals .grand {
+  border-top: 1px solid var(--border);
+  padding-top: 0.4rem;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+.totals .balance {
+  color: var(--warn);
+}
+
+.entry-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+.primary {
+  background: var(--series-1);
+  color: #fff;
+  border: 0;
+  border-radius: var(--radius);
+  padding: 0.5rem 1.2rem;
+  font: inherit;
+  cursor: pointer;
+}
+.primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.link {
+  background: none;
+  border: 0;
+  color: var(--ink-muted);
+  cursor: pointer;
+  text-decoration: underline;
+  font: inherit;
+}
+
+.banner {
+  padding: 0.6rem 1rem;
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-bottom: 1px solid var(--border);
+}
+.banner.ok {
+  background: transparent;
+  color: var(--good);
+}
+.draft-bar {
+  padding: 0.5rem 1rem;
+  background: var(--surface-raised);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+}
+.error {
+  color: var(--bad);
+}
+
+@media (max-width: 800px) {
+  /* Entry is designed for a laptop (ui-plan.md §9). It stacks and stays
+     usable for a two-line bill; it is not pretending to be a phone form. */
+  .grid th .unit {
+    display: none;
+  }
+  .entry-foot {
+    gap: 1rem;
+  }
+}

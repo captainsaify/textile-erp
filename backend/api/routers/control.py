@@ -14,13 +14,14 @@ from __future__ import annotations
 import datetime
 import decimal
 import uuid
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.api.amounts import money_str
+from backend.api.amounts import money_str, qty_display
 from backend.api.deps import ControlUser, Session
 from backend.core.exceptions import DuplicateSaleError, ExactDuplicateInvoiceError
 from backend.models import Product
@@ -301,3 +302,146 @@ async def _resolve_product(session: AsyncSession, org_id: uuid.UUID, line: LineI
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from None
+
+
+@router.get("/items")
+async def item_picker(
+    user: ControlUser,
+    session: Session,
+    q: Annotated[str, Query(min_length=1)],
+    kind: Annotated[str, Query(pattern="^(purchase|sale)$")] = "purchase",
+    limit: Annotated[int, Query(ge=1, le=25)] = 12,
+) -> dict[str, Any]:
+    """What the entry form's item dropdown shows.
+
+    `CODE · BRAND · qty on hand`, because a code names a product only
+    together with its brand -- three products share `55X` here, and
+    something picking between them silently is what produced bills 007
+    and 007B. On a screen the choice is made by looking, which is the
+    single reason the form beats the chat.
+
+    Searches code *and* description, so `zipper` finds what `55X` finds.
+    The last rate comes along because the question after "which item" is
+    almost always "what did we pay last time".
+    """
+    from sqlalchemy import or_
+
+    from backend.models import Brand, Inventory, PurchaseLine, SalesLine
+
+    needle = f"%{q.strip()}%"
+    line_model = PurchaseLine if kind == "purchase" else SalesLine
+    last_rate = (
+        select(line_model.product_id, func.max(line_model.created_at).label("seen"))
+        .group_by(line_model.product_id)
+        .subquery()
+    )
+
+    rows = (
+        await session.execute(
+            select(
+                Product.id,
+                Product.code,
+                Brand.name,
+                Product.description,
+                func.coalesce(Inventory.qty_on_hand, 0),
+                func.coalesce(Inventory.weighted_avg_cost, 0),
+                line_model.rate,
+            )
+            .join(Brand, Brand.id == Product.brand_id, isouter=True)
+            .join(Inventory, Inventory.product_id == Product.id, isouter=True)
+            .join(last_rate, last_rate.c.product_id == Product.id, isouter=True)
+            .join(
+                line_model,
+                (line_model.product_id == Product.id) & (line_model.created_at == last_rate.c.seen),
+                isouter=True,
+            )
+            .where(
+                Product.org_id == user.org_id,
+                Product.deleted_at.is_(None),
+                Product.is_active.is_(True),
+                or_(Product.code.ilike(needle), Product.description.ilike(needle)),
+            )
+            .order_by(Product.code, Brand.name)
+            .limit(limit)
+        )
+    ).all()
+
+    return {
+        "items": [
+            {
+                "product_id": str(pid),
+                "code": code,
+                "brand": brand,
+                "description": description,
+                "on_hand": qty_display(qty),
+                "avg_cost": money_str(decimal.Decimal(cost or 0)),
+                "last_rate": money_str(decimal.Decimal(rate)) if rate is not None else None,
+            }
+            for pid, code, brand, description, qty, cost, rate in rows
+        ]
+    }
+
+
+@router.get("/parties")
+async def party_picker(
+    user: ControlUser,
+    session: Session,
+    q: Annotated[str, Query(min_length=1)],
+    kind: Annotated[str, Query(pattern="^(supplier|customer)$")],
+    limit: Annotated[int, Query(ge=1, le=25)] = 10,
+) -> dict[str, Any]:
+    """Suppliers or customers for the header field, with what they owe.
+
+    The outstanding figure is there because the question behind picking
+    a party is often "how much is already open with them", and having to
+    leave the form to answer it is how a bill gets entered without it
+    being asked at all.
+    """
+    from backend.models import Customer, Supplier
+    from backend.repositories.party_repository import CustomerRepository, SupplierRepository
+
+    needle = f"%{q.strip()}%"
+    repo: Any
+    rows: list[Any]
+    if kind == "supplier":
+        repo = SupplierRepository(session)
+        rows = list(
+            (
+                await session.execute(
+                    select(Supplier)
+                    .where(
+                        Supplier.org_id == user.org_id,
+                        Supplier.deleted_at.is_(None),
+                        Supplier.name.ilike(needle),
+                    )
+                    .order_by(Supplier.name)
+                    .limit(limit)
+                )
+            ).scalars()
+        )
+    else:
+        repo = CustomerRepository(session)
+        rows = list(
+            (
+                await session.execute(
+                    select(Customer)
+                    .where(
+                        Customer.org_id == user.org_id,
+                        Customer.deleted_at.is_(None),
+                        Customer.name.ilike(needle),
+                    )
+                    .order_by(Customer.name)
+                    .limit(limit)
+                )
+            ).scalars()
+        )
+    return {
+        "items": [
+            {
+                "id": str(row.id),
+                "name": row.name,
+                "outstanding": money_str(await repo.outstanding(user.org_id, row.id)),
+            }
+            for row in rows
+        ]
+    }
