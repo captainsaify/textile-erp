@@ -27,6 +27,8 @@ from backend.core.exceptions import DuplicateSaleError, ExactDuplicateInvoiceErr
 from backend.models import Product
 from backend.models.enums import SalePaymentType
 from backend.repositories.purchase_repository import PurchaseRepository
+from backend.services.admin.guard import GuardRegression
+from backend.services.admin.merge import PartyMergeService
 from backend.services.purchase_service import Draft, DraftLine, PurchaseService
 from backend.services.reconciliation_service import ReconciliationService
 from backend.services.sales_service import SaleDraft, SaleDraftLine, SalesService
@@ -445,3 +447,64 @@ async def party_picker(
             for row in rows
         ]
     }
+
+
+class MergeIn(BaseModel):
+    """Preview and confirm take the same body.
+
+    The confirmation is a *typed* value, not a checkbox: `confirm` must
+    equal the surviving name exactly. A checkbox is clicked before it is
+    read, and this is the request that makes one party stop existing.
+    """
+
+    kind: str = Field(pattern="^(supplier|customer)$")
+    loser: str = Field(min_length=1)
+    winner: str = Field(min_length=1)
+    confirm: str | None = None
+
+
+@router.post("/merge/preview")
+async def merge_preview(body: MergeIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    """What this merge would do, computed by doing it and throwing it away.
+
+    Not an estimate. The operation genuinely runs inside a transaction
+    that is rolled back, so the figures shown are the ones the commit
+    would produce -- a preview that disagrees with its commit is worse
+    than no preview.
+    """
+    service = PartyMergeService(session)
+    plan = await service.plan(user.org_id, kind=body.kind, loser=body.loser, winner=body.winner)
+    try:
+        result = await service.apply(user.org_id, user, plan, dry_run=True)
+    except GuardRegression as exc:
+        return {**plan.as_dict(), "ok": False, "blockers": exc.problems, "dry_run": True}
+    return result
+
+
+@router.post("/merge")
+async def merge_apply(body: MergeIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    """Do it, having been shown what it does.
+
+    Refuses unless `confirm` matches the surviving name exactly, and the
+    guard still re-checks the books before committing -- the preview
+    proves the shape, the guard proves the result.
+    """
+    service = PartyMergeService(session)
+    plan = await service.plan(user.org_id, kind=body.kind, loser=body.loser, winner=body.winner)
+    if (body.confirm or "").strip() != plan.winner_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"type {plan.winner_name!r} to confirm; nothing was changed",
+        )
+    try:
+        result = await service.apply(user.org_id, user, plan)
+    except GuardRegression as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "rolled back — the books would not have balanced",
+                "problems": exc.problems,
+            },
+        ) from None
+    await session.commit()
+    return result

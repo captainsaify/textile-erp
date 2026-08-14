@@ -72,6 +72,9 @@ _PURGE_ORDER = (
     "journal_lines",
     "journal",
     "audit_logs",
+    # Added with the table: it carries actor_user_id, so leaving it out
+    # made every teardown that deletes a user fail on a foreign key.
+    "reversal_manifests",
     "cash_ledger",
     "bank_ledger",
     "partner_capital",

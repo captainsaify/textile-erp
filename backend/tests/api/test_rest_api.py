@@ -1398,3 +1398,152 @@ async def test_writes_need_the_control_credential(
         },
     )
     assert response.status_code == 401
+
+
+# --------------------------------------------------------------------
+# master control: preview -> confirm
+# --------------------------------------------------------------------
+
+
+@pytest.fixture
+async def two_customers(
+    owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> tuple[str, str]:
+    """Two customers, one sale on the first."""
+    import decimal
+
+    from backend.models import Customer, SalesHeader
+    from backend.models.enums import SalePaymentType
+    from backend.tests.conftest import SEEDED_MAIN_WAREHOUSE_ID
+
+    tag = uuid.uuid4().hex[:5]
+    async with session_factory() as session, session.begin():
+        loser = Customer(org_id=ORG, name=f"Yakub {tag}", created_by=owner.id)
+        winner = Customer(org_id=ORG, name=f"Asif {tag}", created_by=owner.id)
+        session.add_all([loser, winner])
+        await session.flush()
+        session.add(
+            SalesHeader(
+                org_id=ORG,
+                customer_id=loser.id,
+                warehouse_id=uuid.UUID(SEEDED_MAIN_WAREHOUSE_ID),
+                sale_date=datetime.date(2026, 8, 1),
+                payment_type=SalePaymentType.CREDIT,
+                subtotal=decimal.Decimal("5000"),
+                grand_total=decimal.Decimal("5000"),
+                created_by=owner.id,
+            )
+        )
+    return f"Yakub {tag}", f"Asif {tag}"
+
+
+async def test_a_preview_computes_by_doing_and_discarding(
+    client: AsyncClient,
+    owner: User,
+    two_customers: tuple[str, str],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A preview that estimates can disagree with its own commit.
+
+    This one runs the real merge in a transaction that is rolled back,
+    so the figures are the ones the commit would produce -- and the
+    party is verifiably still there afterwards.
+    """
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    loser, winner = two_customers
+
+    response = await client.post(
+        "/api/v1/control/merge/preview",
+        headers=headers,
+        json={"kind": "customer", "loser": loser, "winner": winner},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["transactions"] == 1
+    assert body["moved_value"] == "5000.00"
+    assert body["dry_run"] is True
+    assert body["committed"] is False
+
+    from backend.models import Customer
+
+    async with session_factory() as session:
+        still = (
+            await session.execute(sa.select(Customer).where(Customer.name == loser))
+        ).scalar_one()
+        assert still.deleted_at is None, "the preview committed"
+
+
+async def test_a_merge_needs_the_surviving_name_typed_back(
+    client: AsyncClient,
+    owner: User,
+    two_customers: tuple[str, str],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A checkbox is clicked before it is read. This is the request that
+    makes one party stop existing."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    loser, winner = two_customers
+
+    wrong = await client.post(
+        "/api/v1/control/merge",
+        headers=headers,
+        json={"kind": "customer", "loser": loser, "winner": winner, "confirm": "something else"},
+    )
+    assert wrong.status_code == 400
+    assert "nothing was changed" in wrong.text
+
+
+async def test_a_confirmed_merge_moves_the_sales_and_is_reversible(
+    client: AsyncClient,
+    owner: User,
+    two_customers: tuple[str, str],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    loser, winner = two_customers
+
+    response = await client.post(
+        "/api/v1/control/merge",
+        headers=headers,
+        json={"kind": "customer", "loser": loser, "winner": winner, "confirm": winner},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["committed"] is True
+    assert body["reversal"], "a merge with no manifest cannot be undone"
+
+    from backend.models import Customer, SalesHeader
+
+    async with session_factory() as session:
+        gone = (
+            await session.execute(sa.select(Customer).where(Customer.name == loser))
+        ).scalar_one()
+        assert gone.deleted_at is not None
+        survivor = (
+            await session.execute(sa.select(Customer).where(Customer.name == winner))
+        ).scalar_one()
+        moved = (
+            await session.execute(
+                sa.select(sa.func.count())
+                .select_from(SalesHeader)
+                .where(SalesHeader.customer_id == survivor.id)
+            )
+        ).scalar_one()
+        assert moved == 1
+
+
+async def test_the_preview_and_the_merge_need_the_control_credential(
+    client: AsyncClient, owner: User, two_customers: tuple[str, str]
+) -> None:
+    dashboard = _auth(await _token(client, owner))
+    loser, winner = two_customers
+    for path in ("/api/v1/control/merge/preview", "/api/v1/control/merge"):
+        response = await client.post(
+            path,
+            headers=dashboard,
+            json={"kind": "customer", "loser": loser, "winner": winner, "confirm": winner},
+        )
+        assert response.status_code == 401
