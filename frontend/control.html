@@ -6,7 +6,7 @@
     <meta name="robots" content="noindex, nofollow" />
     <title>Master Control</title>
     <link rel="stylesheet" href="/assets/styles.css?v=14" />
-    <link rel="stylesheet" href="/assets/control.css?v=6" />
+    <link rel="stylesheet" href="/assets/control.css?v=7" />
   </head>
   <body>
     <!-- A separate document from the dashboard, not a route inside it.
@@ -226,6 +226,14 @@
               <h2>Backups</h2>
               <button type="button" id="bk-go" class="primary">Take one now</button>
               <div id="backups"></div>
+              <!-- Restoring is not here on purpose. It has to happen with
+                   the application stopped, which is not something a page
+                   inside that application can arrange for itself. -->
+              <p class="muted">
+                Restoring one is a terminal job — <code>erp restore &lt;name&gt;</code>
+                with the stack stopped. It replaces the whole server, not just
+                these books, and it cannot run while the site is up.
+              </p>
             </section>
           </div>
 
@@ -240,24 +248,6 @@
               never touched — and rolls back if the result stops balancing.
             </p>
             <div id="lg-out" class="hint"></div>
-          </section>
-
-          <!-- Deliberately last, deliberately alone, and deliberately not
-               beside the button that takes a backup. Restoring is the one
-               action on this screen that is not scoped to these books and
-               cannot be undone. -->
-          <section class="card danger-card">
-            <h2>Restore the whole database</h2>
-            <p class="muted">
-              This replaces <em>everything</em> — both businesses, and every
-              record entered since that backup was taken. It cannot be undone,
-              and there is no reversal for it because nothing survives to write
-              one against. Take a backup first.
-            </p>
-            <div class="field"><label>Backup</label><select id="rs-name"></select></div>
-            <div class="field"><label>Type the backup's name to confirm</label><input id="rs-confirm" /></div>
-            <button type="button" id="rs-go" class="primary danger-button">Restore</button>
-            <div id="rs-out" class="hint"></div>
           </section>
 
           <section class="card">
@@ -386,6 +376,6 @@
     </div>
 
     <script src="/assets/money.js?v=14"></script>
-    <script src="/assets/control.js?v=6"></script>
+    <script src="/assets/control.js?v=7"></script>
   </body>
 </html>

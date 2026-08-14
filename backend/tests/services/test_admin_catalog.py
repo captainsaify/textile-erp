@@ -395,3 +395,36 @@ async def test_rebuilding_ledgers_repairs_a_drifted_running_balance(
         async with session_factory() as session:
             await session.execute(sa.text("DELETE FROM bank_ledger WHERE id = :id"), {"id": row_id})
             await session.commit()
+
+
+async def test_restore_refuses_while_the_application_is_connected(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The regression test for an outage.
+
+    `pg_restore --clean` needs an exclusive lock on every table, and
+    cannot have one while the app is connected -- so it *waits*, and
+    every query behind it waits too. The site went down and the restore
+    never ran. A hang is the worst failure available here, because it is
+    indistinguishable from slowness and the instinct is to wait.
+
+    So it must say no, out loud, before it starts. This test holds two
+    sessions open, which is exactly the condition that produced the
+    outage.
+    """
+    from backend.services.backup_service import BackupService, _backup_dir_for_tests
+
+    directory = _backup_dir_for_tests()
+    directory.mkdir(parents=True, exist_ok=True)
+    probe = directory / f"backup-refusal-probe-{uuid.uuid4().hex[:8]}.dump"
+    probe.write_bytes(b"not a real dump -- never read, the refusal comes first")
+
+    try:
+        async with session_factory() as one, session_factory() as two:
+            # Both connections are real and open, like the API's are.
+            await one.execute(sa.text("SELECT 1"))
+            await two.execute(sa.text("SELECT 1"))
+            with pytest.raises(ValidationError, match="other connection"):
+                await BackupService(one).restore(backup_name=probe.name, confirmation=probe.name)
+    finally:
+        probe.unlink(missing_ok=True)

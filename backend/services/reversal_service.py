@@ -140,9 +140,7 @@ class ReversalService:
         the partition.
         """
         return (
-            (await self._session.execute(select(model).where(model.id == row_id)))
-            .scalars()
-            .first()
+            (await self._session.execute(select(model).where(model.id == row_id))).scalars().first()
         )
 
     # --- writing ------------------------------------------------------

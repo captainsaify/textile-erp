@@ -1380,24 +1380,24 @@ async def rebuild_ledgers(user: ControlUser, session: Session) -> dict[str, Any]
     return result
 
 
-class RestoreIn(BaseModel):
-    name: str = Field(min_length=1)
-    confirm: str = Field(min_length=1)
-
-
-@router.post("/backups/restore")
-async def restore_backup(body: RestoreIn, user: ControlUser, session: Session) -> dict[str, Any]:
-    """Replace the entire database with a backup.
-
-    The one operation on this screen that is not reversible and not
-    scoped: it does not restore *these* books, it restores the whole
-    server, including the demo business and every record entered since
-    the backup was taken. There is no manifest for it because there is
-    nothing left afterwards to write one against.
-
-    `BackupService.restore` demands the backup's own name typed back, so
-    the confirmation is not a checkbox that gets clicked before it is
-    read.
-    """
-    message = await BackupService(session).restore(backup_name=body.name, confirmation=body.confirm)
-    return {"restored": body.name, "message": message}
+# There is deliberately no restore endpoint here. It was built, shipped,
+# and taken back out the same afternoon, and the reason is worth keeping
+# where the next person will look for it.
+#
+# `pg_restore --clean` replaces every table, so it needs an ACCESS
+# EXCLUSIVE lock on each one. The API is holding the database open, so it
+# cannot get them -- and a queued exclusive lock in Postgres makes every
+# later reader queue *behind* it, including ones that would otherwise be
+# perfectly compatible. Within seconds the connection pool was empty,
+# every request was 500ing with nginx's HTML error page, and WhatsApp was
+# down. The restore itself never ran: it sat blocked on its first
+# statement until it died.
+#
+# It cannot be fixed by asking more firmly. A restore has to happen with
+# the application stopped, which is not a thing a page inside that
+# application can arrange for itself. So it lives at the terminal --
+# `erp restore <name>`, with the stack down -- where stopping first is
+# the natural order rather than a step to remember.
+#
+# Taking backups stays here. That one is safe, and it is the half people
+# actually need often.

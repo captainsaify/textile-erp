@@ -946,17 +946,6 @@
     ]);
     renderDiagnostics(report);
 
-    // Restoring is chosen from what exists, never typed. A name typed
-    // from memory is either a file that is not there or, worse, an older
-    // one than intended.
-    $("rs-name").replaceChildren(
-      ...backups.items.map((item) => {
-        const option = el("option", null, `${item.name} — ${item.taken.slice(0, 16).replace("T", " ")}`);
-        option.value = item.name;
-        return option;
-      }),
-    );
-
     $("reversals").replaceChildren(
       rowsTable(["When", "What", "Subject", ""], reversals.items, (item) => {
         const undo = el("button", "link", "Undo");
@@ -1283,32 +1272,6 @@
     return result.corrected
       ? `${result.corrected} running balance(s) corrected. ${result.notes.join("; ")}`
       : "Nothing moved — every running balance already agreed.";
-  });
-
-  /** The only action here with no undo. The backup's own name typed back,
-   *  and a second confirmation naming what is about to be replaced —
-   *  this restores the whole server, not these books. */
-  wire("rs-go", "rs-out", async () => {
-    const name = $("rs-name").value;
-    if (!name) throw new Error("Pick a backup first.");
-    if ($("rs-confirm").value.trim() !== name) {
-      throw new Error(`Type ${name} exactly to confirm. Nothing was changed.`);
-    }
-    if (
-      !window.confirm(
-        `Replace the entire database with ${name}?\n\n` +
-          "Everything entered since that backup was taken — both businesses — is lost. " +
-          "This cannot be undone.",
-      )
-    ) {
-      return "Cancelled. Nothing was changed.";
-    }
-    const done = await api("/control/backups/restore", {
-      method: "POST",
-      body: JSON.stringify({ name, confirm: $("rs-confirm").value.trim() }),
-    });
-    $("rs-confirm").value = "";
-    return `${done.message} Sign out and back in — what is on screen is from before the restore.`;
   });
 
   // ------------------------------------------------------------- boot

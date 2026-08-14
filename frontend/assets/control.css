@@ -374,18 +374,6 @@ button:focus-visible {
   overflow: auto;
 }
 
-/* The one destructive action that has no reversal. It is marked, not
-   hidden: burying it would only mean it gets found in a hurry. */
-.danger-card {
-  border-color: var(--danger);
-}
-.danger-card h2 {
-  color: var(--danger);
-}
-.danger-button {
-  background: var(--danger);
-}
-
 /* Failure is the row worth seeing, so it is the row that is coloured. */
 .grid td.failed,
 .msg-fail {

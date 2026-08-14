@@ -273,15 +273,48 @@ running-balance column still equals the sum it claims to summarise.
 computes rather than destroys: the amounts are never touched, only the
 derived total beside each one.
 
-### …take or restore a backup
+### …take a backup
 
 ```bash
 erp backup
 erp backups                   # what can be restored
-erp restore <name>
 ```
 
-One is taken automatically before every command that changes anything.
+One is taken automatically before every command that changes anything,
+and the Master Control screen has a button for it.
+
+### …go back to a backup and carry on from there
+
+```bash
+scripts/restore.sh                      # list what you can go back to
+scripts/restore.sh backup-2026....dump  # go back to that one
+```
+
+**Not from the web app, and not from `erp restore` on its own.** A
+restore replaces every table, so Postgres has to lock every table — and
+while the API and the workers are connected it cannot, so it waits. A
+waiting exclusive lock makes every later query wait behind it too, so
+the site goes down and stays down without the restore ever running. That
+happened once, from a button that has since been removed.
+
+`scripts/restore.sh` is the whole sequence in one command:
+
+1. backs up the **current** state first, so going back is itself
+   reversible — it prints that name at the end;
+2. stops the API, the workers and the scheduler;
+3. waits for the connections to actually drain, and refuses if they do
+   not;
+4. restores;
+5. starts everything and runs `erp check`.
+
+If it stops at step 3 or 4 it leaves the application **down** on purpose,
+rather than starting it on a half-restored database.
+
+`erp restore <name>` still exists and still works, but it now refuses
+outright if anything else is connected, and tells you what to stop. A
+clear "no" is worth more here than any amount of care taken afterwards,
+because a hang is indistinguishable from slowness and the instinct is to
+wait.
 
 ---
 

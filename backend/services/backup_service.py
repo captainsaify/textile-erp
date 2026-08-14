@@ -27,6 +27,7 @@ import tarfile
 import uuid
 from pathlib import Path
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.config import get_settings
@@ -170,6 +171,45 @@ class BackupService:
             )
         return records
 
+    async def _blocked_by_the_running_app(self) -> None:
+        """Refuse if anything else is holding the database open.
+
+        This exists because it did not, once. `pg_restore --clean`
+        replaces every table, so it needs an ACCESS EXCLUSIVE lock on
+        each one. With the API and the workers connected it never got
+        them -- and a *queued* exclusive lock in Postgres makes every
+        later reader queue behind it, including readers that would
+        otherwise be perfectly compatible. So the restore did not fail.
+        It sat there, holding the whole site down behind it, until it
+        died: no error, no restore, no service.
+
+        A hang is the worst possible failure for an operation like this,
+        because the person watching cannot tell it from slowness and
+        their instinct is to wait. One sentence up front is worth more
+        than any amount of care taken afterwards.
+
+        Counted rather than named: the number of other connections is
+        the fact that matters, and it is true regardless of which
+        container they belong to.
+        """
+        others = (
+            await self._session.execute(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND pid <> pg_backend_pid()"
+                )
+            )
+        ).scalar_one()
+        if int(others) > 0:
+            raise ValidationError(
+                f"{others} other connection(s) are using the database, so a restore would "
+                "block behind them and take the site down with it. Stop the application "
+                "first:\n"
+                "  docker compose stop api worker-whatsapp worker-ocr worker-scheduled beat\n"
+                "then run this again, and start them afterwards. "
+                "`scripts/restore.sh <name>` does the whole sequence."
+            )
+
     async def restore(self, *, backup_name: str, confirmation: str) -> str:
         """Overwrites live data. The caller must echo the backup's own
         name back as `confirmation` -- a `restore` that can be triggered
@@ -184,6 +224,7 @@ class BackupService:
         if not path.exists():
             raise ValidationError(f"No backup named '{backup_name}'.")
 
+        await self._blocked_by_the_running_app()
         await self._verify(path)
         url = self._settings.database_url.replace("+asyncpg", "")
         process = await asyncio.create_subprocess_exec(
@@ -208,6 +249,16 @@ class BackupService:
                 tar.extractall(destination, filter="data")
         logger.warning("database_restored", backup=backup_name)
         return str(path)
+
+
+def _backup_dir_for_tests() -> Path:
+    """The same directory `BackupService` uses, without an instance.
+
+    Only the refusal test needs this: it has to put a file where the
+    service will find it, and constructing a service to ask would mean
+    holding a third connection in a test about how many are open.
+    """
+    return Path(get_settings().attachments_dir).parent / "backups"
 
 
 def _sha256_file(path: Path) -> str:
