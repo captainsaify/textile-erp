@@ -6,7 +6,7 @@
     <meta name="robots" content="noindex, nofollow" />
     <title>Master Control</title>
     <link rel="stylesheet" href="/assets/styles.css?v=14" />
-    <link rel="stylesheet" href="/assets/control.css?v=5" />
+    <link rel="stylesheet" href="/assets/control.css?v=6" />
   </head>
   <body>
     <!-- A separate document from the dashboard, not a route inside it.
@@ -39,6 +39,7 @@
           <button data-page="records">Records</button>
           <button data-page="money">Money</button>
           <button data-page="stock">Stock</button>
+          <button data-page="whatsapp">WhatsApp</button>
           <button data-page="system">System</button>
         </nav>
         <div class="topbar-end">
@@ -143,6 +144,75 @@
             <button type="button" id="rc-all" class="primary">Rebuild</button>
             <div id="rc-all-out" class="hint"></div>
           </section>
+
+          <!-- The catalogue. Since a code can be created while typing a
+               bill, duplicates are now a matter of when rather than if,
+               and this is where they get cleaned up. -->
+          <section class="card">
+            <h2>The catalogue</h2>
+            <p class="muted">
+              Sorted by code, so two spellings of one product land next to each
+              other. “Bought” and “sold” are how you tell a duplicate from a
+              real item — and a product with neither can simply be deleted.
+            </p>
+            <div class="field"><label>Find</label><input id="pr-q" placeholder="code or description" /></div>
+            <div id="products"></div>
+          </section>
+
+          <section class="card">
+            <h2>Merge two products</h2>
+            <p class="muted">
+              Folds one into the other and replays the surviving product's
+              average cost over both histories — which is the only value it
+              could honestly have afterwards. Reversible.
+            </p>
+            <div class="grid-2">
+              <div>
+                <div class="field narrow"><label>Code that goes</label><input id="pm-loser" /></div>
+                <div class="field narrow"><label>its label</label><input id="pm-loser-brand" /></div>
+              </div>
+              <div>
+                <div class="field narrow"><label>Code that stays</label><input id="pm-winner" /></div>
+                <div class="field narrow"><label>its label</label><input id="pm-winner-brand" /></div>
+              </div>
+            </div>
+            <button type="button" id="pm-go" class="primary">Show me what this would do</button>
+            <div id="pm-out" class="hint"></div>
+            <div id="pm-preview" hidden></div>
+          </section>
+        </section>
+
+        <!-- Delivery. Not a log viewer: the question people arrive with
+             is "did he get it", and the answer is a cause, not a list. -->
+        <section id="page-whatsapp" hidden>
+          <section class="card">
+            <h2>Did the messages arrive?</h2>
+            <div id="msg-health"></div>
+          </section>
+
+          <section class="card">
+            <h2>Who the system can reach</h2>
+            <p class="muted">
+              A WhatsApp number is the login. A message from a number that is
+              not on this list gets no reply at all — deliberately — so a
+              partner who changed SIM sees nothing happen.
+            </p>
+            <div id="contacts"></div>
+            <hr />
+            <div class="field narrow"><label>Number</label><input id="ct-number" placeholder="7000087329" /></div>
+            <div class="field"><label>Now reaches</label><input id="ct-user" placeholder="Firoz" /></div>
+            <button type="button" id="ct-go" class="primary">Re-link it</button>
+            <div id="ct-out" class="hint"></div>
+          </section>
+
+          <section class="card">
+            <h2>Recent messages</h2>
+            <label
+              ><input type="checkbox" id="msg-failed" /> only what did not
+              arrive</label
+            >
+            <div id="messages"></div>
+          </section>
         </section>
 
         <section id="page-system" hidden>
@@ -158,6 +228,38 @@
               <div id="backups"></div>
             </section>
           </div>
+
+          <section class="card">
+            <h2>How things stand</h2>
+            <div id="diagnostics"></div>
+            <div id="ledger-drift"></div>
+            <button type="button" id="lg-go" class="primary">Rebuild running balances</button>
+            <p class="muted">
+              Rewrites each ledger row's running total from the amounts
+              themselves. It computes rather than destroys — the amounts are
+              never touched — and rolls back if the result stops balancing.
+            </p>
+            <div id="lg-out" class="hint"></div>
+          </section>
+
+          <!-- Deliberately last, deliberately alone, and deliberately not
+               beside the button that takes a backup. Restoring is the one
+               action on this screen that is not scoped to these books and
+               cannot be undone. -->
+          <section class="card danger-card">
+            <h2>Restore the whole database</h2>
+            <p class="muted">
+              This replaces <em>everything</em> — both businesses, and every
+              record entered since that backup was taken. It cannot be undone,
+              and there is no reversal for it because nothing survives to write
+              one against. Take a backup first.
+            </p>
+            <div class="field"><label>Backup</label><select id="rs-name"></select></div>
+            <div class="field"><label>Type the backup's name to confirm</label><input id="rs-confirm" /></div>
+            <button type="button" id="rs-go" class="primary danger-button">Restore</button>
+            <div id="rs-out" class="hint"></div>
+          </section>
+
           <section class="card">
             <h2>What has happened</h2>
             <div id="audit"></div>
@@ -284,6 +386,6 @@
     </div>
 
     <script src="/assets/money.js?v=14"></script>
-    <script src="/assets/control.js?v=5"></script>
+    <script src="/assets/control.js?v=6"></script>
   </body>
 </html>

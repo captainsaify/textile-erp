@@ -45,6 +45,7 @@ from backend.schemas.whatsapp import (
     WebhookStatus,
     WebhookStatusError,
 )
+from backend.services import message_log
 from backend.services.demo_service import DEMO_BANNER, as_demo
 from backend.services.whatsapp_bridge_client import get_bridge_sender
 from backend.services.whatsapp_client import SupportsSendText, get_whatsapp_client
@@ -132,9 +133,16 @@ class WhatsAppDispatcher:
         looked identical to one delivered -- which is how three separate
         "he never got it" reports had nothing to investigate.
 
-        Only failures are logged. Every message produces sent/delivered/
-        read receipts, and logging those would bury the one line worth
+        Only failures are recorded. Every message produces sent/delivered/
+        read receipts, and keeping those would bury the one line worth
         reading.
+
+        This is the receipt, not the send: `_log_send` in the client
+        already recorded that Meta *accepted* the message. Those are
+        different facts and both are worth having, so this writes its own
+        row rather than trying to find and amend the first one -- which
+        would mean storing Meta's message id and matching on it, for no
+        gain over two rows that each say what they know.
         """
         for status in statuses:
             if not status.failed:
@@ -147,6 +155,16 @@ class WhatsAppDispatcher:
                     error_code=error.code,
                     title=error.title,
                     detail=error.detail,
+                )
+                message_log.fire_and_forget(
+                    direction="out",
+                    transport="cloud",
+                    peer=status.recipient_id,
+                    kind="receipt",
+                    preview=error.title or "delivery failed",
+                    ok=False,
+                    error_code=str(error.code) if error.code else None,
+                    error_detail=error.detail or None,
                 )
 
     async def _process_meta_media(self, message: WebhookMessage, media: WebhookMedia) -> None:
@@ -183,6 +201,18 @@ class WhatsAppDispatcher:
             return
 
         sender = message.sender_number
+        # Recorded before the sender is resolved, so an unrecognised
+        # number leaves a trace. "Nothing happened when I texted it" is
+        # otherwise unanswerable: silence to a stranger is deliberate
+        # (§2), and indistinguishable from a webhook that never arrived.
+        message_log.fire_and_forget(
+            direction="in",
+            transport="webhook",
+            peer=sender,
+            kind=message.kind,
+            preview=message.text or "",
+            ok=True,
+        )
         async with self._session_factory() as session:
             user = await UserRepository(session).get_active_by_whatsapp_number(sender)
 

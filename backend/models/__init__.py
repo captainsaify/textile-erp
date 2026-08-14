@@ -29,6 +29,7 @@ from backend.models.sales import SalesHeader, SalesLine
 from backend.models.system import (
     Attachment,
     AuditLog,
+    MessageLog,
     ReconciliationRun,
     ReportJob,
     ReversalManifest,
@@ -49,6 +50,7 @@ __all__ = [
     "Income",
     "Inventory",
     "InventoryMovement",
+    "MessageLog",
     "Journal",
     "JournalLine",
     "OcrLearningDictionary",

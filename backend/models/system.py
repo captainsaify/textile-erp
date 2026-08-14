@@ -193,3 +193,39 @@ class ReversalManifest(UUIDPkMixin, OrgScopedMixin, Base):
     reversed_at: Mapped[datetime.datetime | None]
     reversed_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class MessageLog(UUIDPkMixin, Base):
+    """Every WhatsApp message we tried to send, and how it went.
+
+    Not org-scoped, unlike every business table here. The sender is a
+    process-global client that does not know which books a message came
+    from, and threading an org id through every call site to satisfy a
+    mixin would mean inventing a fact to fill a column. What this records
+    is transport: who we tried to reach, whether it landed, and what the
+    other end said about it.
+
+    Written outside the business transaction, on its own session. A
+    delivery failure must be recorded even when the work that triggered
+    it rolls back -- and a purchase must not fail to save because the
+    log write did.
+    """
+
+    __tablename__ = "message_log"
+    __table_args__ = (CheckConstraint("direction IN ('out','in')", name="direction_valid"),)
+
+    direction: Mapped[str] = mapped_column(String, nullable=False)
+    #: 'cloud' (Meta Graph) | 'bridge' (whatsapp-web.js) | 'webhook'
+    transport: Mapped[str] = mapped_column(String, nullable=False)
+    #: E.164 for Meta, `...@c.us` / `...@g.us` for the bridge.
+    peer: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    preview: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    ok: Mapped[bool] = mapped_column(nullable=False)
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    #: Meta's own code. 131047 -- "re-engagement outside the 24h window"
+    #: -- is the one that made this table necessary.
+    error_code: Mapped[str | None] = mapped_column(String)
+    error_detail: Mapped[str | None] = mapped_column(String)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    created_at: Mapped[datetime.datetime] = mapped_column(server_default=text("now()"))

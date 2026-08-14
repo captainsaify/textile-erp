@@ -31,6 +31,7 @@ from backend.models import (
     AuditLog,
     Brand,
     Customer,
+    InventoryMovement,
     Product,
     PurchaseHeader,
     PurchaseLine,
@@ -53,6 +54,15 @@ TABLES: dict[str, Any] = {
     "brands": Brand,
     "suppliers": Supplier,
     "customers": Customer,
+    # A product merge re-points movements, and putting them back is only
+    # half the job: the weighted average is a running function of them,
+    # so the caller replays afterwards. See
+    # `backend.services.admin.products.replay_after_reversal` -- and note
+    # that forgetting it is caught rather than shipped, because the guard
+    # re-checks the books before committing.
+    "inventory_movements": InventoryMovement,
+    # Re-linking a WhatsApp number moves a column on `users`.
+    "users": User,
 }
 
 #: Headers can have money allocated against them; the others cannot.
@@ -117,6 +127,23 @@ class ReversalPlan:
 class ReversalService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def _fetch(self, model: Any, row_id: uuid.UUID) -> Any:
+        """One row by primary key, without assuming the key is one column.
+
+        `session.get` needs the *whole* key, and the partitioned tables
+        here -- `inventory_movements`, the ledgers, `audit_logs` -- have
+        composite keys of `(created_at, id)` to satisfy Postgres. A
+        manifest records only the id, because the id is what identifies
+        the row; the partition key is an implementation detail of how it
+        is stored. So this looks it up by id and lets the database find
+        the partition.
+        """
+        return (
+            (await self._session.execute(select(model).where(model.id == row_id)))
+            .scalars()
+            .first()
+        )
 
     # --- writing ------------------------------------------------------
 
@@ -214,7 +241,7 @@ class ReversalService:
         if model is None:
             return state("missing", f"unknown table {table!r}")
 
-        row = await self._session.get(model, row_id)
+        row = await self._fetch(model, row_id)
         if row is None or getattr(row, "deleted_at", None) is not None:
             return state("missing", "purged or deleted since the operation")
 
@@ -276,7 +303,7 @@ class ReversalService:
         moved = 0
         for row in plan.movable:
             model = TABLES[row.table]
-            record = await self._session.get(model, row.row_id)
+            record = await self._fetch(model, row.row_id)
             if record is None:
                 continue
             setattr(record, row.column, _coerce(getattr(record, row.column), row.previous))
@@ -286,7 +313,7 @@ class ReversalService:
             model = TABLES.get(str(entry.get("table", "")))
             if model is None:
                 continue
-            record = await self._session.get(model, uuid.UUID(str(entry["id"])))
+            record = await self._fetch(model, uuid.UUID(str(entry["id"])))
             if record is not None:
                 record.deleted_at = None
                 if hasattr(record, "purged_at"):

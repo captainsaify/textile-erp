@@ -753,6 +753,15 @@ def unmerge(
             moved = await service.apply(plan, ctx.actor)
             console.item(f"{moved} row(s) put back")
 
+            # Undoing a product merge moves inventory movements back, and
+            # a weighted average is a running function of those. Shared
+            # with the Master Control endpoint so the two cannot disagree
+            # about what undoing a merge means.
+            from backend.services.admin.products import replay_after_reversal
+
+            for note in await replay_after_reversal(ctx.session, ctx.org_id, manifest):
+                console.item(note)
+
             # A bill's totals are derived from its lines, so they are
             # recomputed rather than stored and replayed -- storing them
             # would give two sources for one number and a way for them

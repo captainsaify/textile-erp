@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 
@@ -20,6 +20,7 @@ from backend.api.interactive import Interactive, to_cloud_api
 from backend.core.config import get_settings
 from backend.core.lifecycle import on_release
 from backend.core.logging import get_logger
+from backend.services import message_log
 
 logger = get_logger(__name__)
 
@@ -142,10 +143,14 @@ class WhatsAppClient:
 
     async def _post(self, payload: dict[str, object]) -> bool:
         url = f"/{self._phone_number_id}/messages"
+        tried = 0
+        last_error: str | None = None
         for attempt, delay in enumerate((*_RETRY_DELAYS_SECONDS, None)):
+            tried = attempt + 1
             try:
                 response = await self._http.post(url, json=payload)
                 if response.status_code < 300:
+                    _log_send(payload, ok=True, status=response.status_code, attempts=tried)
                     return True
                 # 4xx = our bug or config problem; retrying won't help
                 if response.status_code < 500:
@@ -154,15 +159,85 @@ class WhatsAppClient:
                         status=response.status_code,
                         body=response.text[:500],
                     )
+                    _log_send(
+                        payload,
+                        ok=False,
+                        status=response.status_code,
+                        attempts=tried,
+                        body=_json_or_none(response),
+                    )
                     return False
                 logger.warning("whatsapp_send_5xx", status=response.status_code, attempt=attempt)
             except httpx.HTTPError as exc:
                 logger.warning("whatsapp_send_transport_error", error=str(exc), attempt=attempt)
+                last_error = str(exc)
             if delay is None:
                 break
             await asyncio.sleep(delay)
         logger.error("whatsapp_send_failed", to=payload.get("to"))
+        _log_send(
+            payload,
+            ok=False,
+            status=None,
+            attempts=tried,
+            detail=last_error or "gave up after retries",
+        )
         return False
+
+
+def _json_or_none(response: httpx.Response) -> dict[str, Any] | None:
+    """Meta usually explains a rejection in JSON. Usually."""
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _describe(payload: dict[str, object]) -> tuple[str, str]:
+    """`(kind, preview)` for a Graph API message body.
+
+    Read off the payload rather than passed in by each caller, so a new
+    message type is logged the day it is added rather than the day
+    somebody remembers to log it.
+    """
+    kind = str(payload.get("type") or "text")
+    part = payload.get(kind)
+    if isinstance(part, dict):
+        for key in ("body", "caption", "filename"):
+            value = part.get(key)
+            if isinstance(value, str) and value:
+                return kind, value
+        # Interactive messages nest their words one level further down.
+        body = part.get("body")
+        if isinstance(body, dict) and isinstance(body.get("text"), str):
+            return kind, str(body["text"])
+    return kind, ""
+
+
+def _log_send(
+    payload: dict[str, object],
+    *,
+    ok: bool,
+    status: int | None,
+    attempts: int,
+    body: dict[str, Any] | None = None,
+    detail: str | None = None,
+) -> None:
+    kind, preview = _describe(payload)
+    code, message = message_log.meta_error(body)
+    message_log.fire_and_forget(
+        direction="out",
+        transport="cloud",
+        peer=str(payload.get("to") or ""),
+        kind=kind,
+        preview=preview,
+        ok=ok,
+        http_status=status,
+        error_code=code,
+        error_detail=message or detail,
+        attempts=attempts,
+    )
 
 
 async def _fetch_media_impl(

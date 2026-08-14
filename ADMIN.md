@@ -142,6 +142,41 @@ erp merge brand "TOP " into "TOP"
 Everything moves to the name on the right. The one on the left stops
 existing.
 
+### …combine two products that are one product
+
+```bash
+erp products                            # the catalogue, with what has happened to each
+erp products 55X                        # just the ones matching that
+erp merge product 55X into 55XL --to-label TOP
+erp delete-product 55XL --label TOP     # only if it has never been bought or sold
+```
+
+Now that codes can be created while typing a bill, duplicates are a
+matter of when rather than if — `55X` under `TOP` and `TOP ` is two
+products holding half the stock each.
+
+Merging products is not like merging parties. Merging a party moves who
+owes what and no number changes. Merging products moves **stock
+movements**, so the survivor's average cost is recomputed over both
+histories in order:
+
+```
+55X   10 kg at ₹100  =  ₹1,000
+55XL  10 kg at ₹200  =  ₹2,000
+                        ────────
+after 20 kg at ₹150     ₹3,000
+```
+
+That is the only value it could honestly have afterwards, and it will
+not be either of the two you started with. `erp products` before and
+after shows you the move.
+
+`delete-product` is deliberately narrow: it only removes a product
+nothing has ever happened to. A product with history is part of the
+record, and hiding it would take its purchases out of the reports that
+explain the cost of everything else. The error says so, and points at
+merge.
+
 ### …combine two bills that are one bill
 
 ```bash
@@ -178,6 +213,40 @@ erp stock recost --all
 `recost` is the repair for "the average cost looks wrong" — it replays
 every movement including rate corrections.
 
+### …fix a partner whose messages do nothing
+
+```bash
+erp contacts                          # who the system can reach, and when it last heard from them
+erp relink 7000087329 to "Firoz"      # his new SIM
+erp unlink "Firoz"                    # a number that is gone rather than moved
+```
+
+A WhatsApp number **is** the login. A message from a number that is not
+on that list gets no reply at all — deliberately, so strangers learn
+nothing — which means a partner on a new SIM sees nothing happen and has
+nothing to report but "it's not working".
+
+`erp contacts` is the diagnosis: a number with **never** in the last
+column has either never been used or is wrong, and from a list of names
+those look identical.
+
+### …see whether messages are actually arriving
+
+```bash
+erp messages                # last 30, with the failures called out
+erp messages --failed       # only what did not arrive
+erp messages --hours 72     # widen the summary window
+```
+
+Meta accepting a message and the partner receiving it are different
+facts, and the gap between them used to be visible only in the
+container's log. Seventeen failed in one night with code `131047`
+— "more than 24 hours since that person last messaged us" — and nobody
+knew until someone went looking.
+
+Failures are grouped by cause, because seventeen failures with one cause
+are one problem.
+
 ### …check nothing is broken
 
 ```bash
@@ -188,6 +257,21 @@ Reconciles stock against movements and every ledger against the journal,
 on both the real books and the demo. Run it after anything unusual. It
 is also run automatically inside every command before that command is
 allowed to commit.
+
+```bash
+erp health                    # size, disk, are the nightly jobs still running
+erp rebuild-ledger            # rewrite the running balances from the amounts
+```
+
+`erp check` answers whether the books balance. `erp health` answers the
+questions underneath it — how big the database has got, how much disk is
+left, when the nightly reconciliation last ran (a job that quietly stops
+running is the failure nobody notices), and whether each ledger's
+running-balance column still equals the sum it claims to summarise.
+
+`rebuild-ledger` is the repair for that last one. Like `recost`, it
+computes rather than destroys: the amounts are never touched, only the
+derived total beside each one.
 
 ### …take or restore a backup
 
@@ -209,6 +293,9 @@ One is taken automatically before every command that changes anything.
 | `2 sales already went out against MKD 55X` | Changing the brand would send stock negative; fix the sales too, in the same command or before it |
 | `ROLLED BACK — nothing was changed` | The change would have unbalanced the books. Nothing happened. Send me the output. |
 | `no such code under that brand` | The code exists, but not for that brand. `erp show stock <code>` lists which brands carry it. |
+| `55X exists under 3 labels (…) — name one` | Pass `--label`, or `--from-label` / `--to-label` on a merge. Never guessed for you: a merge on the wrong product is reversible, but it should not need to be. |
+| `cannot be deleted: it has 4 stock movement(s)` | It has history, so it is part of the record. Merge it into the real product instead. |
+| `that number is X's only way to sign in` | Give them an email first. The database refuses a user who can neither text nor log in. |
 
 ---
 

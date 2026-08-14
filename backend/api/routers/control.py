@@ -27,9 +27,13 @@ from backend.core.exceptions import DuplicateSaleError, ExactDuplicateInvoiceErr
 from backend.models import Product, ProductType, PurchaseHeader
 from backend.models.enums import SalePaymentType
 from backend.repositories.purchase_repository import PurchaseRepository
+from backend.services import message_log
+from backend.services.admin.contacts import ContactAdminService
+from backend.services.admin.diagnostics import DiagnosticsService
 from backend.services.admin.fixline import PurchaseLineFixService
 from backend.services.admin.guard import GuardRegression, guarded
 from backend.services.admin.merge import PartyMergeService
+from backend.services.admin.products import ProductAdminService, replay_after_reversal
 from backend.services.admin.purge import PurgeService
 from backend.services.admin.salefix import SaleFixService
 from backend.services.admin.stock import StockAdminService
@@ -978,6 +982,13 @@ async def reversal_apply(reference: str, user: ControlUser, session: Session) ->
     async with guarded(session, user.org_id) as report:
         moved = await service.apply(plan, user)
         report.note(f"{moved} row(s) put back")
+        # Moving rows back is only half of undoing a product merge: the
+        # weighted average is a running function of the movements that
+        # just moved. Skipping this does not ship a wrong number -- the
+        # guard would roll the whole reversal back -- but it would make
+        # undoing a merge impossible rather than wrong.
+        for note in await replay_after_reversal(session, user.org_id, manifest):
+            report.note(note)
     await session.commit()
     return {"subject": manifest.subject, "moved": moved, "notes": report.notes}
 
@@ -1152,3 +1163,241 @@ async def recent_sales(
             for sale_id, date, customer, total, paid in rows
         ]
     }
+
+
+# --- products ----------------------------------------------------------
+
+
+@router.get("/products")
+async def list_products(
+    user: ControlUser,
+    session: Session,
+    q: Annotated[str, Query(max_length=60)] = "",
+) -> dict[str, Any]:
+    """The catalogue, with what has happened to each row.
+
+    The counts are what tell a duplicate from a real product, and what
+    tell a deletable row from one carrying history. Without them the
+    screen would be a list of codes and the person would be guessing.
+    """
+    return {"items": await ProductAdminService(session).catalogue(user.org_id, query=q)}
+
+
+class ProductMergeIn(BaseModel):
+    loser_code: str = Field(min_length=1)
+    loser_brand: str | None = None
+    winner_code: str = Field(min_length=1)
+    winner_brand: str | None = None
+    confirm: str | None = None
+
+
+@router.post("/products/merge/preview")
+async def product_merge_preview(
+    body: ProductMergeIn, user: ControlUser, session: Session
+) -> dict[str, Any]:
+    """Really done, then thrown away. The averages shown are the ones the
+    commit would produce, because they were produced."""
+    service = ProductAdminService(session)
+    plan = await service.merge_plan(
+        user.org_id,
+        loser_code=body.loser_code,
+        loser_brand=body.loser_brand,
+        winner_code=body.winner_code,
+        winner_brand=body.winner_brand,
+    )
+    if not plan.ok:
+        return plan.as_dict()
+    try:
+        return await service.merge_apply(user.org_id, user, plan, dry_run=True)
+    except GuardRegression as exc:
+        return {**plan.as_dict(), "ok": False, "blockers": exc.problems, "dry_run": True}
+
+
+@router.post("/products/merge")
+async def product_merge(
+    body: ProductMergeIn, user: ControlUser, session: Session
+) -> dict[str, Any]:
+    service = ProductAdminService(session)
+    plan = await service.merge_plan(
+        user.org_id,
+        loser_code=body.loser_code,
+        loser_brand=body.loser_brand,
+        winner_code=body.winner_code,
+        winner_brand=body.winner_brand,
+    )
+    # Typed back, not clicked. This one folds two histories into one and
+    # the surviving product's cost changes as a result.
+    if (body.confirm or "").strip() != plan.winner_label:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"type {plan.winner_label!r} to confirm; nothing was changed",
+        )
+    try:
+        result = await service.merge_apply(user.org_id, user, plan)
+    except GuardRegression as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "rolled back — the books would not have balanced",
+                "problems": exc.problems,
+            },
+        ) from None
+    await session.commit()
+    return result
+
+
+class ProductDeleteIn(BaseModel):
+    code: str = Field(min_length=1)
+    brand: str | None = None
+
+
+@router.post("/products/delete")
+async def product_delete(
+    body: ProductDeleteIn, user: ControlUser, session: Session
+) -> dict[str, Any]:
+    """Only a product nothing has ever happened to. Anything else is a
+    merge, and the error says so."""
+    result = await ProductAdminService(session).delete(
+        user.org_id, user, code=body.code, brand=body.brand
+    )
+    await session.commit()
+    return result
+
+
+# --- contacts ----------------------------------------------------------
+
+
+@router.get("/contacts")
+async def list_contacts(user: ControlUser, session: Session) -> dict[str, Any]:
+    """Who can reach the system, and when they last did."""
+    return {"items": await ContactAdminService(session).contacts(user.org_id)}
+
+
+class RelinkIn(BaseModel):
+    number: str = Field(min_length=6, max_length=20)
+    user: str = Field(min_length=2, max_length=120)
+
+
+@router.post("/contacts/relink")
+async def relink_contact(body: RelinkIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    """Point a WhatsApp number at a person.
+
+    The repair for a partner who changed SIM. Until it is run, their
+    messages reach an unrecognised number and the system's correct
+    response to an unrecognised number is silence -- so the symptom is
+    "nothing happens", which is the hardest kind to diagnose.
+    """
+    result = await ContactAdminService(session).relink(
+        user.org_id, user, number=body.number, to_name=body.user
+    )
+    await session.commit()
+    return result
+
+
+class UnlinkIn(BaseModel):
+    user: str = Field(min_length=2, max_length=120)
+
+
+@router.post("/contacts/unlink")
+async def unlink_contact(body: UnlinkIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    """For a SIM that is gone rather than moved."""
+    result = await ContactAdminService(session).unlink(user.org_id, user, name=body.user)
+    await session.commit()
+    return result
+
+
+# --- messages ----------------------------------------------------------
+
+
+@router.get("/messages")
+async def list_messages(
+    user: ControlUser,
+    session: Session,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    failed_only: bool = False,
+) -> dict[str, Any]:
+    """Every message in and out, newest first.
+
+    Exists because seventeen failed overnight and the only way to find
+    out was to read the container's stdout.
+    """
+    rows = await message_log.recent(session, limit=limit, failed_only=failed_only)
+    return {
+        "items": [
+            {
+                "when": row.created_at.isoformat(),
+                "direction": row.direction,
+                "transport": row.transport,
+                "peer": row.peer,
+                "kind": row.kind,
+                "preview": row.preview,
+                "ok": row.ok,
+                "error_code": row.error_code or "",
+                "error_detail": row.error_detail or "",
+                "meaning": message_log.MEANINGS.get(str(row.error_code), ""),
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.get("/messages/health")
+async def message_health(
+    user: ControlUser,
+    session: Session,
+    hours: Annotated[int, Query(ge=1, le=720)] = 24,
+) -> dict[str, Any]:
+    """Failures grouped by cause. Seventeen failures with one cause are
+    one problem, and a list of seventeen rows hides that."""
+    return await message_log.failure_summary(session, since_hours=hours)
+
+
+# --- diagnostics and restore -------------------------------------------
+
+
+@router.get("/diagnostics")
+async def diagnostics(user: ControlUser, session: Session) -> dict[str, Any]:
+    """Size, disk, whether the nightly jobs are still running, and
+    whether the running balances still equal what they summarise."""
+    return await DiagnosticsService(session).report(user.org_id)
+
+
+@router.post("/ledger/rebuild")
+async def rebuild_ledgers(user: ControlUser, session: Session) -> dict[str, Any]:
+    """Rewrite every running balance from the rows themselves.
+
+    Computes rather than destroys, like recost: the amounts are never
+    touched, only the derived snapshot beside each one.
+    """
+    try:
+        result = await DiagnosticsService(session).rebuild_ledgers(user.org_id, user)
+    except GuardRegression as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"message": "rolled back", "problems": exc.problems},
+        ) from None
+    await session.commit()
+    return result
+
+
+class RestoreIn(BaseModel):
+    name: str = Field(min_length=1)
+    confirm: str = Field(min_length=1)
+
+
+@router.post("/backups/restore")
+async def restore_backup(body: RestoreIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    """Replace the entire database with a backup.
+
+    The one operation on this screen that is not reversible and not
+    scoped: it does not restore *these* books, it restores the whole
+    server, including the demo business and every record entered since
+    the backup was taken. There is no manifest for it because there is
+    nothing left afterwards to write one against.
+
+    `BackupService.restore` demands the backup's own name typed back, so
+    the confirmation is not a checkbox that gets clicked before it is
+    read.
+    """
+    message = await BackupService(session).restore(backup_name=body.name, confirmation=body.confirm)
+    return {"restored": body.name, "message": message}

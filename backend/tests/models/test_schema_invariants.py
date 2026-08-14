@@ -10,7 +10,11 @@ from backend.models import Base
 
 # §3.17: journal_lines is a pure child of journal; §3.1: organizations is
 # the tenancy root itself.
-TABLES_WITHOUT_ORG_ID = {"organizations", "journal_lines"}
+# `message_log` is transport telemetry, not business data: the sender is
+# a process-global client that does not know which books a message came
+# from, and threading an org id through every call site to satisfy this
+# rule would mean inventing a fact to fill a column.
+TABLES_WITHOUT_ORG_ID = {"organizations", "journal_lines", "message_log"}
 
 # §9: append-only ledgers -- corrections are new offsetting rows, so the
 # columns that imply in-place mutation must not exist.

@@ -344,6 +344,7 @@ button:focus-visible {
  * stylesheet, which control.html loads first. One visual language. */
 #page-money .card,
 #page-stock .card,
+#page-whatsapp .card,
 #page-system .card {
   margin-bottom: 1rem;
   display: grid;
@@ -352,11 +353,50 @@ button:focus-visible {
 }
 #page-money h2,
 #page-stock h2,
+#page-whatsapp h2,
 #page-system h2 {
   margin: 0;
   font-size: 1rem;
 }
 #page-stock .card button,
+#page-whatsapp .card button,
 #page-money .card button {
   justify-self: start;
+}
+
+/* A long list inside a card scrolls on its own rather than pushing the
+   next card off the screen. The catalogue and the message log are both
+   "as many rows as there are". */
+#products,
+#messages,
+#contacts {
+  max-height: 22rem;
+  overflow: auto;
+}
+
+/* The one destructive action that has no reversal. It is marked, not
+   hidden: burying it would only mean it gets found in a hurry. */
+.danger-card {
+  border-color: var(--danger);
+}
+.danger-card h2 {
+  color: var(--danger);
+}
+.danger-button {
+  background: var(--danger);
+}
+
+/* Failure is the row worth seeing, so it is the row that is coloured. */
+.grid td.failed,
+.msg-fail {
+  color: var(--danger);
+}
+.msg-cause {
+  padding: 0.4rem 0.6rem;
+  border-left: 3px solid var(--danger);
+  background: var(--danger-bg);
+  margin-bottom: 0.4rem;
+}
+.msg-cause b {
+  font-variant-numeric: tabular-nums;
 }

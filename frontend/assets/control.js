@@ -538,7 +538,22 @@
 
   // ------------------------------------------------------------- mode
 
-  const PAGES = { records: "page-records", money: "page-money", stock: "page-stock", system: "page-system" };
+  const PAGES = {
+    records: "page-records",
+    money: "page-money",
+    stock: "page-stock",
+    whatsapp: "page-whatsapp",
+    system: "page-system",
+  };
+
+  // What each page has to fetch before it means anything. Kept as data
+  // so adding a page is one line here rather than another branch below.
+  const ON_OPEN = {
+    records: () => loadRecords(),
+    stock: () => loadProducts(),
+    whatsapp: () => loadWhatsApp(),
+    system: () => loadSystem(),
+  };
 
   function setKind(next) {
     if (PAGES[next]) {
@@ -547,8 +562,7 @@
       });
       $("entry").hidden = true;
       Object.values(PAGES).forEach((id) => ($(id).hidden = id !== PAGES[next]));
-      if (next === "records") loadRecords().catch((exc) => banner(exc.message));
-      if (next === "system") loadSystem().catch((exc) => banner(exc.message));
+      if (ON_OPEN[next]) ON_OPEN[next]().catch((exc) => banner(exc.message));
       return;
     }
     $("entry").hidden = false;
@@ -924,11 +938,24 @@
   }
 
   async function loadSystem() {
-    const [reversals, audit, backups] = await Promise.all([
+    const [reversals, audit, backups, report] = await Promise.all([
       api("/control/reversals"),
       api("/control/audit?limit=40"),
       api("/control/backups"),
+      api("/control/diagnostics"),
     ]);
+    renderDiagnostics(report);
+
+    // Restoring is chosen from what exists, never typed. A name typed
+    // from memory is either a file that is not there or, worse, an older
+    // one than intended.
+    $("rs-name").replaceChildren(
+      ...backups.items.map((item) => {
+        const option = el("option", null, `${item.name} — ${item.taken.slice(0, 16).replace("T", " ")}`);
+        option.value = item.name;
+        return option;
+      }),
+    );
 
     $("reversals").replaceChildren(
       rowsTable(["When", "What", "Subject", ""], reversals.items, (item) => {
@@ -995,6 +1022,293 @@
     const made = await api("/control/backups", { method: "POST" });
     await loadSystem();
     return `Took ${made.name} (${made.size_kb} KB).`;
+  });
+
+  // --------------------------------------------------------- catalogue
+
+  /** The catalogue, and the two counts that make it useful. A list of
+   *  codes cannot tell a duplicate from a real product; “bought 4, sold
+   *  1” beside “bought 0, sold 0” on the same code can. */
+  async function loadProducts() {
+    const query = $("pr-q").value.trim();
+    const data = await api(`/control/products?q=${encodeURIComponent(query)}`);
+    $("products").replaceChildren(
+      rowsTable(
+        ["Code", "Label", "Description", "On hand", "Avg cost", "Bought", "Sold", ""],
+        data.items,
+        (item) => {
+          // Offered only where it is possible. A button that explains
+          // why it cannot work, after it is pressed, is worse than one
+          // that is not there.
+          let action = "";
+          if (item.deletable) {
+            const drop = el("button", "link", "Delete");
+            drop.type = "button";
+            drop.addEventListener("click", () => deleteProduct(item));
+            action = drop;
+          }
+          return [
+            item.code,
+            item.brand || "—",
+            item.description,
+            item.on_hand,
+            Money.format(item.avg_cost),
+            String(item.purchases),
+            String(item.sales),
+            action,
+          ];
+        },
+      ),
+    );
+  }
+
+  async function deleteProduct(item) {
+    if (!window.confirm(`Delete ${item.label}? Nothing has ever been bought or sold on it.`)) {
+      return;
+    }
+    try {
+      const done = await api("/control/products/delete", {
+        method: "POST",
+        body: JSON.stringify({ code: item.code, brand: item.brand || null }),
+      });
+      banner(`${done.label} removed. Undo with the reversal id ${done.reversal}.`, true);
+      await loadProducts();
+    } catch (exc) {
+      banner(exc.message);
+    }
+  }
+
+  $("pr-q").addEventListener("input", () => {
+    clearTimeout($("pr-q").dataset.timer);
+    $("pr-q").dataset.timer = setTimeout(
+      () => loadProducts().catch((exc) => banner(exc.message)),
+      250,
+    );
+  });
+
+  /** Preview, then confirmation typed back. A merge folds two histories
+   *  into one and moves the surviving product's cost; that is not a
+   *  thing to find out about after clicking. */
+  wire("pm-go", "pm-out", async () => {
+    const body = {
+      loser_code: $("pm-loser").value.trim(),
+      loser_brand: $("pm-loser-brand").value.trim() || null,
+      winner_code: $("pm-winner").value.trim(),
+      winner_brand: $("pm-winner-brand").value.trim() || null,
+    };
+    const plan = await api("/control/products/merge/preview", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    const panel = $("pm-preview");
+    panel.hidden = false;
+    panel.replaceChildren();
+
+    if (!plan.ok) {
+      const list = el("ul");
+      (plan.blockers || []).forEach((b) => list.append(el("li", null, b)));
+      panel.append(el("p", "error", "Cannot merge these:"), list);
+      return `${plan.loser} → ${plan.winner}: blocked.`;
+    }
+
+    const facts = el("ul");
+    facts.append(
+      el("li", null, `${plan.movements} stock movement(s) move to ${plan.winner}`),
+      el("li", null, `${plan.purchase_lines} purchase line(s), ${plan.sales_lines} sale line(s)`),
+      el("li", null, `${plan.loser_qty} + ${plan.winner_qty} = ${plan.qty_after} on hand`),
+    );
+    (plan.notes || []).forEach((note) => facts.append(el("li", null, note)));
+    panel.append(facts);
+
+    const label = el("label", null, `Type ${plan.winner} to confirm`);
+    const input = el("input");
+    const go = el("button", "primary", "Merge them");
+    go.type = "button";
+    go.addEventListener("click", async () => {
+      go.disabled = true;
+      try {
+        const done = await api("/control/products/merge", {
+          method: "POST",
+          body: JSON.stringify({ ...body, confirm: input.value.trim() }),
+        });
+        banner(`Merged into ${done.winner}. Undo with the reversal id ${done.reversal}.`, true);
+        panel.hidden = true;
+        await loadProducts();
+      } catch (exc) {
+        banner(exc.message);
+      } finally {
+        go.disabled = false;
+      }
+    });
+    panel.append(label, input, go);
+    input.focus();
+    return `${plan.loser} → ${plan.winner}: ${plan.qty_after} on hand afterwards.`;
+  });
+
+  // ---------------------------------------------------------- whatsapp
+
+  async function loadWhatsApp() {
+    const [health, contacts, messages] = await Promise.all([
+      api("/control/messages/health"),
+      api("/control/contacts"),
+      api(`/control/messages?limit=60&failed_only=${$("msg-failed").checked}`),
+    ]);
+
+    // Grouped by cause, because seventeen failures with one cause are
+    // one problem and a list of seventeen rows hides that.
+    const host = $("msg-health");
+    host.replaceChildren();
+    if (!health.failed) {
+      host.append(
+        el(
+          "p",
+          "muted",
+          `${health.messages} message(s) in the last ${health.window_hours} hours. All delivered.`,
+        ),
+      );
+    } else {
+      host.append(
+        el("p", null, `${health.failed} of ${health.messages} did not arrive:`),
+      );
+      health.causes.forEach((cause) => {
+        const box = el("div", "msg-cause");
+        box.append(el("b", null, `${cause.count}× ${cause.code}`));
+        box.append(el("p", null, cause.meaning || cause.detail || "no reason given"));
+        host.append(box);
+      });
+    }
+
+    $("contacts").replaceChildren(
+      rowsTable(
+        ["Name", "Role", "WhatsApp", "Email", "Last message"],
+        contacts.items,
+        (item) => {
+          const number = el("span", item.whatsapp_number ? "" : "msg-fail");
+          number.textContent = item.whatsapp_number || "none — cannot be reached";
+          return [
+            item.name,
+            item.role,
+            number,
+            item.email || "—",
+            item.last_seen ? item.last_seen.slice(0, 16).replace("T", " ") : "never",
+          ];
+        },
+      ),
+    );
+
+    $("messages").replaceChildren(
+      rowsTable(["When", "", "Who", "Result", "Message"], messages.items, (item) => {
+        const result = el("span", item.ok ? "" : "msg-fail");
+        result.textContent = item.ok ? "ok" : item.error_code || "failed";
+        if (!item.ok && item.meaning) result.title = item.meaning;
+        return [
+          item.when.slice(5, 16).replace("T", " "),
+          item.direction === "out" ? "→" : "←",
+          item.peer,
+          result,
+          item.preview.slice(0, 60),
+        ];
+      }),
+    );
+  }
+
+  $("msg-failed").addEventListener("change", () =>
+    loadWhatsApp().catch((exc) => banner(exc.message)),
+  );
+
+  wire("ct-go", "ct-out", async () => {
+    const result = await api("/control/contacts/relink", {
+      method: "POST",
+      body: JSON.stringify({
+        number: $("ct-number").value.trim(),
+        user: $("ct-user").value.trim(),
+      }),
+    });
+    ["ct-number", "ct-user"].forEach((id) => ($(id).value = ""));
+    await loadWhatsApp();
+    return `${result.number} now reaches ${result.user}. ${result.notes.join("; ")}`;
+  });
+
+  // ------------------------------------------------------ diagnostics
+
+  function renderDiagnostics(report) {
+    $("diagnostics").replaceChildren(
+      rowsTable(
+        ["", "Rows"],
+        report.counts,
+        (row) => [row.label, String(row.count)],
+      ),
+      el(
+        "p",
+        "muted",
+        `${report.database_mb} MB of data, ${report.disk_free_gb} GB free on disk, ` +
+          `${report.backups} backup(s).`,
+      ),
+    );
+    report.nightly.forEach((run) => {
+      const line = el(
+        "p",
+        run.stale ? "msg-fail" : "muted",
+        `${run.kind} reconciliation last ran ${run.last_run.slice(0, 16).replace("T", " ")}`,
+      );
+      $("diagnostics").append(line);
+    });
+    if (!report.nightly.length) {
+      $("diagnostics").append(
+        el("p", "msg-fail", "No reconciliation has ever run — the nightly job is not scheduled."),
+      );
+    }
+
+    const drift = $("ledger-drift");
+    drift.replaceChildren();
+    if (!report.ledger_drift.length) {
+      drift.append(el("p", "muted", "Every running balance agrees with the rows behind it."));
+      return;
+    }
+    report.ledger_drift.forEach((row) => {
+      drift.append(
+        el(
+          "p",
+          "msg-fail",
+          `${row.ledger} running balance says ${Money.format(row.says)}, ` +
+            `should be ${Money.format(row.should_be)}`,
+        ),
+      );
+    });
+  }
+
+  wire("lg-go", "lg-out", async () => {
+    const result = await api("/control/ledger/rebuild", { method: "POST" });
+    await loadSystem();
+    return result.corrected
+      ? `${result.corrected} running balance(s) corrected. ${result.notes.join("; ")}`
+      : "Nothing moved — every running balance already agreed.";
+  });
+
+  /** The only action here with no undo. The backup's own name typed back,
+   *  and a second confirmation naming what is about to be replaced —
+   *  this restores the whole server, not these books. */
+  wire("rs-go", "rs-out", async () => {
+    const name = $("rs-name").value;
+    if (!name) throw new Error("Pick a backup first.");
+    if ($("rs-confirm").value.trim() !== name) {
+      throw new Error(`Type ${name} exactly to confirm. Nothing was changed.`);
+    }
+    if (
+      !window.confirm(
+        `Replace the entire database with ${name}?\n\n` +
+          "Everything entered since that backup was taken — both businesses — is lost. " +
+          "This cannot be undone.",
+      )
+    ) {
+      return "Cancelled. Nothing was changed.";
+    }
+    const done = await api("/control/backups/restore", {
+      method: "POST",
+      body: JSON.stringify({ name, confirm: $("rs-confirm").value.trim() }),
+    });
+    $("rs-confirm").value = "";
+    return `${done.message} Sign out and back in — what is on screen is from before the restore.`;
   });
 
   // ------------------------------------------------------------- boot

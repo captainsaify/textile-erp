@@ -15,6 +15,7 @@ import httpx
 from backend.core.config import get_settings
 from backend.core.lifecycle import on_release
 from backend.core.logging import get_logger
+from backend.services import message_log
 
 logger = get_logger(__name__)
 
@@ -35,10 +36,28 @@ class WhatsAppBridgeSender:
 
     async def send_text(self, to_number: str, body: str) -> bool:
         payload = {"chat_id": to_number, "body": body}
+        tried = 0
+        last_error: str | None = None
+
+        def log(*, ok: bool, status: int | None, detail: str | None = None) -> None:
+            message_log.fire_and_forget(
+                direction="out",
+                transport="bridge",
+                peer=to_number,
+                kind="text",
+                preview=body,
+                ok=ok,
+                http_status=status,
+                error_detail=detail,
+                attempts=tried,
+            )
+
         for attempt, delay in enumerate((*_RETRY_DELAYS_SECONDS, None)):
+            tried = attempt + 1
             try:
                 response = await self._http.post("/send", json=payload)
                 if response.status_code < 300:
+                    log(ok=True, status=response.status_code)
                     return True
                 if response.status_code < 500:
                     logger.error(
@@ -46,14 +65,18 @@ class WhatsAppBridgeSender:
                         status=response.status_code,
                         body=response.text[:500],
                     )
+                    log(ok=False, status=response.status_code, detail=response.text[:500])
                     return False
                 logger.warning("bridge_send_5xx", status=response.status_code, attempt=attempt)
+                last_error = f"bridge returned {response.status_code}"
             except httpx.HTTPError as exc:
                 logger.warning("bridge_send_transport_error", error=str(exc), attempt=attempt)
+                last_error = str(exc)
             if delay is None:
                 break
             await asyncio.sleep(delay)
         logger.error("bridge_send_failed", chat_id=to_number)
+        log(ok=False, status=None, detail=last_error or "gave up after retries")
         return False
 
 
