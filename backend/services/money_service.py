@@ -16,6 +16,7 @@ import uuid
 from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.core.db import joined_transaction
 from backend.core.exceptions import NotFoundError, ValidationError
 from backend.models import Expense, Income, User
 from backend.models.enums import AccountCode, CapitalEntryType, LedgerEntryType
@@ -94,7 +95,7 @@ class MoneyService:
         category = category.strip().lower()
         org_id = actor.org_id
 
-        async with self._session.begin():
+        async with joined_transaction(self._session):
             partner = None
             if paid_by_partner_name:
                 partner = await self._partners.get_by_display_name(org_id, paid_by_partner_name)
@@ -202,7 +203,7 @@ class MoneyService:
         category = category.strip().lower()
         org_id = actor.org_id
 
-        async with self._session.begin():
+        async with joined_transaction(self._session):
             today = await entry_day(self._session, org_id, on)
             existing_categories = await self._income.distinct_categories(org_id)
 
@@ -280,7 +281,7 @@ class MoneyService:
         The row is soft-deleted so it stops counting toward P&L while
         remaining visible in history (CLAUDE.md rule 3).
         """
-        async with self._session.begin():
+        async with joined_transaction(self._session):
             org_id = actor.org_id
             expense = await self._find_expense(org_id, reference)
             today = await business_today(self._session, org_id)

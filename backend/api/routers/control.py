@@ -27,12 +27,18 @@ from backend.core.exceptions import DuplicateSaleError, ExactDuplicateInvoiceErr
 from backend.models import Product, ProductType, PurchaseHeader
 from backend.models.enums import SalePaymentType
 from backend.repositories.purchase_repository import PurchaseRepository
-from backend.services.admin.guard import GuardRegression
+from backend.services.admin.fixline import PurchaseLineFixService
+from backend.services.admin.guard import GuardRegression, guarded
 from backend.services.admin.merge import PartyMergeService
 from backend.services.admin.purge import PurgeService
+from backend.services.admin.stock import StockAdminService
+from backend.services.backup_service import BackupService
+from backend.services.money_service import MoneyService
 from backend.services.purchase_service import Draft, DraftLine, PurchaseService
 from backend.services.reconciliation_service import ReconciliationService
+from backend.services.reversal_service import ReversalService
 from backend.services.sales_service import SaleDraft, SaleDraftLine, SalesService
+from backend.services.settlement_service import PaymentReversalService, SettlementService
 
 ZERO = decimal.Decimal("0")
 
@@ -713,3 +719,367 @@ async def recent_purchases(
             for invoice, date, supplier, total, paid, status_value in rows
         ]
     }
+
+
+# --- money in and out --------------------------------------------------
+
+
+class SettleIn(BaseModel):
+    """Money moving, in either direction.
+
+    `against` names a specific bill; left out, the amount is allocated
+    oldest-first across whatever is open, which is what a payment on
+    account actually does.
+    """
+
+    party: str = Field(min_length=1)
+    amount: decimal.Decimal = Field(gt=0)
+    via: str = Field(default="cash", pattern="^(cash|bank)$")
+    against: str | None = None
+    on: str | None = None
+    note: str | None = None
+
+
+@router.post("/receive", status_code=status.HTTP_201_CREATED)
+async def receive(body: SettleIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    """Money in from a customer."""
+    result = await SettlementService(session).receive_from_customer(
+        user,
+        customer_name=body.party,
+        amount=body.amount,
+        via=body.via,
+        against=body.against,
+        on=body.on,
+        note=body.note,
+        allow_advance=True,
+    )
+    await session.commit()
+    return {
+        "reference": result.reference,
+        "party": result.party_name,
+        "amount": money_str(result.amount),
+        "allocations": [
+            {"reference": a.reference, "applied": money_str(a.applied)} for a in result.allocations
+        ],
+        "advance": money_str(result.advance),
+        "outstanding_after": money_str(result.outstanding_after),
+    }
+
+
+@router.post("/pay", status_code=status.HTTP_201_CREATED)
+async def pay(body: SettleIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    """Money out to a supplier."""
+    result = await SettlementService(session).pay_supplier(
+        user,
+        supplier_name=body.party,
+        amount=body.amount,
+        via=body.via,
+        against=body.against,
+        on=body.on,
+        note=body.note,
+        allow_advance=True,
+    )
+    await session.commit()
+    return {
+        "reference": result.reference,
+        "party": result.party_name,
+        "amount": money_str(result.amount),
+        "allocations": [
+            {"reference": a.reference, "applied": money_str(a.applied)} for a in result.allocations
+        ],
+        "advance": money_str(result.advance),
+        "outstanding_after": money_str(result.outstanding_after),
+    }
+
+
+@router.post("/payments/{reference}/reverse")
+async def reverse_payment(reference: str, user: ControlUser, session: Session) -> dict[str, Any]:
+    """Take a payment back off the bills it settled, and out of the ledger.
+
+    Both halves or neither -- reversing only the ledger would leave
+    bills showing paid that nobody paid, which understates the payable
+    in the direction that loses money quietly.
+    """
+    result = await PaymentReversalService(session).reverse(user, reference=reference)
+    await session.commit()
+    return {
+        "party": result.party_name,
+        "amount": money_str(result.amount),
+        "unapplied": result.unapplied,
+    }
+
+
+class ExpenseIn(BaseModel):
+    category: str = Field(min_length=1, max_length=60)
+    amount: decimal.Decimal = Field(gt=0)
+    via: str = Field(default="cash", pattern="^(cash|bank)$")
+    description: str | None = None
+    on: str | None = None
+
+
+@router.post("/expenses", status_code=status.HTTP_201_CREATED)
+async def record_expense(body: ExpenseIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    result = await MoneyService(session).record_expense(
+        user,
+        category=body.category,
+        amount=body.amount,
+        via=body.via,
+        description=body.description,
+        on=body.on,
+    )
+    await session.commit()
+    return {
+        "category": result.category,
+        "amount": money_str(result.amount),
+        "via": result.via,
+        "balance_after": money_str(result.new_balance),
+        # The service notices a category that looks like one already in
+        # use -- "packing" against "packaging" -- and says so rather than
+        # silently creating a second bucket that splits the reporting.
+        "similar_category": result.similar_category,
+    }
+
+
+# --- correcting what is there -----------------------------------------
+
+
+class FixLineIn(BaseModel):
+    """One line of a confirmed bill.
+
+    Only what a person can sensibly change from a screen. Quantity moves
+    the stock with it and the guard checks the result, so a correction
+    that would strand something below zero is refused rather than saved.
+    """
+
+    invoice_no: str = Field(min_length=1)
+    line_no: int = Field(ge=1)
+    code: str | None = None
+    brand: str | None = None
+    description: str | None = None
+    rate: decimal.Decimal | None = Field(default=None, ge=0)
+
+
+@router.post("/purchases/fix-line")
+async def fix_purchase_line(body: FixLineIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    """Correct an item, its label, its description or its price.
+
+    Re-pointing a line to another product moves its stock movements with
+    it and recosts both sides -- brand lives on the product, so "this
+    bill's LALA was labelled MKD" is a different product, not an edit to
+    a field.
+    """
+    result = await PurchaseLineFixService(session).fix(
+        user.org_id,
+        user,
+        invoice_no=body.invoice_no,
+        line_no=body.line_no,
+        code=body.code,
+        brand=body.brand,
+        description=body.description,
+        rate=body.rate,
+    )
+    await session.commit()
+    return result
+
+
+# --- stock -------------------------------------------------------------
+
+
+class StockAdjustIn(BaseModel):
+    code: str = Field(min_length=1)
+    brand: str | None = None
+    qty_delta: decimal.Decimal
+    reason: str = Field(pattern="^(damaged|adjust-up|adjust-down)$")
+    note: str | None = None
+
+
+@router.post("/stock/adjust")
+async def stock_adjust(body: StockAdjustIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    """Move stock with no purchase or sale behind it.
+
+    Always a typed movement, never an edit of the balance: the balance
+    is derived from movements, and writing it directly makes the two
+    disagree at the next reconciliation.
+    """
+    result = await StockAdminService(session).adjust(
+        user.org_id,
+        user,
+        code=body.code,
+        brand=body.brand,
+        qty_delta=body.qty_delta,
+        reason=body.reason,
+        note=body.note,
+    )
+    await session.commit()
+    return result
+
+
+@router.post("/stock/recost")
+async def stock_recost(user: ControlUser, session: Session) -> dict[str, Any]:
+    """Rebuild every weighted average from movement history."""
+    result = await StockAdminService(session).recost_all(user.org_id)
+    await session.commit()
+    return result
+
+
+# --- reversals ---------------------------------------------------------
+
+
+@router.get("/reversals")
+async def list_reversals(user: ControlUser, session: Session) -> dict[str, Any]:
+    """Operations that can still be put back."""
+    manifests = await ReversalService(session).open_manifests(user.org_id)
+    return {
+        "items": [
+            {
+                "id": str(m.id)[:8],
+                "when": m.created_at.isoformat(),
+                "operation": m.operation,
+                "subject": m.subject,
+                "rows": len(m.payload.get("moved", [])),
+            }
+            for m in manifests
+        ]
+    }
+
+
+@router.post("/reversals/{reference}/preview")
+async def reversal_preview(reference: str, user: ControlUser, session: Session) -> dict[str, Any]:
+    """Row by row, whether putting this back is honest."""
+    service = ReversalService(session)
+    manifest = await service.get(user.org_id, reference)
+    plan = await service.plan(manifest)
+    return {
+        "subject": manifest.subject,
+        "operation": manifest.operation,
+        "ok": plan.ok,
+        "rows": [
+            {"table": r.table, "id": str(r.row_id)[:8], "state": r.state, "detail": r.detail}
+            for r in plan.rows
+        ],
+        "blocked": [f"{r.table} {str(r.row_id)[:8]}: {r.detail}" for r in plan.blocked],
+    }
+
+
+@router.post("/reversals/{reference}")
+async def reversal_apply(reference: str, user: ControlUser, session: Session) -> dict[str, Any]:
+    service = ReversalService(session)
+    manifest = await service.get(user.org_id, reference)
+    plan = await service.plan(manifest)
+    if not plan.ok:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "blocked — nothing was changed",
+                "problems": [f"{r.table} {str(r.row_id)[:8]}: {r.detail}" for r in plan.blocked],
+            },
+        )
+    async with guarded(session, user.org_id) as report:
+        moved = await service.apply(plan, user)
+        report.note(f"{moved} row(s) put back")
+    await session.commit()
+    return {"subject": manifest.subject, "moved": moved, "notes": report.notes}
+
+
+# --- system ------------------------------------------------------------
+
+
+@router.get("/audit")
+async def audit_trail(
+    user: ControlUser,
+    session: Session,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> dict[str, Any]:
+    """What has happened, most recent first, with who and how."""
+    from backend.models import AuditLog
+    from backend.models import User as UserModel
+
+    rows = (
+        await session.execute(
+            select(
+                AuditLog.created_at,
+                AuditLog.action,
+                AuditLog.channel,
+                AuditLog.entity_type,
+                UserModel.full_name,
+            )
+            .join(UserModel, UserModel.id == AuditLog.actor_user_id, isouter=True)
+            .where(AuditLog.org_id == user.org_id)
+            .order_by(AuditLog.created_at.desc())
+            .limit(limit)
+        )
+    ).all()
+    return {
+        "items": [
+            {
+                "when": when.isoformat(),
+                "action": action,
+                "channel": channel,
+                "entity": entity,
+                "who": who or "—",
+            }
+            for when, action, channel, entity, who in rows
+        ]
+    }
+
+
+@router.get("/backups")
+async def list_backups(user: ControlUser, session: Session) -> dict[str, Any]:
+    from pathlib import Path
+
+    records = BackupService(session).list_backups()
+    return {
+        "items": [
+            {
+                "name": Path(r.file_path).name,
+                "taken": r.created_at.isoformat(),
+                "size_kb": round(r.size_bytes / 1024),
+            }
+            for r in records
+        ]
+    }
+
+
+@router.post("/backups", status_code=status.HTTP_201_CREATED)
+async def make_backup(user: ControlUser, session: Session) -> dict[str, Any]:
+    from pathlib import Path
+
+    record = await BackupService(session).create_backup(user.org_id)
+    return {"name": Path(record.file_path).name, "size_kb": round(record.size_bytes / 1024)}
+
+
+class NewPartyIn(BaseModel):
+    kind: str = Field(pattern="^(supplier|customer)$")
+    name: str = Field(min_length=2, max_length=120)
+
+
+@router.post("/parties", status_code=status.HTTP_201_CREATED)
+async def create_party(body: NewPartyIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    """Add a supplier or customer without leaving the bill.
+
+    A new party is the ordinary case for a growing business, and being
+    forced to choose from a list means either abandoning a half-typed
+    bill or -- worse -- picking the nearest existing name, which is
+    exactly how three sales ended up under the wrong customer.
+
+    An existing name is returned rather than refused: someone typing a
+    name that is already there means to use it, and a duplicate party is
+    the thing merges exist to clean up afterwards.
+    """
+    name = " ".join(body.name.split())
+    if body.kind == "supplier":
+        service = PurchaseService(session)
+        found = await service.resolve_supplier(user.org_id, name)
+        if found is not None:
+            return {"id": str(found.id), "name": found.name, "created": False}
+        supplier = await service.create_supplier(user, name)
+        await session.commit()
+        return {"id": str(supplier.id), "name": supplier.name, "created": True}
+
+    sales = SalesService(session)
+    match = await sales.resolve_customer(user.org_id, name)
+    if match.exact is not None:
+        return {"id": str(match.exact.id), "name": match.exact.name, "created": False}
+    customer = await sales.create_customer(user, name)
+    await session.commit()
+    return {"id": str(customer.id), "name": customer.name, "created": True}

@@ -833,10 +833,20 @@
           kind === "sale" ? "customer" : "supplier"
         }`,
       );
+      // A new party is the ordinary case for a growing business. Being
+      // forced to pick from a list means either abandoning a half-typed
+      // bill or taking the nearest existing name -- which is exactly how
+      // three sales ended up under the wrong customer. Offered last and
+      // never highlighted, so Enter on a near-match cannot create one.
+      found.items.push({ __create: true, name: query.trim() });
       return found.items;
     },
     render: (item) => {
       const node = el("div");
+      if (item.__create) {
+        node.append(el("span", "desc", `+ Add “${item.name}” as a new party…`));
+        return node;
+      }
       node.append(
         el("span", "code", item.name),
         el("span", "stock", `${Money.format(item.outstanding)} open`),
@@ -844,7 +854,28 @@
       return node;
     },
     onClear: () => ($("party-note").textContent = ""),
-    onPick: (item) => {
+    onPick: async (item) => {
+      if (item.__create) {
+        const label = kind === "sale" ? "customer" : "supplier";
+        if (!window.confirm(`Add “${item.name}” as a new ${label}?`)) {
+          $("party").value = "";
+          return;
+        }
+        try {
+          const made = await api("/control/parties", {
+            method: "POST",
+            body: JSON.stringify({ kind: label, name: item.name }),
+          });
+          $("party").value = made.name;
+          $("party-note").textContent = made.created
+            ? `new ${label} added`
+            : `${made.name} already existed — using it`;
+          return;
+        } catch (exc) {
+          banner(exc.message);
+          return;
+        }
+      }
       $("party").value = item.name;
       $("party-note").textContent = `${Money.format(item.outstanding)} outstanding`;
     },
