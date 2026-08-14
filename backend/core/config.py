@@ -26,6 +26,16 @@ class Settings(BaseSettings):
     jwt_signing_key: str
     jwt_access_token_expire_minutes: int = 15
     jwt_refresh_token_expire_days: int = 7
+    #: Master Control idles out in half an hour, against the dashboard's
+    #: seven days. A tab left open on a page that can purge a bill is a
+    #: different risk from one left open on a chart.
+    control_session_expire_minutes: int = 30
+    #: Wrong control passwords before the account is locked out for an
+    #: hour. nginx already rate-limits the endpoint per IP; this is the
+    #: per-account half, which an attacker cannot dodge by changing
+    #: address.
+    control_lockout_attempts: int = 5
+    control_lockout_minutes: int = 60
 
     whatsapp_app_secret: str = ""
     whatsapp_access_token: str = ""

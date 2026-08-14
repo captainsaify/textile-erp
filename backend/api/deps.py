@@ -21,7 +21,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.db import get_session_factory
-from backend.core.security import ACCESS_TOKEN_TYPE, TokenError, decode_token
+from backend.core.security import ACCESS_TOKEN_TYPE, CONTROL_TOKEN_TYPE, TokenError, decode_token
 from backend.models import User
 from backend.models.enums import UserRole
 from backend.services.auth_service import AuthError, AuthService
@@ -74,6 +74,46 @@ async def owner_only(user: CurrentUser) -> User:
 
 
 OwnerUser = Annotated[User, Depends(owner_only)]
+
+
+async def control_user(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    session: Annotated[AsyncSession, Depends(db_session)],
+) -> User:
+    """Master Control, and nothing else, reaches this.
+
+    A separate token *type*, not a claim on the ordinary access token.
+    That is the whole point: a dashboard session cannot be mistaken for
+    a control session by a dependency that forgets to check one field,
+    because the token will not decode as the type at all.
+
+    Owner-only is enforced here as well as at login (plan.md §11.1) --
+    a role can change after a token is minted, and the token outlives
+    the change by up to half an hour.
+    """
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Master Control needs its own sign-in",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    try:
+        claims = decode_token(credentials.credentials, expected_type=CONTROL_TOKEN_TYPE)
+        user = await AuthService(session).user_for_claims(claims)
+    except (TokenError, AuthError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(exc),
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from None
+    if user.role is not UserRole.OWNER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="this needs an owner account"
+        )
+    return user
+
+
+ControlUser = Annotated[User, Depends(control_user)]
 
 
 @dataclasses.dataclass(frozen=True)

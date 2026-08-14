@@ -79,6 +79,10 @@ _ARGON2 = argon2.PasswordHasher()
 
 ACCESS_TOKEN_TYPE = "access"
 REFRESH_TOKEN_TYPE = "refresh"
+#: Master Control. A separate type, not a claim on the access token, so
+#: a dashboard session can never be mistaken for a control session by a
+#: dependency that forgets to check one field.
+CONTROL_TOKEN_TYPE = "control"
 
 
 def hash_password(plain: str) -> str:

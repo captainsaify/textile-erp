@@ -16,6 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.core.db import dispose_engine, get_session_factory
+from backend.core.security import hash_password
 from backend.models import Organization, User
 from backend.models.enums import UserRole
 
@@ -373,8 +374,75 @@ def ocr_compare(
             typer.secho(f"  note: {sheet.unreadable_note}", fg=typer.colors.YELLOW)
 
 
-# Must stay last: typer registers commands as the module executes, so an
-# entrypoint placed above a @cli.command() runs before that command
-# exists. `set-password` was unreachable this way.
+@cli.command("set-control-password")
+def set_control_password(
+    email: Annotated[str, typer.Option("--email", help="The owner's login email")],
+    password: Annotated[
+        str,
+        typer.Option(
+            prompt=True,
+            confirmation_prompt=True,
+            hide_input=True,
+            help="Master Control password. Generate one; do not choose one.",
+        ),
+    ],
+) -> None:
+    """Give an owner access to Master Control.
+
+    Until this is run for somebody, Master Control cannot be signed into
+    at all -- the column is NULL for everyone and the login refuses. The
+    danger surface does not exist until it is deliberately created, which
+    is why this lives on the box behind SSH rather than in a settings
+    page.
+
+    Use a generated password of at least 16 characters and keep it in a
+    password manager. It is deliberately not the dashboard's.
+    """
+
+    async def _run() -> str:
+        factory = get_session_factory()
+        async with factory() as session, session.begin():
+            user = (
+                (
+                    await session.execute(
+                        select(User).where(
+                            func.lower(User.email) == email.strip().lower(),
+                            User.deleted_at.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if user is None:
+                raise ValueError(f"no user with email {email!r}")
+            if user.role is not UserRole.OWNER:
+                raise ValueError(
+                    f"{user.full_name} is {user.role.value}, and Master Control is owner-only"
+                )
+            user.control_password_hash = hash_password(password)
+            return user.full_name
+
+    if len(password) < 16:
+        typer.secho(
+            "  ! shorter than 16 characters. This password guards hard delete and "
+            "restore; length is the only thing making it hard to guess.",
+            fg=typer.colors.YELLOW,
+        )
+    try:
+        name = asyncio.run(_run())
+    except ValueError as exc:
+        typer.secho(f"ERROR: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from None
+    typer.secho(f"Master Control enabled for {name}.", fg=typer.colors.GREEN)
+
+
+# Must stay last, and this is the second time. Typer registers a command
+# when its decorator runs, which is at import -- so anything defined
+# below a module-level `cli()` call is defined after the app has already
+# dispatched, and silently does not exist. `set-password` was
+# unreachable this way once; `set-control-password` was invisible in
+# --help today, appended under an entrypoint that carried a comment
+# warning about precisely this.
 if __name__ == "__main__":
     cli()

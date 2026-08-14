@@ -29,6 +29,15 @@ class TokenResponse(BaseModel):
     full_name: str
 
 
+class ControlTokenResponse(BaseModel):
+    """One token, no refresh. A refresh token exists so a dashboard can
+    stay open for a week; Master Control should not have that property."""
+
+    token: str
+    expires_in: int
+    full_name: str
+
+
 @router.post("/login", response_model=TokenResponse)
 async def login(body: LoginRequest, session: Session) -> TokenResponse:
     pair = await AuthService(session).login(body.email, body.password)
@@ -56,6 +65,20 @@ class MeResponse(BaseModel):
     email: str | None
     role: str
     org_id: str
+
+
+@router.post("/control/login", response_model=ControlTokenResponse)
+async def control_login(body: LoginRequest, session: Session) -> ControlTokenResponse:
+    """Sign in to Master Control with its own password.
+
+    Separate from `/login` in every respect that matters: a different
+    credential, a 30-minute session rather than seven days, no refresh
+    token, and a per-account lockout on top of nginx's per-IP limit.
+    """
+    result = await AuthService(session).control_login(body.email, body.password)
+    return ControlTokenResponse(
+        token=result.token, expires_in=result.expires_in, full_name=result.full_name
+    )
 
 
 @router.get("/me", response_model=MeResponse)

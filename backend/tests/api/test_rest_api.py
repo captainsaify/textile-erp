@@ -1147,3 +1147,91 @@ async def test_quantities_are_not_rendered_in_scientific_notation(
     row = next(r for r in body["best_by_profit"] if r["code"] == "EEE")
     assert row["qty"] == "2480", f"rendered as {row['qty']!r}"
     assert "E" not in row["qty"].upper()
+
+
+# --------------------------------------------------------------------
+# master control authentication
+# --------------------------------------------------------------------
+
+
+async def _set_control_password(
+    session_factory: async_sessionmaker[AsyncSession], user: User, password: str
+) -> None:
+    async with session_factory() as session, session.begin():
+        row = await session.get(User, user.id)
+        assert row is not None
+        row.control_password_hash = hash_password(password)
+
+
+async def test_master_control_cannot_be_signed_into_until_a_password_is_set(
+    client: AsyncClient, owner: User
+) -> None:
+    """The danger surface does not exist by default.
+
+    `control_password_hash` is NULL for everyone after the migration, so
+    a fresh deployment has no way into Master Control at all -- not a
+    weak way, none. It appears when someone deliberately runs
+    `set-control-password` on the box.
+    """
+    response = await client.post(
+        "/api/v1/auth/control/login", json={"email": owner.email, "password": PASSWORD}
+    )
+    assert response.status_code == 401
+
+
+async def test_a_dashboard_token_is_not_a_control_token(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The property the whole design rests on.
+
+    Master Control uses a separate token *type*, not a claim on the
+    ordinary access token. So a dashboard session cannot be mistaken for
+    a control session by a dependency that forgets to check a field --
+    the token does not decode as the type at all.
+    """
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    dashboard = await _token(client, owner)
+
+    response = await client.get("/api/v1/control/whoami", headers=_auth(dashboard))
+    assert response.status_code == 401, "a dashboard token reached Master Control"
+
+
+async def test_a_control_token_signs_in_and_identifies_itself(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    signin = await client.post(
+        "/api/v1/auth/control/login",
+        json={"email": owner.email, "password": "a-long-generated-secret"},
+    )
+    assert signin.status_code == 200, signin.text
+    body = signin.json()
+    assert "refresh_token" not in body, "control sessions must not be refreshable"
+    assert body["expires_in"] <= 30 * 60
+
+    me = await client.get("/api/v1/control/whoami", headers=_auth(body["token"]))
+    assert me.status_code == 200
+    assert me.json()["full_name"] == owner.full_name
+
+
+async def test_the_control_password_is_not_the_dashboard_password(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    response = await client.post(
+        "/api/v1/auth/control/login", json={"email": owner.email, "password": PASSWORD}
+    )
+    assert response.status_code == 401, "the dashboard password opened Master Control"
+
+
+async def test_staff_cannot_reach_master_control_even_with_a_password(
+    client: AsyncClient, staff: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Owner-only (plan.md §11.1), refused at the door rather than
+    minting a token that is turned away later."""
+    await _set_control_password(session_factory, staff, "a-long-generated-secret")
+    response = await client.post(
+        "/api/v1/auth/control/login",
+        json={"email": staff.email, "password": "a-long-generated-secret"},
+    )
+    assert response.status_code == 401

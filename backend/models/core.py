@@ -55,6 +55,12 @@ class User(UUIDPkMixin, OrgScopedMixin, Base):
     whatsapp_number: Mapped[str | None] = mapped_column(String)
     email: Mapped[str | None] = mapped_column(CITEXT)
     password_hash: Mapped[str | None] = mapped_column(String)
+    #: Master Control, which is a different proposition from the
+    #: dashboard: one shows charts, the other can merge two customers
+    #: and purge a bill (plan.md §4). NULL for everyone until someone
+    #: deliberately runs `set-control-password`, so the danger surface
+    #: does not exist by default.
+    control_password_hash: Mapped[str | None] = mapped_column(String)
     role: Mapped[UserRole] = mapped_column(
         user_role_enum, nullable=False, server_default=UserRole.STAFF.value
     )

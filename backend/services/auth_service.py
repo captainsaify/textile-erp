@@ -20,6 +20,7 @@ from backend.core.logging import get_logger
 from backend.core.redis import get_redis
 from backend.core.security import (
     ACCESS_TOKEN_TYPE,
+    CONTROL_TOKEN_TYPE,
     REFRESH_TOKEN_TYPE,
     TokenClaims,
     TokenError,
@@ -28,10 +29,27 @@ from backend.core.security import (
     verify_password,
 )
 from backend.models import User
+from backend.models.enums import UserRole
 
 logger = get_logger(__name__)
 
 _REVOKED_PREFIX = "auth:revoked:"
+_CONTROL_FAILS_PREFIX = "auth:control:fails:"
+
+
+@dataclasses.dataclass(frozen=True)
+class ControlToken:
+    """A Master Control session. One token, no refresh.
+
+    Deliberately not a TokenPair: a refresh token exists so a dashboard
+    can stay open for a week without re-authenticating, which is exactly
+    the property Master Control should not have. When it idles out, you
+    type the password again.
+    """
+
+    token: str
+    expires_in: int
+    full_name: str
 
 
 class AuthError(Exception):
@@ -74,6 +92,74 @@ class AuthService:
             ),
             expires_in=int(access_ttl.total_seconds()),
             role=user.role.value,
+            full_name=user.full_name,
+        )
+
+    async def control_login(self, email: str, password: str) -> ControlToken:
+        """Sign in to Master Control, which is a separate credential.
+
+        nginx already rate-limits this endpoint per IP. This is the
+        per-account half: an attacker with a pool of addresses cannot
+        dodge a lockout that counts against the account rather than the
+        source. Failures are counted in Redis, and a lockout is reported
+        as a lockout -- hiding it would have someone typing a correct
+        password repeatedly and being told it is wrong.
+        """
+        from backend.core.redis import get_redis
+
+        address = email.strip().lower()
+        redis = get_redis()
+        key = f"{_CONTROL_FAILS_PREFIX}{address}"
+        failures = int(await redis.get(key) or 0)
+        if failures >= self._settings.control_lockout_attempts:
+            ttl = await redis.ttl(key)
+            minutes = max(1, (ttl + 59) // 60) if ttl and ttl > 0 else 1
+            logger.warning("control_login_locked", email=address)
+            raise AuthError(
+                f"Too many wrong passwords. Master Control is locked for {minutes} more "
+                "minute(s). The dashboard is unaffected."
+            )
+
+        user = (
+            (
+                await self._session.execute(
+                    select(User).where(
+                        func.lower(User.email) == address,
+                        User.deleted_at.is_(None),
+                        User.is_active.is_(True),
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        # Same constant-time shape as `login`: a missing user still pays
+        # for an argon2 verify, so timing does not reveal the account.
+        stored = user.control_password_hash if user else None
+        if not verify_password(password, stored) or user is None:
+            await redis.incr(key)
+            await redis.expire(key, self._settings.control_lockout_minutes * 60)
+            logger.warning("control_login_failed", email=address)
+            raise AuthError("Email or Master Control password is incorrect.")
+        if user.role is not UserRole.OWNER:
+            # Only the owner, by design (plan.md §11.1). Checked here as
+            # well as in the dependency: a token that should never have
+            # been minted is better than one merely refused later.
+            logger.warning("control_login_not_owner", user_id=str(user.id))
+            raise AuthError("Email or Master Control password is incorrect.")
+
+        await redis.delete(key)
+        logger.info("control_login_succeeded", user_id=str(user.id))
+        ttl = datetime.timedelta(minutes=self._settings.control_session_expire_minutes)
+        return ControlToken(
+            token=create_token(
+                user_id=user.id,
+                org_id=user.org_id,
+                role=user.role,
+                token_type=CONTROL_TOKEN_TYPE,
+                expires_in=ttl,
+            ),
+            expires_in=int(ttl.total_seconds()),
             full_name=user.full_name,
         )
 
