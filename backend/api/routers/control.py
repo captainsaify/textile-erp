@@ -24,11 +24,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.api.amounts import money_str, qty_display
 from backend.api.deps import ControlUser, Session
 from backend.core.exceptions import DuplicateSaleError, ExactDuplicateInvoiceError
-from backend.models import Product
+from backend.models import Product, ProductType, PurchaseHeader
 from backend.models.enums import SalePaymentType
 from backend.repositories.purchase_repository import PurchaseRepository
 from backend.services.admin.guard import GuardRegression
 from backend.services.admin.merge import PartyMergeService
+from backend.services.admin.purge import PurgeService
 from backend.services.purchase_service import Draft, DraftLine, PurchaseService
 from backend.services.reconciliation_service import ReconciliationService
 from backend.services.sales_service import SaleDraft, SaleDraftLine, SalesService
@@ -508,3 +509,207 @@ async def merge_apply(body: MergeIn, user: ControlUser, session: Session) -> dic
         ) from None
     await session.commit()
     return result
+
+
+class NewItemIn(BaseModel):
+    """A product created from inside the entry form.
+
+    The CLI refuses to create products mid-bill; a form does not, and
+    the difference is that a person is looking at the screen. But it
+    remains the easiest way to turn a typo into a second product quietly
+    holding half the stock, so description and brand are required rather
+    than optional: a product with a blank description is one nobody can
+    identify in a stock list three weeks later.
+    """
+
+    code: str = Field(min_length=1, max_length=40)
+    brand: str = Field(min_length=1, max_length=60)
+    description: str = Field(min_length=2, max_length=200)
+
+
+@router.post("/items", status_code=status.HTTP_201_CREATED)
+async def create_item(body: NewItemIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    """Create a product, and its brand if that is new too.
+
+    A code is unique *per brand*, so `55X` under a new label is a new
+    product rather than a clash -- which is exactly the case this exists
+    for, and the one the picker could not previously express.
+    """
+    from backend.models import Product
+
+    service = PurchaseService(session)
+    code = " ".join(body.code.split()).upper()
+    brand = await service.resolve_or_create_brand(user.org_id, body.brand)
+
+    existing = (
+        (
+            await session.execute(
+                select(Product).where(
+                    Product.org_id == user.org_id,
+                    func.upper(Product.code) == code,
+                    Product.brand_id == brand.id,
+                    Product.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if existing is not None:
+        # Not an error: someone typed a code that already exists under
+        # that label. Hand back what is there rather than refusing a
+        # form they will only fill in again.
+        return {
+            "product_id": str(existing.id),
+            "code": existing.code,
+            "brand": brand.name,
+            "description": existing.description,
+            "on_hand": "0",
+            "created": False,
+        }
+
+    product_type = (
+        (await session.execute(select(ProductType).where(ProductType.org_id == user.org_id)))
+        .scalars()
+        .first()
+    )
+    if product_type is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="no product type configured",
+        )
+
+    product = Product(
+        org_id=user.org_id,
+        product_type_id=product_type.id,
+        code=code,
+        description=body.description.strip(),
+        unit_id=product_type.default_unit_id,
+        brand_id=brand.id,
+        created_by=user.id,
+    )
+    session.add(product)
+    await session.flush()
+    await session.commit()
+    return {
+        "product_id": str(product.id),
+        "code": product.code,
+        "brand": brand.name,
+        "description": product.description,
+        "on_hand": "0",
+        "created": True,
+    }
+
+
+@router.get("/brands")
+async def list_brands(user: ControlUser, session: Session) -> dict[str, Any]:
+    """Every label, for the create-item form's dropdown."""
+    from backend.models import Brand
+
+    rows = list(
+        (
+            await session.execute(
+                select(Brand.name)
+                .where(Brand.org_id == user.org_id, Brand.deleted_at.is_(None))
+                .order_by(Brand.name)
+            )
+        ).scalars()
+    )
+    return {"items": rows}
+
+
+class PurgeIn(BaseModel):
+    kind: str = Field(default="purchase", pattern="^(purchase|sale)$")
+    reference: str = Field(min_length=1)
+    confirm: str | None = None
+
+
+@router.post("/purge/preview")
+async def purge_preview(body: PurgeIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    """What removing this would do, computed by doing it and discarding."""
+    service = PurgeService(session)
+    plan = await service.plan(user.org_id, kind=body.kind, reference=body.reference)
+    if not plan.ok:
+        return plan.as_dict()
+    try:
+        return await service.apply(user.org_id, user, plan, dry_run=True)
+    except GuardRegression as exc:
+        return {**plan.as_dict(), "ok": False, "blockers": exc.problems, "dry_run": True}
+
+
+@router.post("/purge")
+async def purge_apply(body: PurgeIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    """Take it out of the books. Reversible with /purge/restore."""
+    service = PurgeService(session)
+    plan = await service.plan(user.org_id, kind=body.kind, reference=body.reference)
+    if (body.confirm or "").strip() != plan.label:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"type {plan.label!r} to confirm; nothing was changed",
+        )
+    try:
+        result = await service.apply(user.org_id, user, plan)
+    except GuardRegression as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "rolled back — the books would not have balanced",
+                "problems": exc.problems,
+            },
+        ) from None
+    await session.commit()
+    return result
+
+
+@router.post("/purge/restore")
+async def purge_restore(body: PurgeIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    """Bring a purged record back, stock and all."""
+    result = await PurgeService(session).restore(user.org_id, user, body.reference)
+    await session.commit()
+    return result
+
+
+@router.get("/purchases/recent")
+async def recent_purchases(
+    user: ControlUser,
+    session: Session,
+    limit: Annotated[int, Query(ge=1, le=50)] = 15,
+) -> dict[str, Any]:
+    """The last few bills, so removing one starts from a list rather
+    than from remembering an invoice number."""
+    from backend.models import Supplier
+
+    rows = (
+        await session.execute(
+            select(
+                PurchaseHeader.invoice_no,
+                PurchaseHeader.invoice_date,
+                Supplier.name,
+                PurchaseHeader.grand_total,
+                PurchaseHeader.amount_paid,
+                PurchaseHeader.status,
+            )
+            .join(Supplier, Supplier.id == PurchaseHeader.supplier_id)
+            .where(
+                PurchaseHeader.org_id == user.org_id,
+                PurchaseHeader.deleted_at.is_(None),
+            )
+            .order_by(PurchaseHeader.created_at.desc())
+            .limit(limit)
+        )
+    ).all()
+    return {
+        "items": [
+            {
+                "invoice_no": invoice,
+                "date": date.isoformat(),
+                "supplier": supplier,
+                "grand_total": money_str(total),
+                "amount_paid": money_str(paid),
+                "status": status_value.value
+                if hasattr(status_value, "value")
+                else str(status_value),
+            }
+            for invoice, date, supplier, total, paid, status_value in rows
+        ]
+    }

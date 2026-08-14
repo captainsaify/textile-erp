@@ -656,3 +656,21 @@ tr.detail-row > td {
   font-size: 0.86rem;
   z-index: 20;
 }
+
+
+/* Master Control, from the dashboard's header. Deliberately quiet: it
+ * is a door to the half of the app that can change things, and a
+ * prominent button beside "Sign out" is one a thumb finds by accident.
+ */
+.control-link {
+  color: var(--ink-muted);
+  text-decoration: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.25rem 0.6rem;
+  font-size: 0.85rem;
+}
+.control-link:hover {
+  color: var(--ink);
+  border-color: var(--ink-muted);
+}

@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="robots" content="noindex, nofollow" />
     <title>Master Control</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=13" />
-    <link rel="stylesheet" href="/assets/control.css?v=1" />
+    <link rel="stylesheet" href="/assets/styles.css?v=14" />
+    <link rel="stylesheet" href="/assets/control.css?v=2" />
   </head>
   <body>
     <!-- A separate document from the dashboard, not a route inside it.
@@ -36,6 +36,7 @@
         <nav id="nav">
           <button data-page="purchase" class="active">New purchase</button>
           <button data-page="sale">New sale</button>
+          <button data-page="records">Records</button>
         </nav>
         <div class="topbar-end">
           <span id="books-health" class="muted"></span>
@@ -52,6 +53,20 @@
       </div>
 
       <main>
+        <!-- Removing a bill starts from a list, not from remembering an
+             invoice number. Preview first, then the number typed back:
+             a checkbox is clicked before it is read, and this is the
+             action that takes a bill out of the books. -->
+        <section id="page-records" hidden>
+          <h2>Recent purchases</h2>
+          <p class="muted">
+            Removing a bill takes it out of every report and total, reverses its
+            stock, and can be undone.
+          </p>
+          <div id="recent"></div>
+          <div id="purge-preview" class="card" hidden></div>
+        </section>
+
         <!-- Purchase and sale share one form. The only differences are
              the party label, the invoice fields, and whether money can
              be taken at the counter -- so they are one template with
@@ -139,7 +154,7 @@
       </main>
     </div>
 
-    <script src="/assets/money.js?v=13"></script>
-    <script src="/assets/control.js?v=1"></script>
+    <script src="/assets/money.js?v=14"></script>
+    <script src="/assets/control.js?v=2"></script>
   </body>
 </html>

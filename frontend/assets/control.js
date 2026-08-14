@@ -42,7 +42,11 @@
         ...(options.headers || {}),
       },
     });
-    if (response.status === 401) {
+    // A 401 means "expired" only if we had a session to expire. The
+    // sign-in request goes through here too, and reporting a wrong
+    // password as an expired session sends someone to the screen they
+    // are already on, with the wrong reason.
+    if (response.status === 401 && token) {
       token = null;
       $("app").hidden = true;
       $("signin").hidden = false;
@@ -141,6 +145,52 @@
     input.addEventListener("blur", () => setTimeout(close, 120));
   }
 
+  // -------------------------------------------------- creating items
+
+  /** A real form, not one click.
+   *
+   *  A product with a blank description is one nobody can identify in a
+   *  stock list three weeks later, and a code without a label is not a
+   *  product here at all -- three share `55X`. So both are required, and
+   *  the brand offers the existing ones while still accepting a new
+   *  name, because "existing code under a new label" is the case this
+   *  was built for.
+   */
+  async function createItem(code) {
+    const known = await api("/control/brands").catch(() => ({ items: [] }));
+    const brand = window.prompt(
+      `New item ${code}\n\nLabel (brand)?` +
+        (known.items.length ? `\nExisting: ${known.items.join(", ")}` : ""),
+      "",
+    );
+    if (!brand || !brand.trim()) return null;
+    const description = window.prompt(`Description for ${code} · ${brand.trim()}?`, "");
+    if (!description || description.trim().length < 2) {
+      banner("An item needs a description — otherwise nobody can identify it later.");
+      return null;
+    }
+    try {
+      const made = await api("/control/items", {
+        method: "POST",
+        body: JSON.stringify({
+          code,
+          brand: brand.trim(),
+          description: description.trim(),
+        }),
+      });
+      banner(
+        made.created
+          ? `Created ${made.code} · ${made.brand}.`
+          : `${made.code} already existed under ${made.brand} — using it.`,
+        true,
+      );
+      return made;
+    } catch (exc) {
+      banner(exc.message);
+      return null;
+    }
+  }
+
   // ------------------------------------------------------------- rows
 
   let rows = [];
@@ -200,10 +250,21 @@
           const found = await api(
             `/control/items?q=${encodeURIComponent(query)}&kind=${kind}`,
           );
+          // Near-matches first, creation last and never highlighted, so
+          // Enter on a typo cannot bring a product into existence.
+          // Offered on a purchase only: inventing an item to sell that
+          // was never bought is how stock goes negative on paper.
+          if (kind === "purchase") {
+            found.items.push({ __create: true, code: query.trim() });
+          }
           return found.items;
         },
         render: (item) => {
           const node = el("div");
+          if (item.__create) {
+            node.append(el("span", "desc", `+ Create “${item.code}” as a new item…`));
+            return node;
+          }
           node.append(
             el("span", "code", item.code),
             el("span", "brand", item.brand || "—"),
@@ -216,7 +277,15 @@
           row.product_id = null;
           row.note = "";
         },
-        onPick: (item) => {
+        onPick: async (item) => {
+          if (item.__create) {
+            const made = await createItem(item.code);
+            if (!made) {
+              input.value = "";
+              return;
+            }
+            item = made;
+          }
           row.product_id = item.product_id;
           row.code = item.code;
           row.brand = item.brand;
@@ -224,9 +293,10 @@
           // The rate is a suggestion, not an answer — filled only when
           // the row is empty so it can never overwrite a typed price.
           if (!row.rate && item.last_rate) row.rate = item.last_rate;
-          row.note =
-            kind === "sale" && Number(item.on_hand) <= 0
-              ? `nothing on hand — this will go negative`
+          row.note = item.created
+            ? "new item — check the code and label before saving"
+            : kind === "sale" && Number(item.on_hand) <= 0
+              ? "nothing on hand — this will go negative"
               : "";
           renderRows();
           focusCell(index, "pieces");
@@ -469,6 +539,17 @@
   // ------------------------------------------------------------- mode
 
   function setKind(next) {
+    if (next === "records") {
+      document.querySelectorAll("#nav button").forEach((button) => {
+        button.classList.toggle("active", button.dataset.page === "records");
+      });
+      $("entry").hidden = true;
+      $("page-records").hidden = false;
+      loadRecords().catch((exc) => banner(exc.message));
+      return;
+    }
+    $("entry").hidden = false;
+    $("page-records").hidden = true;
     kind = next;
     document.querySelectorAll("#nav button").forEach((button) => {
       button.classList.toggle("active", button.dataset.page === kind);
@@ -567,6 +648,113 @@
       banner(exc.message);
     } finally {
       $("save").disabled = false;
+    }
+  }
+
+  // ---------------------------------------------------------- records
+
+  async function loadRecords() {
+    const data = await api("/control/purchases/recent");
+    const host = $("recent");
+    host.replaceChildren();
+    if (!data.items.length) {
+      host.append(el("p", "muted", "No purchases yet."));
+      return;
+    }
+    const table = el("table", "grid");
+    const head = table.createTHead().insertRow();
+    ["Invoice", "Date", "Supplier", "Total", "Paid", ""].forEach((label) => {
+      const th = document.createElement("th");
+      th.textContent = label;
+      head.append(th);
+    });
+    const body = table.createTBody();
+    data.items.forEach((item) => {
+      const tr = body.insertRow();
+      tr.insertCell().textContent = item.invoice_no;
+      tr.insertCell().textContent = item.date;
+      tr.insertCell().textContent = item.supplier;
+      const total = tr.insertCell();
+      total.className = "num";
+      total.textContent = Money.format(item.grand_total);
+      const paid = tr.insertCell();
+      paid.className = "num";
+      paid.textContent = Money.format(item.amount_paid);
+      const action = tr.insertCell();
+      const remove = el("button", "link", "Remove");
+      remove.type = "button";
+      remove.addEventListener("click", () => previewPurge(item.invoice_no));
+      action.append(remove);
+    });
+    host.replaceChildren(table);
+  }
+
+  /** Preview is mandatory and is a real dry run: the removal genuinely
+   *  happens inside a transaction that is thrown away, so the figures
+   *  shown are the ones the commit would produce. */
+  async function previewPurge(reference) {
+    const panel = $("purge-preview");
+    panel.hidden = false;
+    panel.replaceChildren(el("p", "muted", "Working out what this would do…"));
+    try {
+      const plan = await api("/control/purge/preview", {
+        method: "POST",
+        body: JSON.stringify({ kind: "purchase", reference }),
+      });
+      panel.replaceChildren();
+      panel.append(el("h3", null, `Remove ${plan.reference}?`));
+      const facts = el("ul");
+      facts.append(el("li", null, `${plan.lines} line(s), ${Money.format(plan.grand_total)}`));
+      if (plan.carries_stock) {
+        facts.append(el("li", null, "its stock will be reversed"));
+      }
+      (plan.notes || []).forEach((note) => facts.append(el("li", null, note)));
+      panel.append(facts);
+
+      if (!plan.ok) {
+        const why = el("p", "error", "Cannot remove this:");
+        panel.append(why);
+        const list = el("ul");
+        (plan.blockers || []).forEach((b) => list.append(el("li", null, b)));
+        panel.append(list);
+        return;
+      }
+
+      panel.append(el("p", "muted", "This can be undone afterwards."));
+      const label = el("label", null, `Type ${plan.reference} to confirm`);
+      const input = el("input");
+      const go = el("button", "primary", "Remove");
+      go.type = "button";
+      go.addEventListener("click", async () => {
+        go.disabled = true;
+        try {
+          const done = await api("/control/purge", {
+            method: "POST",
+            body: JSON.stringify({
+              kind: "purchase",
+              reference,
+              confirm: input.value.trim(),
+            }),
+          });
+          banner(
+            `${done.reference} removed. Undo with the reversal id ${done.reversal}.`,
+            true,
+          );
+          panel.hidden = true;
+          await loadRecords();
+        } catch (exc) {
+          banner(exc.message);
+        } finally {
+          go.disabled = false;
+        }
+      });
+      const cancel = el("button", "link", "Cancel");
+      cancel.type = "button";
+      cancel.addEventListener("click", () => (panel.hidden = true));
+      panel.append(label, input, go, cancel);
+      input.focus();
+    } catch (exc) {
+      panel.replaceChildren(el("p", "error", exc.message));
     }
   }
 

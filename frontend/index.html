@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Textile ERP</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=13" />
+    <link rel="stylesheet" href="/assets/styles.css?v=14" />
     <link
       rel="icon"
       href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>"
@@ -56,6 +56,10 @@
           <button data-page="admin">Admin</button>
         </nav>
         <div class="topbar-end">
+          <!-- A link, not a tab. Master Control is a separate document
+               with its own sign-in, and dressing it as another page of
+               this one would suggest the session carries across. -->
+          <a id="to-control" href="/control" class="control-link">Master Control ↗</a>
           <span id="whoami" class="muted"></span>
           <button id="signout" class="link">Sign out</button>
         </div>
@@ -335,8 +339,8 @@
       <p id="banner" class="banner" role="status" hidden></p>
     </div>
 
-    <script src="/assets/money.js?v=13"></script>
-    <script src="/assets/charts.js?v=13"></script>
-    <script src="/assets/app.js?v=13"></script>
+    <script src="/assets/money.js?v=14"></script>
+    <script src="/assets/charts.js?v=14"></script>
+    <script src="/assets/app.js?v=14"></script>
   </body>
 </html>
