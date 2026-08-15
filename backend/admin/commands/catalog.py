@@ -32,7 +32,10 @@ from backend.services.admin.products import ProductAdminService
 def _notes(result: dict[str, Any]) -> None:
     for note in result.get("notes", []):
         console.item(note)
-    if result.get("reversal"):
+    # The manifest is written inside the guard, so a dry run rolls it
+    # back with everything else -- offering its id as an undo hands out a
+    # reference to a row that does not exist.
+    if result.get("reversal") and result.get("committed", True):
         console.item(console.dim(f"reversible with: erp unmerge {result['reversal']}"))
 
 
