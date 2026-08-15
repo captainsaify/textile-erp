@@ -1638,3 +1638,78 @@ async def test_moving_capital_needs_the_control_credential(
         json={"partner": "Imran", "direction": "in", "amount": "100", "via": "cash"},
     )
     assert response.status_code == 401
+
+
+# --------------------------------------------------------------------
+# a purged record is hidden everywhere, and still there
+# --------------------------------------------------------------------
+
+
+async def test_a_purged_bill_disappears_from_every_list_but_keeps_its_row(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Soft delete is only worth having if hiding actually hides.
+
+    The promise of `deleted_at` is two-sided: gone from every list,
+    report and total, and still on disk so `restore-purged`, the audit
+    trail and reconciliation keep working. Nothing tested the first half
+    until now -- a query that forgot the filter would have shown a
+    removed bill in a total and nobody would have known which.
+    """
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    invoice = f"PURGE-{uuid.uuid4().hex[:5]}"
+
+    created = await client.post(
+        "/api/v1/control/purchases",
+        headers=headers,
+        json={
+            "supplier": f"Supp {stocked_code}",
+            "invoice_no": invoice,
+            "invoice_date": "2026-08-14",
+            "lines": [{"code": stocked_code, "qty": "800", "rate": "120"}],
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    listed = await client.get("/api/v1/control/purchases/recent", headers=headers)
+    assert invoice in [item["invoice_no"] for item in listed.json()["items"]]
+
+    purged = await client.post(
+        "/api/v1/control/purge",
+        headers=headers,
+        json={"kind": "purchase", "reference": invoice, "confirm": invoice},
+    )
+    assert purged.status_code == 200, purged.text
+
+    # 1. gone from the list it was just in
+    after = await client.get("/api/v1/control/purchases/recent", headers=headers)
+    assert invoice not in [item["invoice_no"] for item in after.json()["items"]]
+
+    # 2. gone from the dashboard's figures
+    dashboard = await client.get("/api/v1/dashboard", headers=_auth(await _token(client, owner)))
+    assert dashboard.status_code == 200
+    body = dashboard.json()
+    assert decimal.Decimal(body["inventory"]["value"]) == decimal.Decimal("0")
+
+    # 3. gone from the stock its lines had created
+    stock = await client.get(
+        "/api/v1/inventory?limit=200", headers=_auth(await _token(client, owner))
+    )
+    rows = [row for row in stock.json()["items"] if row["code"] == stocked_code]
+    assert all(decimal.Decimal(row["qty_on_hand"]) == decimal.Decimal("0") for row in rows)
+
+    # 4. and still on disk, which is what makes it restorable
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                sa.text(
+                    "select deleted_at is not null from purchase_headers where invoice_no = :i"
+                ),
+                {"i": invoice},
+            )
+        ).scalar_one()
+    assert row is True, "the row must survive; hiding is not deleting"
