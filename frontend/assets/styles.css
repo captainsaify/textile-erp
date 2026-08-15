@@ -152,7 +152,12 @@ button.link:hover {
   display: flex;
   gap: 1rem;
   align-items: center;
-  padding: 0.7rem 1.1rem;
+  /* Held in a variable because the safe-area block at the end of this
+     file re-declares the horizontal padding, and it wins on order --
+     so a narrower value set in a media query below was silently
+     overridden. Both now read the same number. */
+  --bar-pad-x: 1.1rem;
+  padding: 0.7rem var(--bar-pad-x);
   border-bottom: 1px solid var(--border);
   background: var(--surface-raised);
   position: sticky;
@@ -192,7 +197,8 @@ button.link:hover {
 }
 
 main#pages {
-  padding: 1.1rem;
+  --page-pad-x: 1.1rem;
+  padding: 1.1rem var(--page-pad-x);
   display: grid;
   gap: 1.1rem;
   max-width: 1180px;
@@ -720,7 +726,8 @@ tr.detail-row > td {
   }
 
   main#pages {
-    padding: 0.9rem 0.8rem;
+    --page-pad-x: 0.8rem;
+    padding: 0.9rem var(--page-pad-x);
   }
 
   /* The bar wrapped: eight sections at ~90px each is three rows on a
@@ -739,7 +746,8 @@ tr.detail-row > td {
   .topbar {
     flex-wrap: wrap;
     gap: 0.5rem 0.6rem;
-    padding: 0.5rem 0.8rem;
+    --bar-pad-x: 0.8rem;
+    padding: 0.5rem var(--bar-pad-x);
   }
 
   /* Explicit order, because the nav sits between the brand and the
@@ -804,7 +812,8 @@ tr.detail-row > td {
 @media (max-width: 400px) {
   .topbar {
     gap: 0.4rem;
-    padding: 0.45rem 0.6rem;
+    --bar-pad-x: 0.6rem;
+    padding: 0.45rem var(--bar-pad-x);
   }
 
   .control-link {
@@ -833,7 +842,8 @@ tr.detail-row > td {
 
   .topbar {
     gap: 0.3rem;
-    padding: 0.45rem 0.4rem;
+    --bar-pad-x: 0.4rem;
+    padding: 0.45rem var(--bar-pad-x);
   }
 
   .topbar-end {
@@ -884,14 +894,19 @@ tr.detail-row > td {
    sits under the rounded corner in landscape, and the last row of a
    table sits under the home bar. */
 @supports (padding: env(safe-area-inset-left)) {
+  /* `max(own padding, the inset)` -- so this only ever *adds* room for a
+     notch or a rounded corner. Written as a literal it instead replaced
+     the padding, which quietly undid every narrow-width value set above
+     (this block is last, so it wins), and the Fold's cover display kept
+     wrapping to three rows for want of four pixels. */
   .topbar {
-    padding-left: max(0.8rem, env(safe-area-inset-left));
-    padding-right: max(0.8rem, env(safe-area-inset-right));
+    padding-left: max(var(--bar-pad-x), env(safe-area-inset-left));
+    padding-right: max(var(--bar-pad-x), env(safe-area-inset-right));
   }
 
   main#pages {
-    padding-left: max(0.8rem, env(safe-area-inset-left));
-    padding-right: max(0.8rem, env(safe-area-inset-right));
+    padding-left: max(var(--page-pad-x), env(safe-area-inset-left));
+    padding-right: max(var(--page-pad-x), env(safe-area-inset-right));
     padding-bottom: max(1.1rem, env(safe-area-inset-bottom));
   }
 }
