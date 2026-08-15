@@ -9,9 +9,15 @@
 > implementation detail, and this file wins for philosophy/priority.
 
 > **Learning this codebase rather than building it?** Read
-> [`LEARN.md`](LEARN.md) — a 24-session syllabus, taught one session a
-> day by the `codebase-tutor` agent, which tracks where you got to in
-> `docs/learn/progress.md`.
+> [`LEARN.md`](LEARN.md) — a 24-session syllabus, one session a day,
+> with progress kept in `docs/learn/progress.md`.
+>
+> **To whoever is reading this as the assistant:** when Sarfaraz says
+> "teach me today's session" (or anything like it), read
+> `.claude/agents/codebase-tutor.md` and follow it **in the
+> conversation**. Do not spawn a subagent for it — a subagent cannot ask
+> him to explain something back and then wait for the answer, and that
+> exchange is the session.
 
 > **Picking up mid-build?** Read [`HANDOFF.md`](HANDOFF.md) first. It
 > records current state, the build order, and — importantly — which

@@ -2,16 +2,17 @@
 
 30–45 minutes a day. Twenty-four sessions, about five weeks.
 
-This is the **map**, not the lessons. The lessons come from the tutor:
+This is the **map**, not the lessons. To take one, say:
 
-```
-/agents  →  codebase-tutor
-```
+> **teach me today's session**
 
-or just say **"teach me today's session"** in Claude Code. It reads
-`docs/learn/progress.md`, works out where you are, teaches one session,
-and writes down what you covered. You never have to remember where you
-got to.
+or type `/learn`. Either works, and both teach you *in the
+conversation* — so you can stop mid-lesson and ask something, and get
+an answer before carrying on.
+
+It reads `docs/learn/progress.md`, works out where you are, teaches one
+session, and writes down what you covered. **You never have to remember
+where you got to.**
 
 ---
 
