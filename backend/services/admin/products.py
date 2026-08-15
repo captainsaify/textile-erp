@@ -378,6 +378,56 @@ class ProductAdminService:
 
     # --- deleting -----------------------------------------------------
 
+    async def describe(
+        self, org_id: uuid.UUID, actor: User, *, code: str, brand: str | None, description: str
+    ) -> dict[str, Any]:
+        """Rename a product in the catalogue.
+
+        A product's description is written once, by whichever sheet first
+        created it, and no later purchase updates it -- so a row can end
+        up wearing the wording of a bill that has since been moved to a
+        different product (a brand correction copies the description onto
+        the new row and leaves the old one behind). Nothing about the
+        money changes here; the purchase lines keep each sheet's own
+        wording, which is the trail back to the invoice.
+
+        No reversal manifest: the inverse of this is running it again
+        with the old text, which the audit row carries.
+        """
+        wanted = " ".join(description.split())
+        if not wanted:
+            raise ValidationError("a description cannot be blank")
+
+        product = await self.resolve(org_id, code, brand)
+        label = label_of(product.code, await self._brand_name(product))
+        was = product.description
+        if was == wanted:
+            raise ValidationError(f"{label} is already described as '{wanted}'")
+
+        async with guarded(self._session, org_id) as report:
+            product.description = wanted
+            await self._session.flush()
+            report.note(f"{label}: '{was}' → '{wanted}'")
+
+            await AuditService(self._session).record(
+                org_id,
+                actor.id,
+                action="product.described",
+                entity_type="products",
+                entity_id=product.id,
+                before_state={"description": was},
+                after_state={"description": wanted},
+                channel="cli",
+            )
+
+        return {
+            "label": label,
+            "was": was,
+            "now": wanted,
+            "committed": report.committed,
+            "notes": report.notes,
+        }
+
     async def delete(
         self, org_id: uuid.UUID, actor: User, *, code: str, brand: str | None
     ) -> dict[str, Any]:

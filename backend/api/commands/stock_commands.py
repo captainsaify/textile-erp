@@ -65,16 +65,33 @@ async def handle_stock(args: str, ctx: RequestContext) -> CommandResult:
                 reply="\n".join([f"{title} ({len(rows)} items):", *_low_stock_lines(rows)])
             )
 
-        found = await service.details(org_id, sub)
+        # "55D MKD" -- the brand comes back this way when the reader taps a
+        # row on the "Pick brand" menu below, which sends its own id as
+        # text. Brand names contain spaces ("Akil Bhai"), so only the
+        # first word is the code and the remainder is all brand.
+        code, _, rest = sub.partition(" ")
+        brand_hint = rest.strip() or None
+
+        found = await service.details(org_id, code, brand=brand_hint)
         if not found:
-            suggestions = await service.suggest_codes(org_id, sub)
+            if brand_hint is not None:
+                carried = await service.details(org_id, code)
+                if carried:
+                    brands = ", ".join(
+                        e.product.brand.name for e in carried if e.product.brand is not None
+                    )
+                    return CommandResult(
+                        reply=f"'{code.upper()}' is not stocked under '{brand_hint}'."
+                        + (f" It is stocked under: {brands}." if brands else "")
+                    )
+            suggestions = await service.suggest_codes(org_id, code)
             hint = f" Did you mean {', '.join(suggestions)}?" if suggestions else ""
-            return CommandResult(reply=f"Product '{sub}' not found.{hint}")
+            return CommandResult(reply=f"Product '{code}' not found.{hint}")
 
         if len(found) > 1:
             # the same code under several brands -- show each rather than
             # guessing which one was meant
-            lines = [f"📦 {sub.upper()} is stocked under {len(found)} brands:"]
+            lines = [f"📦 {code.upper()} is stocked under {len(found)} brands:"]
             for entry in found:
                 label = entry.product.brand.name if entry.product.brand else "no brand"
                 unit_code = entry.product.unit.code
@@ -86,16 +103,16 @@ async def handle_stock(args: str, ctx: RequestContext) -> CommandResult:
             menu = None
             if len(found) <= MAX_LIST_ROWS:
                 menu = ListMenu(
-                    body=f"Which {sub.upper()}?",
+                    body=f"Which {code.upper()}?",
                     menu_label="Pick brand",
                     sections=(
                         Section(
                             title="Brands",
                             rows=tuple(
                                 Choice(
-                                    id=f"stock {sub} {e.product.brand.name}"
+                                    id=f"stock {code} {e.product.brand.name}"
                                     if e.product.brand
-                                    else f"stock {sub}",
+                                    else f"stock {code}",
                                     title=(e.product.brand.name if e.product.brand else "No brand")[
                                         :24
                                     ],

@@ -204,6 +204,11 @@ JOIN AND REMOVE
   erp purge purchase 1051
   erp undo <id>                  the gentle version — reverses, keeps the record
 
+CATALOGUE
+  erp products [query]            every product, with what has happened to it
+  erp describe 55D "SHORT SLEEVED SWEATER" --label MKD
+  erp delete-product 55D --label MKD    only if nothing ever happened to it
+
 STOCK
   erp stock adjust 55X -5 --reason damaged --note "water damage"
   erp stock recost 55X | --all

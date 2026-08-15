@@ -205,6 +205,66 @@ async def test_a_product_with_history_cannot_be_deleted(
             await ProductAdminService(session).delete(ORG, staff_user, code=losing.code, brand=None)
 
 
+async def test_describing_a_product_renames_it_and_leaves_the_bills_alone(
+    pair: tuple[Product, Product],
+    staff_user: User,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The 55D case: purchase 002 created the row and named it, purchase
+    003 later reused the same row keeping its own wording on its lines,
+    and a brand correction then moved 002 away -- leaving the row named
+    after a bill that no longer belongs to it."""
+    target, _ = pair
+    async with session_factory() as session:
+        result = await ProductAdminService(session).describe(
+            ORG, staff_user, code=target.code, brand=None, description="SHORT SLEEVED SWEATER"
+        )
+    assert result["was"] == "Merge probe"
+    assert result["now"] == "SHORT SLEEVED SWEATER"
+
+    async with session_factory() as session:
+        renamed = await session.get(Product, target.id)
+        assert renamed is not None
+        assert renamed.description == "SHORT SLEEVED SWEATER"
+        # stock untouched -- this is a label, not a movement
+        stock = (
+            await session.execute(
+                sa.select(Inventory.qty_on_hand).where(Inventory.product_id == target.id)
+            )
+        ).scalar_one()
+        assert stock == decimal.Decimal("10.000")
+        logged = (
+            await session.execute(
+                sa.text(
+                    "select before_state, after_state from audit_logs "
+                    "where entity_id = :id and action = 'product.described'"
+                ),
+                {"id": str(target.id)},
+            )
+        ).all()
+    assert len(logged) == 1
+    assert logged[0][0] == {"description": "Merge probe"}
+    assert logged[0][1] == {"description": "SHORT SLEEVED SWEATER"}
+
+
+async def test_describing_refuses_a_blank_and_a_no_op(
+    pair: tuple[Product, Product],
+    staff_user: User,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    target, _ = pair
+    async with session_factory() as session:
+        with pytest.raises(ValidationError, match="blank"):
+            await ProductAdminService(session).describe(
+                ORG, staff_user, code=target.code, brand=None, description="   "
+            )
+    async with session_factory() as session:
+        with pytest.raises(ValidationError, match="already described"):
+            await ProductAdminService(session).describe(
+                ORG, staff_user, code=target.code, brand=None, description="Merge probe"
+            )
+
+
 async def test_relinking_moves_a_number_and_can_be_undone(
     staff_user: User,
     session_factory: async_sessionmaker[AsyncSession],

@@ -144,6 +144,37 @@ def merge_product(
     run(action)
 
 
+@cli.command("describe")
+def describe(
+    code: Annotated[str, typer.Argument(help="Product code, e.g. 55D")],
+    description: Annotated[str, typer.Argument(help="What it should be called")],
+    label: Annotated[
+        str | None, typer.Option("--label", help="Brand, if the code is shared")
+    ] = None,
+) -> None:
+    """Rename a product in the catalogue.
+
+    A description is written once, by whichever sheet created the row,
+    and never updated by a later bill. Correcting a brand copies that
+    wording onto the new row and leaves the old one wearing it -- so the
+    row can end up named after a bill that no longer belongs to it. This
+    changes the label and nothing else: each purchase line keeps the
+    wording its own sheet used."""
+
+    async def action(ctx: AdminContext) -> None:
+        service = ProductAdminService(ctx.session)
+        product = await service.resolve(ctx.org_id, code, label)
+        console.item(console.dim(f"currently: {product.description}"))
+        confirm(ctx, expected=product.code, prompt=f"Type {product.code} to confirm: ")
+        result = await service.describe(
+            ctx.org_id, ctx.actor, code=code, brand=label, description=description
+        )
+        console.ok(f"{result['label']} → {result['now']}")
+        _notes(result)
+
+    run(action)
+
+
 @cli.command("delete-product")
 def delete_product(
     code: Annotated[str, typer.Argument(help="Product code")],
