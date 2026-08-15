@@ -618,3 +618,101 @@ async def test_an_allocation_whose_bill_vanished_refuses_loudly(
     async with session_factory() as session:
         with pytest.raises(ValidationError, match="GONE-999"):
             await PaymentReversalService(session).reverse(owner_user, reference=payment)
+
+
+# --------------------------------------------------------------------
+# editing a payment: reverse and re-record, in one go
+# --------------------------------------------------------------------
+
+
+async def test_editing_the_amount_moves_the_bill_with_it(
+    session_factory: async_sessionmaker[AsyncSession], staff_user: User
+) -> None:
+    """The reason this is not a `UPDATE ledger SET amount`: the bill was
+    settled by the old figure. An edit that changed only the ledger would
+    leave a ₹10,000 bill showing ₹4,000 paid against a payment of
+    ₹6,000."""
+    from backend.services.settlement_service import PaymentEditService
+
+    supplier, _ = await _bill(session_factory, staff_user, total="10000")
+    reference = await _pay(session_factory, staff_user, supplier, "4000")
+
+    async with session_factory() as session:
+        result = await PaymentEditService(session).edit(
+            staff_user, reference=reference, amount=D("6000")
+        )
+
+    assert result.kind == "paid"
+    assert result.old_amount == D("4000.00")
+    assert result.new_amount == D("6000.00")
+    assert result.reference != result.old_reference
+
+    async with session_factory() as session:
+        paid, status = (
+            await session.execute(
+                sa.text("SELECT amount_paid, payment_status FROM purchase_headers")
+            )
+        ).one()
+    assert paid == D("6000.00")
+    assert status == "partial"
+    assert result.outstanding_after == D("4000.00")
+
+
+async def test_editing_leaves_the_cash_where_the_new_amount_says(
+    session_factory: async_sessionmaker[AsyncSession], staff_user: User
+) -> None:
+    """Three ledger rows -- original, reversal, correction -- and the
+    balance is the one the corrected payment implies, not the sum of a
+    muddle."""
+    from backend.repositories.accounting_repository import LedgerRepository
+    from backend.services.settlement_service import PaymentEditService
+
+    supplier, _ = await _bill(session_factory, staff_user, total="10000")
+    async with session_factory() as session:
+        before = await LedgerRepository(session).balance(ORG, "cash")
+
+    reference = await _pay(session_factory, staff_user, supplier, "4000")
+    async with session_factory() as session:
+        await PaymentEditService(session).edit(staff_user, reference=reference, amount=D("2500"))
+
+    async with session_factory() as session:
+        after = await LedgerRepository(session).balance(ORG, "cash")
+        rows = (await session.execute(sa.text("SELECT count(*) FROM cash_ledger"))).scalar_one()
+    assert after == before - D("2500.00")
+    assert rows == 3, "the original, the reversal and the correction all stay"
+
+
+async def test_an_edit_that_changes_nothing_is_refused(
+    session_factory: async_sessionmaker[AsyncSession], staff_user: User
+) -> None:
+    from backend.core.exceptions import ValidationError
+    from backend.services.settlement_service import PaymentEditService
+
+    supplier, _ = await _bill(session_factory, staff_user, total="10000")
+    reference = await _pay(session_factory, staff_user, supplier, "4000")
+
+    async with session_factory() as session:
+        with pytest.raises(ValidationError, match="Nothing about that payment"):
+            await PaymentEditService(session).edit(
+                staff_user, reference=reference, amount=D("4000")
+            )
+
+
+async def test_an_already_reversed_payment_cannot_be_edited(
+    session_factory: async_sessionmaker[AsyncSession], staff_user: User
+) -> None:
+    """Editing it would re-record money that was deliberately taken back
+    -- an undo quietly undone."""
+    from backend.core.exceptions import ValidationError
+    from backend.services.settlement_service import PaymentEditService
+
+    supplier, _ = await _bill(session_factory, staff_user, total="10000")
+    reference = await _pay(session_factory, staff_user, supplier, "4000")
+    async with session_factory() as session:
+        await PaymentReversalService(session).reverse(staff_user, reference=reference)
+
+    async with session_factory() as session:
+        with pytest.raises(ValidationError, match="already reversed"):
+            await PaymentEditService(session).edit(
+                staff_user, reference=reference, amount=D("5000")
+            )

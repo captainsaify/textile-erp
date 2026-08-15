@@ -44,7 +44,11 @@ from backend.services.purchase_service import Draft, DraftLine, PurchaseService
 from backend.services.reconciliation_service import ReconciliationService
 from backend.services.reversal_service import ReversalService
 from backend.services.sales_service import SaleDraft, SaleDraftLine, SalesService
-from backend.services.settlement_service import PaymentReversalService, SettlementService
+from backend.services.settlement_service import (
+    PaymentEditService,
+    PaymentReversalService,
+    SettlementService,
+)
 
 ZERO = decimal.Decimal("0")
 
@@ -1305,6 +1309,105 @@ async def unlink_contact(body: UnlinkIn, user: ControlUser, session: Session) ->
     result = await ContactAdminService(session).unlink(user.org_id, user, name=body.user)
     await session.commit()
     return result
+
+
+@router.get("/payments/recent")
+async def recent_payments(
+    user: ControlUser, session: Session, limit: Annotated[int, Query(ge=1, le=50)] = 20
+) -> dict[str, Any]:
+    """Payments in and out, newest first, so one can be picked to correct.
+
+    Read from `audit_logs` because that row *is* the payment's handle --
+    the reference on the receipt, what `undo payment` takes, and what the
+    edit below takes. There is no payments table to read instead.
+    """
+
+    from backend.models import AuditLog, Customer, Supplier
+
+    rows = list(
+        (
+            await session.execute(
+                select(AuditLog)
+                .where(
+                    AuditLog.org_id == user.org_id,
+                    AuditLog.action.in_(["payment.paid", "payment.received"]),
+                )
+                .order_by(AuditLog.created_at.desc())
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    items = []
+    for row in rows:
+        state = row.after_state or {}
+        paid_out = row.action == "payment.paid"
+        party = (
+            await session.get(Supplier, row.entity_id)
+            if paid_out
+            else await session.get(Customer, row.entity_id)
+        )
+        items.append(
+            {
+                "reference": str(row.id)[:8],
+                "kind": "paid" if paid_out else "received",
+                "party": party.name if party is not None else "—",
+                "amount": money_str(decimal.Decimal(str(state.get("amount", "0")))),
+                "via": state.get("via", "cash"),
+                "date": state.get("entry_date"),
+                "note": state.get("note"),
+                # A reversed payment is shown rather than hidden: "where
+                # did that payment go" is a question people ask, and an
+                # absence cannot answer it.
+                "reversed": bool(state.get("reversed")),
+            }
+        )
+    return {"items": items}
+
+
+class PaymentEditIn(BaseModel):
+    amount: decimal.Decimal | None = Field(default=None, gt=0)
+    via: str | None = Field(default=None, pattern="^(cash|bank)$")
+    on: str | None = None
+    note: str | None = None
+
+
+@router.post("/payments/{reference}/edit")
+async def edit_payment(
+    reference: str, body: PaymentEditIn, user: ControlUser, session: Session
+) -> dict[str, Any]:
+    """Correct the amount, date, or cash-or-bank on a payment.
+
+    Reverses and re-records rather than editing in place: a settlement is
+    a ledger entry, a journal pair, and an allocation against every bill
+    it settled, and changing the amount alone would leave those bills
+    describing a payment that no longer happened. Three ledger rows
+    result -- the original, the reversal, the correction -- which is the
+    honest record of what occurred.
+    """
+    result = await PaymentEditService(session).edit(
+        user,
+        reference=reference,
+        amount=body.amount,
+        via=body.via,
+        on=body.on,
+        note=body.note,
+    )
+    await session.commit()
+    return {
+        "kind": result.kind,
+        "party": result.party_name,
+        "old_amount": money_str(result.old_amount),
+        "amount": money_str(result.new_amount),
+        "old_reference": result.old_reference,
+        "reference": result.reference,
+        "via": result.via,
+        "date": result.entry_date.isoformat(),
+        "outstanding_after": money_str(result.outstanding_after),
+        "unapplied": result.unapplied,
+    }
 
 
 # --- partners ----------------------------------------------------------

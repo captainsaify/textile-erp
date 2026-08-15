@@ -9,6 +9,7 @@ clamped: it's reported and, once confirmed, recorded as an advance.
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import decimal
 import uuid
 from typing import Any
@@ -654,6 +655,161 @@ class PaymentReversalService:
                 )
             ).scalar_one()
         return party_name, decimal.Decimal(outstanding), unapplied, orphaned
+
+
+@dataclasses.dataclass(frozen=True)
+class PaymentEdit:
+    kind: str
+    party_name: str
+    old_amount: decimal.Decimal
+    new_amount: decimal.Decimal
+    old_reference: str
+    reference: str
+    via: str
+    entry_date: datetime.date
+    outstanding_after: decimal.Decimal
+    unapplied: list[str]
+
+
+class PaymentEditService:
+    """Correct a payment that was recorded wrong -- wrong amount, wrong
+    date, wrong cash-or-bank.
+
+    **It reverses and re-records rather than editing in place**, and that
+    is the whole design. A settlement is not one row: it is a ledger
+    entry, a journal pair, and an allocation against every bill it
+    settled. Editing the amount in place would leave those allocations
+    describing a payment that no longer happened, and the running balance
+    on every later ledger row wrong from that point down.
+
+    Reversing and re-recording runs the two paths that already exist and
+    are already tested, in one transaction, so the allocations are
+    unwound from exactly the bills they went to and re-applied by the
+    same rules a fresh payment uses.
+
+    The cost is honest: the ledger keeps three rows -- the original, the
+    reversal, and the correction -- rather than pretending the mistake
+    never happened. For books that someone may have to explain to a
+    partner later, that is the right cost.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._audit = AuditService(session)
+
+    async def edit(
+        self,
+        actor: User,
+        *,
+        reference: str,
+        amount: decimal.Decimal | None = None,
+        via: str | None = None,
+        on: str | None = None,
+        note: str | None = None,
+    ) -> PaymentEdit:
+        from sqlalchemy import String, cast, select
+
+        from backend.models import AuditLog
+
+        org_id = actor.org_id
+        async with joined_transaction(self._session):
+            entry = (
+                (
+                    await self._session.execute(
+                        select(AuditLog).where(
+                            AuditLog.org_id == org_id,
+                            AuditLog.action.in_(["payment.paid", "payment.received"]),
+                            cast(AuditLog.id, String).like(f"{reference.lower()}%"),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if entry is None:
+                raise NotFoundError("payment", reference)
+            state = entry.after_state or {}
+            if state.get("reversed"):
+                raise ValidationError(
+                    "That payment was already reversed. Record a new one rather than "
+                    "editing a payment that no longer stands."
+                )
+
+            old_amount = decimal.Decimal(str(state.get("amount", "0")))
+            wanted_amount = _validate_amount(amount) if amount is not None else old_amount
+            wanted_via = via or str(state.get("via", "cash"))
+            wanted_on = on or str(state.get("entry_date") or "") or None
+            wanted_note = note if note is not None else state.get("note")
+
+            if (
+                wanted_amount == old_amount
+                and wanted_via == state.get("via")
+                and wanted_on == state.get("entry_date")
+                and wanted_note == state.get("note")
+            ):
+                raise ValidationError("Nothing about that payment would change.")
+
+            # Reversal first: the bills have to be un-settled before the
+            # corrected amount can be allocated to them, or the second
+            # pass sees them as already paid and pushes the money into an
+            # advance instead.
+            undone = await PaymentReversalService(self._session).reverse(actor, reference=reference)
+
+            settle = SettlementService(self._session)
+            if undone.kind == "paid":
+                redone = await settle.pay_supplier(
+                    actor,
+                    supplier_name=undone.party_name,
+                    amount=wanted_amount,
+                    via=wanted_via,
+                    on=wanted_on,
+                    note=wanted_note,
+                    allow_advance=True,
+                )
+            else:
+                redone = await settle.receive_from_customer(
+                    actor,
+                    customer_name=undone.party_name,
+                    amount=wanted_amount,
+                    via=wanted_via,
+                    on=wanted_on,
+                    note=wanted_note,
+                    allow_advance=True,
+                )
+
+            await self._audit.record(
+                org_id,
+                actor.id,
+                action="payment.edited",
+                entity_type=entry.entity_type,
+                entity_id=entry.entity_id,
+                before_state={
+                    "reference": reference,
+                    "amount": str(old_amount),
+                    "via": state.get("via"),
+                    "entry_date": state.get("entry_date"),
+                },
+                after_state={
+                    "reference": redone.reference,
+                    "amount": str(wanted_amount),
+                    "via": wanted_via,
+                    "entry_date": wanted_on,
+                },
+                channel="dashboard",
+            )
+
+            return PaymentEdit(
+                kind=undone.kind,
+                party_name=undone.party_name,
+                old_amount=old_amount,
+                new_amount=wanted_amount,
+                old_reference=reference,
+                reference=redone.reference,
+                via=wanted_via,
+                entry_date=await entry_day(self._session, org_id, wanted_on),
+                outstanding_after=redone.outstanding_after,
+                unapplied=undone.unapplied,
+            )
 
 
 def cast_text(column: Any) -> Any:

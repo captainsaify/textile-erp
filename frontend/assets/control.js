@@ -555,6 +555,7 @@
   // so adding a page is one line here rather than another branch below.
   const ON_OPEN = {
     records: () => loadRecords(),
+    money: () => loadPayments(),
     stock: () => loadProducts(),
     partners: () => loadPartners(),
     whatsapp: () => loadWhatsApp(),
@@ -847,6 +848,79 @@
     });
     ["pay-party", "pay-amount"].forEach((id) => ($(id).value = ""));
     return `Paid ${Money.format(result.amount)} to ${result.party}. Owing ${Money.format(result.outstanding_after)}.`;
+  });
+
+  // ---------------------------------------------------- payment repair
+
+  let editing = null;
+
+  async function loadPayments() {
+    const data = await api("/control/payments/recent");
+    $("payments").replaceChildren(
+      rowsTable(
+        ["Ref", "When", "Direction", "Party", "Amount", "Via", ""],
+        data.items,
+        (item) => {
+          const action = item.reversed
+            ? el("span", "muted", "reversed")
+            : el("button", "link", "Correct");
+          if (!item.reversed) {
+            action.type = "button";
+            action.addEventListener("click", () => openPaymentEdit(item));
+          }
+          return [
+            item.reference,
+            item.date || "—",
+            item.kind === "paid" ? "Paid out" : "Received",
+            item.party,
+            Money.format(item.amount),
+            item.via,
+            action,
+          ];
+        },
+      ),
+    );
+  }
+
+  function openPaymentEdit(item) {
+    editing = item;
+    $("payment-edit").hidden = false;
+    $("payment-edit-what").textContent =
+      `${item.kind === "paid" ? "Paid to" : "Received from"} ${item.party} · ${item.reference}`;
+    // Pre-filled with what was recorded, so a correction to one field
+    // does not silently reset the others.
+    $("pe-amount").value = item.amount;
+    $("pe-date").value = item.date || "";
+    $("pe-via").value = item.via;
+    $("pe-note").value = item.note || "";
+    $("pe-out").textContent = "";
+    $("pe-amount").focus();
+  }
+
+  $("pe-cancel").addEventListener("click", () => {
+    editing = null;
+    $("payment-edit").hidden = true;
+  });
+
+  wire("pe-go", "pe-out", async () => {
+    if (!editing) throw new Error("Pick a payment to correct first.");
+    const result = await api(`/control/payments/${editing.reference}/edit`, {
+      method: "POST",
+      body: JSON.stringify({
+        amount: $("pe-amount").value.trim(),
+        via: $("pe-via").value,
+        on: $("pe-date").value || null,
+        note: $("pe-note").value.trim() || null,
+      }),
+    });
+    editing = null;
+    $("payment-edit").hidden = true;
+    await loadPayments();
+    return (
+      `${result.kind === "paid" ? "Paid to" : "Received from"} ${result.party}: ` +
+      `${Money.format(result.old_amount)} → ${Money.format(result.amount)} on ${result.date}. ` +
+      `Now outstanding ${Money.format(result.outstanding_after)}. New ref ${result.reference}.`
+    );
   });
 
   // ---------------------------------------------------------- partners

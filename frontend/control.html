@@ -102,6 +102,41 @@
               <div id="ex-out" class="hint"></div>
             </section>
           </div>
+
+          <!-- Correcting a payment. Reversing and re-recording rather
+               than editing in place, because a payment is also an
+               allocation against every bill it settled. -->
+          <section class="card">
+            <h2>Recent payments</h2>
+            <p class="muted">
+              Pick one to correct its amount, date or cash/bank. The original
+              and its reversal both stay in the ledger — three rows, which is
+              what actually happened.
+            </p>
+            <div id="payments"></div>
+            <div id="payment-edit" hidden>
+              <h3 id="payment-edit-what"></h3>
+              <div class="field narrow">
+                <label for="pe-amount">Amount</label>
+                <input id="pe-amount" inputmode="decimal" />
+              </div>
+              <div class="field narrow">
+                <label for="pe-date">Date</label>
+                <input id="pe-date" type="date" />
+              </div>
+              <div class="field narrow">
+                <label for="pe-via">Cash or bank</label>
+                <select id="pe-via">
+                  <option value="cash">Cash</option>
+                  <option value="bank">Bank</option>
+                </select>
+              </div>
+              <div class="field"><label for="pe-note">Note</label><input id="pe-note" /></div>
+              <button type="button" id="pe-go" class="primary">Save correction</button>
+              <button type="button" id="pe-cancel" class="link">Cancel</button>
+              <div id="pe-out" class="hint"></div>
+            </div>
+          </section>
         </section>
 
         <section id="page-stock" hidden>

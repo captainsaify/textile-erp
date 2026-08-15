@@ -208,7 +208,25 @@ class LedgerRepository:
         notes: str | None,
         created_by: uuid.UUID,
     ) -> CashLedger | BankLedger:
-        """Append a signed entry and return it with resulting_balance set."""
+        """Append a signed entry and return it with resulting_balance set.
+
+        `created_at` is `clock_timestamp()`, not the column's `now()`
+        default, and that difference is load-bearing. `now()` is the
+        *transaction's* start time, identical for every row written in
+        one transaction -- so two entries appended together tie on
+        `created_at`, the ordering falls through to a random UUID, and
+        `balance()` returns whichever of them sorted last. That is not
+        only a wrong figure to read: this method calls `balance()` to
+        find what to add to, so the second entry could chain off the
+        wrong row and the running balance would be wrong from there
+        down.
+
+        One transaction writing two ledger rows is the ordinary case for
+        a correction -- reverse the old, record the new -- so this has to
+        hold. `clock_timestamp()` advances within a transaction, which
+        makes the order the rows were actually written the order they
+        are read back in.
+        """
         await self._advisory_lock(org_id, f"ledger:{ledger}")
         previous = await self.balance(org_id, ledger)
         model = _LEDGERS[ledger]
@@ -222,6 +240,7 @@ class LedgerRepository:
             entry_date=entry_date,
             notes=notes,
             created_by=created_by,
+            created_at=func.clock_timestamp(),
         )
         self._session.add(row)
         await self._session.flush()
