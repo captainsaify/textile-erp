@@ -211,6 +211,14 @@ main#pages {
   padding: 1rem 1.1rem;
   box-shadow: var(--shadow);
   margin: 0;
+  /* `main#pages` is a grid, and a grid item's default `min-width: auto`
+     refuses to shrink below its content -- so a stock table wider than
+     the screen widened the *card*, which widened the page, and
+     `.table-scroll` never got the chance to scroll. The page then had a
+     869px layout viewport on a 390px phone, which is what "everything
+     is tiny and cut off" actually was. Same trap as `.scan-beside > *`
+     below, which the sheet view hit first. */
+  min-width: 0;
 }
 
 .card-head {
@@ -717,17 +725,62 @@ tr.detail-row > td {
 
   /* The bar wrapped: eight sections at ~90px each is three rows on a
      390px screen, and it is sticky, so those three rows followed you
-     down the page. One row that scrolls sideways instead -- the bar
-     stays one line high and every section is still reachable. */
+     down the page.
+
+     Two fixed rows instead. Row one is the brand and the account; row
+     two is every section, on one line that scrolls sideways.
+
+     The nav must NOT simply share row one. "Textile ERP" plus Master
+     Control, the name and Sign out is nearly the full width of a phone,
+     and `.topbar-end` does not shrink -- so the sections get whatever is
+     left, which is nothing, and they disappear entirely. `flex-basis:
+     100%` puts them on their own row where they have the whole width to
+     scroll within. */
+  .topbar {
+    flex-wrap: wrap;
+    gap: 0.5rem 0.6rem;
+    padding: 0.5rem 0.8rem;
+  }
+
+  /* Explicit order, because the nav sits between the brand and the
+     account group in the DOM. A full-width nav in source order pushes
+     the account group onto a third row -- 130px of sticky chrome on an
+     844px screen. Ordered this way it is two rows: identity, then
+     sections. */
+  .brand {
+    order: 1;
+    flex: 0 1 auto;
+    min-width: 0;
+    /* it is a label, not a destination: it yields before the account
+       controls do, rather than pushing them off the screen */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .topbar-end {
+    order: 2;
+    flex: 0 0 auto;
+    gap: 0.5rem;
+  }
+
+  /* "Textile ERP" + "Master Control ↗" + "Sarfaraz · owner" + "Sign
+     out" is ~430px of content on a 390px screen, so it wrapped and the
+     two rows became three. The name is the line that earns its place
+     least: you know who you are signed in as, and it is still there on
+     a screen with room for it. */
+  #whoami {
+    display: none;
+  }
+
   #nav {
+    order: 3;
+    flex: 1 0 100%;
     flex-wrap: nowrap;
     overflow-x: auto;
     scrollbar-width: none;
     scroll-snap-type: x proximity;
-    /* the row is its own scroll container, so it must be allowed to
-       shrink inside the topbar's flex row rather than pushing it wide */
     min-width: 0;
-    flex: 1 1 auto;
     -webkit-overflow-scrolling: touch;
   }
 
@@ -738,21 +791,6 @@ tr.detail-row > td {
   #nav button {
     flex: 0 0 auto;
     scroll-snap-align: center;
-  }
-
-  .topbar {
-    /* the brand and the sign-out stay put; only the sections scroll */
-    flex-wrap: nowrap;
-    gap: 0.6rem;
-    padding: 0.55rem 0.8rem;
-  }
-
-  .brand {
-    flex: 0 0 auto;
-  }
-
-  .topbar-end {
-    flex: 0 0 auto;
   }
 }
 
