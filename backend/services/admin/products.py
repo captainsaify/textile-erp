@@ -379,7 +379,14 @@ class ProductAdminService:
     # --- deleting -----------------------------------------------------
 
     async def describe(
-        self, org_id: uuid.UUID, actor: User, *, code: str, brand: str | None, description: str
+        self,
+        org_id: uuid.UUID,
+        actor: User,
+        *,
+        code: str,
+        brand: str | None,
+        description: str,
+        dry_run: bool = False,
     ) -> dict[str, Any]:
         """Rename a product in the catalogue.
 
@@ -404,7 +411,7 @@ class ProductAdminService:
         if was == wanted:
             raise ValidationError(f"{label} is already described as '{wanted}'")
 
-        async with guarded(self._session, org_id) as report:
+        async with guarded(self._session, org_id, dry_run=dry_run) as report:
             product.description = wanted
             await self._session.flush()
             report.note(f"{label}: '{was}' → '{wanted}'")

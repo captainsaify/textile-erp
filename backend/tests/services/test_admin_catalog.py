@@ -247,6 +247,42 @@ async def test_describing_a_product_renames_it_and_leaves_the_bills_alone(
     assert logged[0][1] == {"description": "SHORT SLEEVED SWEATER"}
 
 
+async def test_describing_with_dry_run_changes_nothing(
+    pair: tuple[Product, Product],
+    staff_user: User,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Shipped without this wired through, and the "preview" renamed a
+    product on the real books. A dry run that writes is worse than no dry
+    run: it is trusted."""
+    target, _ = pair
+    async with session_factory() as session:
+        result = await ProductAdminService(session).describe(
+            ORG,
+            staff_user,
+            code=target.code,
+            brand=None,
+            description="SHOULD NOT STICK",
+            dry_run=True,
+        )
+    assert result["committed"] is False
+
+    async with session_factory() as session:
+        unchanged = await session.get(Product, target.id)
+        assert unchanged is not None
+        assert unchanged.description == "Merge probe"
+        logged = (
+            await session.execute(
+                sa.text(
+                    "select count(*) from audit_logs "
+                    "where entity_id = :id and action = 'product.described'"
+                ),
+                {"id": str(target.id)},
+            )
+        ).scalar_one()
+    assert logged == 0
+
+
 async def test_describing_refuses_a_blank_and_a_no_op(
     pair: tuple[Product, Product],
     staff_user: User,

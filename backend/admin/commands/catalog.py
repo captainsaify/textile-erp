@@ -167,8 +167,16 @@ def describe(
         console.item(console.dim(f"currently: {product.description}"))
         confirm(ctx, expected=product.code, prompt=f"Type {product.code} to confirm: ")
         result = await service.describe(
-            ctx.org_id, ctx.actor, code=code, brand=label, description=description
+            ctx.org_id,
+            ctx.actor,
+            code=code,
+            brand=label,
+            description=description,
+            dry_run=ctx.dry_run,
         )
+        if not result["committed"]:
+            console.warn(f"--dry-run: {result['label']} was NOT renamed.")
+            return
         console.ok(f"{result['label']} → {result['now']}")
         _notes(result)
 
