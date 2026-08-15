@@ -26,7 +26,7 @@ import datetime
 import uuid
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.formatting import fmt_money
@@ -170,7 +170,9 @@ async def read_watermark(
         await session.execute(select(Setting).where(Setting.org_id == org_id, Setting.key == key))
     ).scalar_one_or_none()
     if row is None or not row.value:
-        return datetime.datetime.now(datetime.UTC)
+        # The database's clock, for the same reason `claim_watermark`
+        # uses it: this is compared against timestamps Postgres wrote.
+        return (await session.execute(select(func.now()))).scalar_one()
     try:
         return datetime.datetime.fromisoformat(str(row.value))
     except ValueError:
@@ -207,7 +209,15 @@ async def claim_watermark(
         except ValueError:
             logger.warning("broadcast_watermark_unreadable", key=key, value=str(row.value))
 
-    started = datetime.datetime.now(datetime.UTC)
+    # The database's clock, not this process's. The window is compared
+    # against `audit_logs.created_at`, which Postgres stamps -- so a
+    # watermark taken from the application's clock measures one clock
+    # against another, and anything recorded inside the difference is
+    # either replayed or lost. Same host today makes that difference
+    # ~zero; a database on its own machine (or a VM, which is how the
+    # tests run) makes it milliseconds, and milliseconds is exactly the
+    # size of the window a sweep opens.
+    started = (await session.execute(select(func.now()))).scalar_one()
     if row is None:
         session.add(Setting(org_id=org_id, key=key, value=started.isoformat()))
     else:

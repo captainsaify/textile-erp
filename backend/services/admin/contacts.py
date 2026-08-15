@@ -104,7 +104,13 @@ class ContactAdminService:
         raise NotFoundError("user", name)
 
     async def relink(
-        self, org_id: uuid.UUID, actor: User, *, number: str, to_name: str
+        self,
+        org_id: uuid.UUID,
+        actor: User,
+        *,
+        number: str,
+        to_name: str,
+        dry_run: bool = False,
     ) -> dict[str, Any]:
         """Point a WhatsApp number at a person.
 
@@ -139,6 +145,11 @@ class ContactAdminService:
             )
 
         previous = target.whatsapp_number
+        # Read before the guard: a rolled-back dry run expires every
+        # loaded instance, and touching one afterwards re-queries -- which
+        # outside the greenlet raises MissingGreenlet rather than doing
+        # IO. These are plain strings; nothing below changes them.
+        target_name, holder_name = target.full_name, holder.full_name if holder else ""
         moved: list[dict[str, Any]] = [
             {
                 "table": "users",
@@ -159,7 +170,7 @@ class ContactAdminService:
                 }
             )
 
-        async with guarded(self._session, org_id) as report:
+        async with guarded(self._session, org_id, dry_run=dry_run) as report:
             manifest = await ReversalService(self._session).record(
                 org_id,
                 actor,
@@ -200,9 +211,9 @@ class ContactAdminService:
 
         return {
             "number": wanted,
-            "user": target.full_name,
+            "user": target_name,
             "previous": previous or "",
-            "taken_from": holder.full_name if holder is not None else "",
+            "taken_from": holder_name,
             "committed": report.committed,
             "notes": report.notes,
             "reversal": reversal,
@@ -226,7 +237,9 @@ class ContactAdminService:
         await self._session.flush()
         report.note("an unfinished conversation was cleared")
 
-    async def unlink(self, org_id: uuid.UUID, actor: User, *, name: str) -> dict[str, Any]:
+    async def unlink(
+        self, org_id: uuid.UUID, actor: User, *, name: str, dry_run: bool = False
+    ) -> dict[str, Any]:
         """Take a number away without giving it to anyone.
 
         For a SIM that is gone rather than moved. Separate from `relink`
@@ -242,13 +255,14 @@ class ContactAdminService:
                 "give them an email address first, or remove them"
             )
         previous = target.whatsapp_number
+        target_name = target.full_name  # read before the guard -- see `relink`
 
-        async with guarded(self._session, org_id) as report:
+        async with guarded(self._session, org_id, dry_run=dry_run) as report:
             manifest = await ReversalService(self._session).record(
                 org_id,
                 actor,
                 operation="relink_contact",
-                subject=f"{previous} unlinked from {target.full_name}",
+                subject=f"{previous} unlinked from {target_name}",
                 moved=[
                     {
                         "table": "users",
@@ -279,7 +293,7 @@ class ContactAdminService:
 
         return {
             "number": previous,
-            "user": target.full_name,
+            "user": target_name,
             "committed": report.committed,
             "notes": report.notes,
             "reversal": reversal,

@@ -359,6 +359,103 @@ async def test_relinking_moves_a_number_and_can_be_undone(
             await session.commit()
 
 
+async def test_a_dry_run_writes_nothing_for_any_thin_command(
+    pair: tuple[Product, Product],
+    staff_user: User,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """`guarded()` commits inside its own transaction, so a service that
+    does not take the flag cannot be rolled back by its caller. Every
+    thin command in catalog.py relies on the service for that -- and
+    four of them did not pass it, so their previews wrote.
+
+    One test over all of them: the failure is the same shape each time,
+    and one per command would let the next one added slip through.
+    """
+    # Its own two users: `staff_user`'s name is shared by other fixtures,
+    # and "2 people are called X" is a different failure than the one
+    # this test is about.
+    number = f"+9199{uuid.uuid4().int % 100000000:08d}"
+    async with session_factory() as session:
+        holder = User(
+            org_id=ORG,
+            full_name=f"Dry Holder {uuid.uuid4().hex[:6]}",
+            email=f"dryholder-{uuid.uuid4().hex[:8]}@example.test",
+            whatsapp_number=number,
+            role=UserRole.STAFF,
+        )
+        newcomer = User(
+            org_id=ORG,
+            full_name=f"Dry Newcomer {uuid.uuid4().hex[:6]}",
+            email=f"drynew-{uuid.uuid4().hex[:8]}@example.test",
+            role=UserRole.STAFF,
+        )
+        session.add_all([holder, newcomer])
+        await session.commit()
+        holder_id, holder_name = holder.id, holder.full_name
+        newcomer_id, newcomer_name = newcomer.id, newcomer.full_name
+
+    try:
+        async with session_factory() as session:
+            relinked = await ContactAdminService(session).relink(
+                ORG, staff_user, number=number, to_name=newcomer_name, dry_run=True
+            )
+        assert relinked["committed"] is False
+
+        async with session_factory() as session:
+            unlinked = await ContactAdminService(session).unlink(
+                ORG, staff_user, name=holder_name, dry_run=True
+            )
+        assert unlinked["committed"] is False
+
+        async with session_factory() as session:
+            rebuilt = await DiagnosticsService(session).rebuild_ledgers(
+                ORG, staff_user, dry_run=True
+            )
+        assert rebuilt["committed"] is False
+
+        # the number never moved, and was never taken away
+        async with session_factory() as session:
+            kept = await session.get(User, holder_id)
+            untouched = await session.get(User, newcomer_id)
+            assert kept is not None and kept.whatsapp_number == number
+            assert untouched is not None and untouched.whatsapp_number is None
+    finally:
+        async with session_factory() as session:
+            await session.execute(
+                sa.text("DELETE FROM users WHERE id = ANY(:ids)"),
+                {"ids": [holder_id, newcomer_id]},
+            )
+            await session.commit()
+
+    # delete needs a product nothing has happened to, which `pair` is not
+    async with session_factory() as session:
+        spare = Product(
+            org_id=ORG,
+            product_type_id=uuid.UUID(SEEDED_TEXTILE_TYPE_ID),
+            code=f"DRY{uuid.uuid4().hex[:5].upper()}",
+            description="Dry run probe",
+            unit_id=uuid.UUID(SEEDED_KG_UNIT_ID),
+            created_by=staff_user.id,
+        )
+        session.add(spare)
+        await session.commit()
+        spare_id, spare_code = spare.id, spare.code
+
+    async with session_factory() as session:
+        removed = await ProductAdminService(session).delete(
+            ORG, staff_user, code=spare_code, brand=None, dry_run=True
+        )
+    assert removed["committed"] is False
+
+    async with session_factory() as session:
+        survivor = await session.get(Product, spare_id)
+        assert survivor is not None
+        assert survivor.deleted_at is None, "a --dry-run delete soft-deleted the product"
+        await session.execute(sa.text("DELETE FROM products WHERE id = :id"), {"id": spare_id})
+        await session.commit()
+
+
 async def test_relinking_refuses_to_strand_someone(
     staff_user: User,
     session_factory: async_sessionmaker[AsyncSession],

@@ -200,7 +200,12 @@ def delete_product(
         service = ProductAdminService(ctx.session)
         product = await service.resolve(ctx.org_id, code, label)
         confirm(ctx, expected=product.code, prompt=f"Type {product.code} to confirm: ")
-        result = await service.delete(ctx.org_id, ctx.actor, code=code, brand=label)
+        result = await service.delete(
+            ctx.org_id, ctx.actor, code=code, brand=label, dry_run=ctx.dry_run
+        )
+        if not result["committed"]:
+            console.warn(f"--dry-run: {result['label']} was NOT removed.")
+            return
         console.ok(f"{result['label']} removed")
         _notes(result)
 
@@ -252,8 +257,12 @@ def relink(
         if to.lower() != "to":
             raise AdminError('usage: erp relink 7000087329 to "Firoz"')
         result = await ContactAdminService(ctx.session).relink(
-            ctx.org_id, ctx.actor, number=number, to_name=name
+            ctx.org_id, ctx.actor, number=number, to_name=name, dry_run=ctx.dry_run
         )
+        if not result["committed"]:
+            console.warn(f"--dry-run: {result['number']} was NOT moved.")
+            _notes(result)
+            return
         console.ok(f"{result['number']} → {result['user']}")
         _notes(result)
 
@@ -266,7 +275,12 @@ def unlink(name: Annotated[str, typer.Argument(help="Whose number to remove")]) 
     gone rather than moved."""
 
     async def action(ctx: AdminContext) -> None:
-        result = await ContactAdminService(ctx.session).unlink(ctx.org_id, ctx.actor, name=name)
+        result = await ContactAdminService(ctx.session).unlink(
+            ctx.org_id, ctx.actor, name=name, dry_run=ctx.dry_run
+        )
+        if not result["committed"]:
+            console.warn(f"--dry-run: {result['number']} was NOT unlinked.")
+            return
         console.ok(f"{result['number']} no longer reaches anyone")
         _notes(result)
 
@@ -366,9 +380,14 @@ def rebuild_ledger() -> None:
     touched, only the derived snapshot beside each one. Safe to run."""
 
     async def action(ctx: AdminContext) -> None:
-        result = await DiagnosticsService(ctx.session).rebuild_ledgers(ctx.org_id, ctx.actor)
+        result = await DiagnosticsService(ctx.session).rebuild_ledgers(
+            ctx.org_id, ctx.actor, dry_run=ctx.dry_run
+        )
         for note in result["notes"]:
             console.item(note)
+        if not result["committed"]:
+            console.warn("--dry-run: the running balances were NOT rewritten.")
+            return
         console.ok(f"{result['corrected']} running balance(s) corrected")
 
     run(action)

@@ -139,7 +139,9 @@ class DiagnosticsService:
                 drift.append({"ledger": name, "says": str(snapshot), "should_be": str(total)})
         return drift
 
-    async def rebuild_ledgers(self, org_id: uuid.UUID, actor: User) -> dict[str, Any]:
+    async def rebuild_ledgers(
+        self, org_id: uuid.UUID, actor: User, *, dry_run: bool = False
+    ) -> dict[str, Any]:
         """Rewrite every running balance from the rows themselves.
 
         Computes rather than destroys, like `recost`: the amounts are
@@ -147,7 +149,7 @@ class DiagnosticsService:
         rewritten. Under the guard, so if the result does not balance it
         never happened.
         """
-        async with guarded(self._session, org_id) as report:
+        async with guarded(self._session, org_id, dry_run=dry_run) as report:
             fixed = 0
             for name, model in (("cash", CashLedger), ("bank", BankLedger)):
                 running = ZERO

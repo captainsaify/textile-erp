@@ -436,7 +436,7 @@ class ProductAdminService:
         }
 
     async def delete(
-        self, org_id: uuid.UUID, actor: User, *, code: str, brand: str | None
+        self, org_id: uuid.UUID, actor: User, *, code: str, brand: str | None, dry_run: bool = False
     ) -> dict[str, Any]:
         """Remove a product nothing has ever happened to.
 
@@ -463,7 +463,7 @@ class ProductAdminService:
                 + ". If it is a duplicate, merge it into the real one instead."
             )
 
-        async with guarded(self._session, org_id) as report:
+        async with guarded(self._session, org_id, dry_run=dry_run) as report:
             manifest = await ReversalService(self._session).record(
                 org_id,
                 actor,
