@@ -8,6 +8,11 @@
 > `docs/`. If this file and a doc file disagree, the doc file wins for
 > implementation detail, and this file wins for philosophy/priority.
 
+> **Learning this codebase rather than building it?** Read
+> [`LEARN.md`](LEARN.md) — a 24-session syllabus, taught one session a
+> day by the `codebase-tutor` agent, which tracks where you got to in
+> `docs/learn/progress.md`.
+
 > **Picking up mid-build?** Read [`HANDOFF.md`](HANDOFF.md) first. It
 > records current state, the build order, and — importantly — which
 > remaining tasks must not be attempted by a smaller model. If you are
