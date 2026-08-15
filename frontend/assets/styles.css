@@ -794,6 +794,57 @@ tr.detail-row > td {
   }
 }
 
+/* A Galaxy Z Fold's cover display is ~320px, not the ~390px a "phone"
+   usually means. At that width the identity row missed fitting by about
+   four pixels -- brand 83 + gap + the account group's 215 against 304
+   of usable width -- so it wrapped and the bar went back to three rows.
+   Nothing here changes what is on the bar, only how much room it asks
+   for: the account controls step down a size, and the brand ellipsizes
+   before anything is pushed off. */
+@media (max-width: 400px) {
+  .topbar {
+    gap: 0.4rem;
+    padding: 0.45rem 0.6rem;
+  }
+
+  .control-link {
+    font-size: 0.8rem;
+    padding: 0.2rem 0.45rem;
+  }
+
+  .topbar-end button.link {
+    font-size: 0.85rem;
+    padding: 0.3rem 0.35rem;
+  }
+}
+
+/* The first-generation Fold's cover display is ~280px. With wrapping
+   on, flex wraps before it shrinks, so the brand never gives up its
+   width on its own and the row breaks anyway -- it has to be asked to
+   be smaller. */
+@media (max-width: 320px) {
+  .brand {
+    font-size: 0.9rem;
+  }
+
+  .control-link {
+    font-size: 0.75rem;
+  }
+
+  .topbar {
+    gap: 0.3rem;
+    padding: 0.45rem 0.4rem;
+  }
+
+  .topbar-end {
+    gap: 0.3rem;
+  }
+
+  .topbar-end button.link {
+    font-size: 0.8rem;
+  }
+}
+
 /* The sheet is pinned under a topbar of a fixed assumed height. Below
    900px the two columns have already collapsed to one, so the sheet is
    above the lines rather than beside them -- pinning it there only
