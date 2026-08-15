@@ -542,6 +542,7 @@
     records: "page-records",
     money: "page-money",
     stock: "page-stock",
+    partners: "page-partners",
     whatsapp: "page-whatsapp",
     system: "page-system",
   };
@@ -551,6 +552,7 @@
   const ON_OPEN = {
     records: () => loadRecords(),
     stock: () => loadProducts(),
+    partners: () => loadPartners(),
     whatsapp: () => loadWhatsApp(),
     system: () => loadSystem(),
   };
@@ -855,6 +857,44 @@
     });
     ["pay-party", "pay-amount"].forEach((id) => ($(id).value = ""));
     return `Paid ${Money.format(result.amount)} to ${result.party}. Owing ${Money.format(result.outstanding_after)}.`;
+  });
+
+  // ---------------------------------------------------------- partners
+
+  let partnerNames = [];
+
+  async function loadPartners() {
+    const data = await api("/control/partners");
+    partnerNames = data.items.map((item) => item.name);
+    $("partner-balances").replaceChildren(
+      rowsTable(["Partner", "Capital"], data.items, (item) => {
+        const amount = el("span", item.negative ? "bad" : "", Money.format(item.balance));
+        return [item.name, amount];
+      }),
+    );
+  }
+
+  wire("cap-go", "cap-out", async () => {
+    const partner = $("cap-partner").value.trim();
+    if (!partner) throw new Error("Pick a partner first.");
+    const direction = $("cap-direction").value;
+    const result = await api("/control/partners/capital", {
+      method: "POST",
+      body: JSON.stringify({
+        partner,
+        direction,
+        amount: $("cap-amount").value.trim(),
+        via: $("cap-via").value,
+      }),
+    });
+    $("cap-amount").value = "";
+    await loadPartners();
+    const verb = direction === "in" ? "put in" : "took out";
+    return (
+      `${result.partner} ${verb} ${Money.format(result.amount)} (${result.via}). ` +
+      `Capital now ${Money.format(result.balance)}.` +
+      (result.negative ? " ⚠️ That partner is now in deficit." : "")
+    );
   });
 
   wire("ex-go", "ex-out", async () => {
@@ -1414,6 +1454,56 @@
       $("party").value = item.name;
       $("party-note").textContent = `${Money.format(item.outstanding)} outstanding`;
     },
+  });
+
+  /** The same picker the bill header uses, for the money forms.
+   *
+   * These were plain text boxes: the name had to be typed exactly, and a
+   * near-miss either failed or -- worse where money is concerned -- was
+   * taken as a different party. No "add new" option here on purpose. A
+   * payment is to someone you already trade with; if the name is not in
+   * the list, the party is missing and that is worth noticing, not
+   * papering over from a payment form. */
+  function partyPicker(inputId, listId, kind, noteOf) {
+    combo($(inputId), $(listId), {
+      fetchItems: async (query) =>
+        (await api(`/control/parties?q=${encodeURIComponent(query)}&kind=${kind}`)).items,
+      render: (item) => {
+        const node = el("div");
+        node.append(
+          el("span", "code", item.name),
+          el("span", "stock", `${Money.format(item.outstanding)} open`),
+        );
+        return node;
+      },
+      onPick: (item) => {
+        $(inputId).value = item.name;
+        if (noteOf) noteOf(item);
+      },
+    });
+  }
+
+  partyPicker("rc-party", "rc-party-list", "customer");
+  partyPicker("pay-party", "pay-party-list", "supplier");
+
+  /** Partners come from the page's own list rather than a lookup: there
+   * are two or three of them, they are already loaded for the balances
+   * beside the form, and capital may only ever go to a partner who
+   * exists. Nothing to create, nothing to fetch. */
+  combo($("cap-partner"), $("cap-partner-list"), {
+    fetchItems: async (query) => {
+      if (!partnerNames.length) await loadPartners();
+      const needle = query.toLowerCase();
+      return partnerNames
+        .filter((name) => name.toLowerCase().includes(needle))
+        .map((name) => ({ name }));
+    },
+    render: (item) => {
+      const node = el("div");
+      node.append(el("span", "code", item.name));
+      return node;
+    },
+    onPick: (item) => ($("cap-partner").value = item.name),
   });
 
   document.addEventListener("keydown", (event) => {

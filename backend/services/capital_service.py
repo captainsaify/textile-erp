@@ -26,6 +26,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.core.db import joined_transaction
 from backend.core.exceptions import NotFoundError, ValidationError
 from backend.models import Partner, PartnerCapital, User
 from backend.models.enums import AccountCode, CapitalEntryType, LedgerEntryType
@@ -148,6 +149,7 @@ class CapitalService:
         via: str,
         today: datetime.date,
         source_row: PartnerCapital | None = None,
+        channel: str = "whatsapp",
     ) -> decimal.Decimal:
         """The money-moving half, shared by an immediate post and a
         just-approved one. Signed so a withdrawal is negative on both
@@ -219,6 +221,7 @@ class CapitalService:
                 "settled_via": via,
                 "resulting_balance": str(capital_row.resulting_balance),
             },
+            channel=channel,
         )
         return capital_row.resulting_balance
 
@@ -354,6 +357,62 @@ class CapitalService:
             on=on,
             whatsapp_message_id=whatsapp_message_id,
         )
+
+    async def post_directly(
+        self,
+        actor: User,
+        *,
+        entry_type: CapitalEntryType,
+        partner_name: str,
+        amount: decimal.Decimal,
+        via: str,
+        on: str | None = None,
+    ) -> CapitalPosted:
+        """Move capital now, with no second signature.
+
+        The dual-approval rule (docs/06_Accounting.md §8) exists because
+        a WhatsApp message is a claim: whoever holds the phone says a
+        partner put money in or took it out, and the second partner is
+        what makes that true. Master Control is a different room -- it is
+        reached with an owner's own password, over the dashboard, and
+        every other irreversible thing in it is already one click. A
+        second signature there would be the same person twice.
+
+        So this is the same money-moving code as an approved request,
+        entered by a door that has already been locked once. It writes
+        `channel='dashboard'` rather than `'whatsapp'`, so the audit log
+        answers "was this approved, or taken directly?" without anyone
+        having to remember which screen was open.
+
+        Amounts are not capped, on purpose. A cap that the same person
+        can raise is a delay, not a control -- and pretending otherwise
+        would be worse than being plain about it.
+        """
+        amount = _validate_amount(amount)
+        # `joined_transaction`, not `begin()`: this is called from an HTTP
+        # handler whose session has usually autobegun a transaction on the
+        # first read, and `begin()` refuses when one is open. The handler
+        # commits (core/db.py `joined_transaction`).
+        async with joined_transaction(self._session):
+            today = await entry_day(self._session, actor.org_id, on)
+            partner = await self._resolve_partner(actor.org_id, partner_name)
+            balance = await self._post_entry(
+                actor,
+                partner,
+                entry_type=entry_type,
+                amount=amount,
+                via=via,
+                today=today,
+                channel="dashboard",
+            )
+            return CapitalPosted(
+                partner_name=partner.display_name,
+                entry_type=entry_type,
+                amount=amount,
+                via=via,
+                new_balance=balance,
+                negative_balance=balance < ZERO,
+            )
 
     async def _resolve_request(self, org_id: uuid.UUID, reference: str) -> PartnerCapital:
         matches = await self._capital.find_pending_by_prefix(org_id, reference.strip())

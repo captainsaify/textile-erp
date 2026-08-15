@@ -645,3 +645,107 @@ async def test_business_date_is_used_for_entry_date(
         ).scalar_one()
     assert entry_date == tz_today
     assert isinstance(entry_date, datetime.date)
+
+
+# --------------------------------------------------------------------
+# Master Control: the same movement, without the second signature
+# --------------------------------------------------------------------
+
+
+async def test_master_control_posts_capital_without_approval(
+    pair: Pair, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The dual-approval rule guards a *claim*: over WhatsApp, whoever
+    holds the phone says a partner put money in. Master Control is
+    reached with an owner's own password, so the second signature would
+    be the same person twice."""
+    from backend.models.enums import CapitalEntryType
+    from backend.services.capital_service import CapitalService
+
+    async with session_factory() as session:
+        result = await CapitalService(session).post_directly(
+            pair.rahul_ctx.user,
+            entry_type=CapitalEntryType.CONTRIBUTION,
+            partner_name="Rahul",
+            amount=D("50000"),
+            via="bank",
+        )
+
+    assert result.new_balance == D("50000.00")
+    assert result.negative_balance is False
+    # posted, not pending -- the whole point
+    assert await _capital_balance(session_factory, pair.rahul.id) == D("50000.00")
+    async with session_factory() as session:
+        pending = (
+            await session.execute(
+                sa.select(sa.func.count())
+                .select_from(PartnerCapital)
+                .where(PartnerCapital.org_id == ORG, PartnerCapital.status == "pending")
+            )
+        ).scalar_one()
+    assert pending == 0
+
+
+async def test_a_direct_post_is_marked_as_coming_from_the_dashboard(
+    pair: Pair, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Otherwise the audit log cannot answer "was this approved, or taken
+    directly?" -- which is the only question worth asking about a
+    movement that skipped the gate."""
+    from backend.models.enums import CapitalEntryType
+    from backend.services.capital_service import CapitalService
+
+    async with session_factory() as session:
+        await CapitalService(session).post_directly(
+            pair.rahul_ctx.user,
+            entry_type=CapitalEntryType.CONTRIBUTION,
+            partner_name="Rahul",
+            amount=D("1000"),
+            via="cash",
+        )
+
+    async with session_factory() as session:
+        channels = list(
+            (
+                await session.execute(
+                    sa.text(
+                        "select channel from audit_logs where org_id = :org "
+                        "and action = 'capital.contribution'"
+                    ),
+                    {"org": ORG},
+                )
+            ).scalars()
+        )
+    assert channels == ["dashboard"]
+
+
+async def test_a_direct_withdrawal_moves_cash_and_can_go_negative(
+    pair: Pair, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """No cap on the amount, on purpose: a limit the same person can
+    raise is a delay, not a control. A deficit is still called out."""
+    from backend.models.enums import CapitalEntryType
+    from backend.services.capital_service import CapitalService
+
+    async with session_factory() as session:
+        await CapitalService(session).post_directly(
+            pair.rahul_ctx.user,
+            entry_type=CapitalEntryType.CONTRIBUTION,
+            partner_name="Rahul",
+            amount=D("10000"),
+            via="cash",
+        )
+    cash_after_in = await _cash_balance(session_factory)
+
+    async with session_factory() as session:
+        out = await CapitalService(session).post_directly(
+            pair.rahul_ctx.user,
+            entry_type=CapitalEntryType.WITHDRAWAL,
+            partner_name="Rahul",
+            amount=D("25000"),
+            via="cash",
+        )
+
+    assert out.new_balance == D("-15000.00")
+    assert out.negative_balance is True
+    assert await _cash_balance(session_factory) == cash_after_in - D("25000.00")

@@ -10,6 +10,7 @@ access token, and owner-only figures stay owner-only.
 from __future__ import annotations
 
 import datetime
+import decimal
 import uuid
 from collections.abc import AsyncIterator
 
@@ -1547,3 +1548,93 @@ async def test_the_preview_and_the_merge_need_the_control_credential(
             json={"kind": "customer", "loser": loser, "winner": winner, "confirm": winner},
         )
         assert response.status_code == 401
+
+
+# --------------------------------------------------------------------
+# master control: partner capital, without a second signature
+# --------------------------------------------------------------------
+
+
+async def _control_auth(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> dict[str, str]:
+    secret = "a-long-generated-secret"
+    await _set_control_password(session_factory, owner, secret)
+    signin = await client.post(
+        "/api/v1/auth/control/login", json={"email": owner.email, "password": secret}
+    )
+    assert signin.status_code == 200, signin.text
+    return _auth(str(signin.json()["token"]))
+
+
+async def test_capital_can_be_put_in_from_master_control(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from backend.models import Partner
+
+    async with session_factory() as session, session.begin():
+        session.add(
+            Partner(
+                org_id=uuid.UUID(SEEDED_ORG_ID),
+                display_name="Imran",
+                profit_share_percent=decimal.Decimal("50"),
+                created_by=owner.id,
+            )
+        )
+
+    headers = await _control_auth(client, owner, session_factory)
+    response = await client.post(
+        "/api/v1/control/partners/capital",
+        headers=headers,
+        json={"partner": "Imran", "direction": "in", "amount": "250000", "via": "bank"},
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["partner"] == "Imran"
+    assert body["balance"] == "250000.00"
+    assert body["negative"] is False
+
+    listed = await client.get("/api/v1/control/partners", headers=headers)
+    assert listed.status_code == 200
+    assert {"name": "Imran", "balance": "250000.00", "negative": False} in listed.json()["items"]
+
+
+async def test_taking_capital_out_past_zero_is_allowed_and_flagged(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from backend.models import Partner
+
+    async with session_factory() as session, session.begin():
+        session.add(
+            Partner(
+                org_id=uuid.UUID(SEEDED_ORG_ID),
+                display_name="Imran",
+                profit_share_percent=decimal.Decimal("50"),
+                created_by=owner.id,
+            )
+        )
+
+    headers = await _control_auth(client, owner, session_factory)
+    response = await client.post(
+        "/api/v1/control/partners/capital",
+        headers=headers,
+        json={"partner": "Imran", "direction": "out", "amount": "5000", "via": "cash"},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["balance"] == "-5000.00"
+    assert response.json()["negative"] is True
+
+
+async def test_moving_capital_needs_the_control_credential(
+    client: AsyncClient, owner: User, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A dashboard token must not reach it. This endpoint moves money
+    with no approval behind it, so it is exactly the one that must not be
+    reachable by the weaker credential."""
+    dashboard = _auth(await _token(client, owner))
+    response = await client.post(
+        "/api/v1/control/partners/capital",
+        headers=dashboard,
+        json={"partner": "Imran", "direction": "in", "amount": "100", "via": "cash"},
+    )
+    assert response.status_code == 401

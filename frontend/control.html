@@ -39,6 +39,7 @@
           <button data-page="records">Records</button>
           <button data-page="money">Money</button>
           <button data-page="stock">Stock</button>
+          <button data-page="partners">Partners</button>
           <button data-page="whatsapp">WhatsApp</button>
           <button data-page="system">System</button>
         </nav>
@@ -65,7 +66,11 @@
                 From a customer. Left without a bill number it settles the oldest
                 open ones first, which is what a payment on account does.
               </p>
-              <div class="field"><label>Customer</label><input id="rc-party" /></div>
+              <div class="field">
+                <label for="rc-party">Customer</label>
+                <input id="rc-party" placeholder="Type a name…" />
+                <div id="rc-party-list" class="combo-list" hidden></div>
+              </div>
               <div class="field narrow"><label>Amount</label><input id="rc-amount" inputmode="decimal" /></div>
               <div class="field narrow"><label>Into</label>
                 <select id="rc-via"><option value="cash">Cash</option><option value="bank">Bank</option></select>
@@ -78,7 +83,11 @@
             <section class="card">
               <h2>Money out</h2>
               <p class="muted">To a supplier, or an expense.</p>
-              <div class="field"><label>Supplier</label><input id="pay-party" /></div>
+              <div class="field">
+                <label for="pay-party">Supplier</label>
+                <input id="pay-party" placeholder="Type a name…" />
+                <div id="pay-party-list" class="combo-list" hidden></div>
+              </div>
               <div class="field narrow"><label>Amount</label><input id="pay-amount" inputmode="decimal" /></div>
               <div class="field narrow"><label>From</label>
                 <select id="pay-via"><option value="cash">Cash</option><option value="bank">Bank</option></select>
@@ -180,6 +189,55 @@
             <div id="pm-out" class="hint"></div>
             <div id="pm-preview" hidden></div>
           </section>
+        </section>
+
+        <!-- Partner capital, without the second signature. Over WhatsApp
+             a capital movement is a claim about what someone else did,
+             so it waits for another partner. This page is behind an
+             owner's own password, and asking that person to approve
+             their own action is a signature they hand themselves. -->
+        <section id="page-partners" hidden>
+          <div class="grid-2">
+            <section class="card">
+              <h2>Capital</h2>
+              <p class="muted">
+                Posted the moment you submit it — no approval, no waiting.
+                Same ledger and journal as an approved request; the audit
+                log records that it came from here.
+              </p>
+              <div class="field">
+                <label for="cap-partner">Partner</label>
+                <input id="cap-partner" placeholder="Type a name…" />
+                <div id="cap-partner-list" class="combo-list" hidden></div>
+              </div>
+              <div class="field narrow">
+                <label for="cap-direction">Direction</label>
+                <select id="cap-direction">
+                  <option value="in">Put in</option>
+                  <option value="out">Take out</option>
+                </select>
+              </div>
+              <div class="field narrow">
+                <label for="cap-amount">Amount</label>
+                <input id="cap-amount" inputmode="decimal" />
+              </div>
+              <div class="field narrow">
+                <label for="cap-via">Cash or bank</label>
+                <select id="cap-via">
+                  <option value="cash">Cash</option>
+                  <option value="bank">Bank</option>
+                </select>
+              </div>
+              <button type="button" id="cap-go" class="primary">Post it</button>
+              <div id="cap-out" class="hint"></div>
+            </section>
+
+            <section class="card">
+              <h2>Balances</h2>
+              <p class="muted">What each partner's capital stands at now.</p>
+              <div id="partner-balances"></div>
+            </section>
+          </div>
         </section>
 
         <!-- Delivery. Not a log viewer: the question people arrive with

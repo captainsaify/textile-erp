@@ -25,7 +25,7 @@ from backend.api.amounts import money_str, qty_display
 from backend.api.deps import ControlUser, Session
 from backend.core.exceptions import DuplicateSaleError, ExactDuplicateInvoiceError
 from backend.models import Product, ProductType, PurchaseHeader
-from backend.models.enums import SalePaymentType
+from backend.models.enums import CapitalEntryType, SalePaymentType
 from backend.repositories.purchase_repository import PurchaseRepository
 from backend.services import message_log
 from backend.services.admin.contacts import ContactAdminService
@@ -38,6 +38,7 @@ from backend.services.admin.purge import PurgeService
 from backend.services.admin.salefix import SaleFixService
 from backend.services.admin.stock import StockAdminService
 from backend.services.backup_service import BackupService
+from backend.services.capital_service import CapitalService
 from backend.services.money_service import MoneyService
 from backend.services.purchase_service import Draft, DraftLine, PurchaseService
 from backend.services.reconciliation_service import ReconciliationService
@@ -1304,6 +1305,76 @@ async def unlink_contact(body: UnlinkIn, user: ControlUser, session: Session) ->
     result = await ContactAdminService(session).unlink(user.org_id, user, name=body.user)
     await session.commit()
     return result
+
+
+# --- partners ----------------------------------------------------------
+
+
+@router.get("/partners")
+async def list_partners(user: ControlUser, session: Session) -> dict[str, Any]:
+    """Every partner and what their capital stands at.
+
+    Doubles as the picker for the form below, so the name typed into it
+    can only ever be a name the books already know.
+    """
+    from backend.repositories.accounting_repository import PartnerCapitalRepository
+    from backend.repositories.party_repository import PartnerRepository
+
+    capital = PartnerCapitalRepository(session)
+    items = []
+    for partner in await PartnerRepository(session).list_active(user.org_id):
+        balance = await capital.balance(user.org_id, partner.id)
+        items.append(
+            {
+                "name": partner.display_name,
+                "balance": money_str(balance),
+                "negative": balance < decimal.Decimal("0"),
+            }
+        )
+    return {"items": items}
+
+
+class CapitalIn(BaseModel):
+    partner: str = Field(min_length=1, max_length=120)
+    direction: str = Field(pattern="^(in|out)$")
+    amount: decimal.Decimal = Field(gt=0)
+    via: str = Field(default="cash", pattern="^(cash|bank)$")
+    on: str | None = None
+
+
+@router.post("/partners/capital", status_code=status.HTTP_201_CREATED)
+async def move_capital(body: CapitalIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    """Put capital in or take it out, immediately.
+
+    Over WhatsApp this waits for a second partner, because a message is
+    a claim about what someone else did. Here it does not: this page is
+    behind an owner's own password, and asking that same person to
+    approve their own action would be a signature they hand themselves.
+
+    Posted the moment it is submitted -- same ledger, same journal, same
+    balance chain as an approved request. The audit row records
+    `channel='dashboard'`, which is how anyone reading the log later can
+    tell the two apart.
+    """
+    result = await CapitalService(session).post_directly(
+        user,
+        entry_type=(
+            CapitalEntryType.CONTRIBUTION if body.direction == "in" else CapitalEntryType.WITHDRAWAL
+        ),
+        partner_name=body.partner,
+        amount=body.amount,
+        via=body.via,
+        on=body.on,
+    )
+    await session.commit()
+    return {
+        "partner": result.partner_name,
+        "direction": body.direction,
+        "amount": money_str(result.amount),
+        "via": result.via,
+        "balance": money_str(result.new_balance),
+        "negative": result.negative_balance,
+    }
 
 
 # --- messages ----------------------------------------------------------
