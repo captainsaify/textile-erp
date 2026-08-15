@@ -381,10 +381,14 @@
   function addRow() {
     rows.push(blankRow());
     renderRows();
+    // Focus the new line's Item field. Counted back from the end because
+    // every row renders the same five text inputs in the same order.
     const inputs = $("rows").querySelectorAll("input[type=text]");
     const last = inputs[inputs.length - 5];
     if (last) last.focus();
   }
+
+  $("add-row").addEventListener("click", addRow);
 
   function focusCell(index, key) {
     const field = document.querySelector(`input[data-row="${index}"][data-key="${key}"]`);
@@ -702,39 +706,25 @@
   }
 
   async function loadPurchaseRecords() {
+    // Built by hand until now, which is why it was the one table without
+    // a scroller and, later, without the stacked-phone labels. Same
+    // helper as sales: one table, one place to fix.
     const data = await api("/control/purchases/recent");
-    const host = $("recent");
-    host.replaceChildren();
-    if (!data.items.length) {
-      host.append(el("p", "muted", "No purchases yet."));
-      return;
-    }
-    const table = el("table", "grid");
-    const head = table.createTHead().insertRow();
-    ["Invoice", "Date", "Supplier", "Total", "Paid", ""].forEach((label) => {
-      const th = document.createElement("th");
-      th.textContent = label;
-      head.append(th);
-    });
-    const body = table.createTBody();
-    data.items.forEach((item) => {
-      const tr = body.insertRow();
-      tr.insertCell().textContent = item.invoice_no;
-      tr.insertCell().textContent = item.date;
-      tr.insertCell().textContent = item.supplier;
-      const total = tr.insertCell();
-      total.className = "num";
-      total.textContent = Money.format(item.grand_total);
-      const paid = tr.insertCell();
-      paid.className = "num";
-      paid.textContent = Money.format(item.amount_paid);
-      const action = tr.insertCell();
-      const remove = el("button", "link", "Remove");
-      remove.type = "button";
-      remove.addEventListener("click", () => previewPurge(item.invoice_no));
-      action.append(remove);
-    });
-    host.replaceChildren(scroller(table));
+    $("recent").replaceChildren(
+      rowsTable(["Invoice", "Date", "Supplier", "Total", "Paid", ""], data.items, (item) => {
+        const remove = el("button", "link", "Remove");
+        remove.type = "button";
+        remove.addEventListener("click", () => previewPurge(item.invoice_no));
+        return [
+          item.invoice_no,
+          item.date,
+          item.supplier,
+          Money.format(item.grand_total),
+          Money.format(item.amount_paid),
+          remove,
+        ];
+      }),
+    );
   }
 
   /** Preview is mandatory and is a real dry run: the removal genuinely
@@ -970,7 +960,10 @@
   }
 
   function rowsTable(headers, items, cells) {
-    const table = el("table", "grid");
+    // `stack`: below 600px each row becomes a labelled block instead of a
+    // row too wide to read. Not on the entry grid, which is a form and
+    // has to stay a grid.
+    const table = el("table", "grid stack");
     const head = table.createTHead().insertRow();
     headers.forEach((label) => {
       const th = document.createElement("th");
@@ -987,10 +980,11 @@
     }
     items.forEach((item) => {
       const tr = body.insertRow();
-      cells(item).forEach((value) => {
+      cells(item).forEach((value, index) => {
         const cell = tr.insertCell();
         if (value instanceof Node) cell.append(value);
         else cell.textContent = value;
+        if (headers[index]) cell.dataset.label = headers[index];
       });
     });
     return scroller(table);

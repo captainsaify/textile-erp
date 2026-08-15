@@ -390,6 +390,92 @@ figure.card figcaption {
   overflow-x: auto;
 }
 
+/* ------------------------------------------ tables on a small screen
+ *
+ * Sideways scrolling is a fallback, not a design: on a phone the stock
+ * list showed code, brand and description, and the three figures you
+ * actually opened it for -- on hand, cost, value -- were off the right
+ * edge. Below 600px each row becomes its own block and each figure
+ * carries its column name, drawn from `data-label` (set by the two
+ * table builders, so no caller has to remember).
+ *
+ * `table.stack` only: the entry grid in Master Control is a form, and a
+ * form that stacks stops being enterable.
+ */
+@media (max-width: 600px) {
+  table.stack,
+  table.stack tbody,
+  table.stack tr,
+  table.stack td {
+    display: block;
+    width: auto;
+  }
+
+  /* The header row labels nothing once the columns are gone. */
+  table.stack thead {
+    display: none;
+  }
+
+  table.stack tr {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.5rem 0.7rem;
+    margin-bottom: 0.6rem;
+  }
+
+  table.stack td {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    border: 0;
+    padding: 0.25rem 0;
+    /* a description is a sentence here, not a column */
+    white-space: normal;
+    text-align: left;
+  }
+
+  table.stack td.num {
+    text-align: right;
+  }
+
+  table.stack td[data-label]::before {
+    content: attr(data-label);
+    color: var(--ink-muted);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    flex: 0 0 auto;
+  }
+
+  /* The first cell is the identity of the row -- code, invoice number.
+     It reads as a heading rather than another labelled field. */
+  table.stack td:first-child {
+    font-weight: 600;
+    font-size: 1.05rem;
+    padding-bottom: 0.4rem;
+  }
+
+  /* An empty label is an action or a flag column: show the value alone,
+     pushed right, with nothing to explain it. */
+  table.stack td:not([data-label]) {
+    justify-content: flex-end;
+  }
+
+  /* Except the "nothing here yet" row, which is a sentence and reads
+     from the left like one. */
+  table.stack td.muted {
+    justify-content: flex-start;
+    font-weight: 400;
+    font-size: 1rem;
+  }
+
+  /* Nothing overflows any more, so the scroller must not imply it can. */
+  .table-scroll:has(table.stack) {
+    overflow-x: visible;
+  }
+}
+
 table {
   border-collapse: collapse;
   width: 100%;

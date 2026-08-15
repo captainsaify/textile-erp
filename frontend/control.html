@@ -392,7 +392,15 @@
             </thead>
             <tbody id="rows"></tbody>
           </table>
-          <p class="hint">Enter on the last row adds another. Total KG and Amount are worked out.</p>
+          <!-- A button, not only the Enter shortcut. Enter on the last row
+               is a laptop habit; a phone keyboard shows "go" or nothing at
+               all on a numeric field, so on a phone a bill could not have a
+               second line. -->
+          <button type="button" id="add-row" class="add-line">+ Add line</button>
+          <p class="hint">
+            Enter on the last row adds another too. Total KG and Amount are
+            worked out.
+          </p>
 
           <div class="entry-foot">
             <section class="charges">

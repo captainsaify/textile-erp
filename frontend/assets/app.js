@@ -72,6 +72,12 @@
 
   function table(columns, rows, { onRowClick } = {}) {
     const el = document.createElement("table");
+    // Below 600px the stylesheet turns each row into a stacked block and
+    // draws the column name from `data-label` -- a phone has no room for
+    // seven columns, and a header row scrolled off to the left labels
+    // nothing. Set here so every table in the dashboard gets it from one
+    // place rather than each caller remembering.
+    el.className = "stack";
     const head = el.createTHead().insertRow();
     columns.forEach((column) => {
       const th = document.createElement("th");
@@ -101,6 +107,9 @@
         if (value instanceof Node) td.append(value);
         else td.innerHTML = value;
         if (column.numeric) td.className = "num";
+        // Empty for the action/flag columns, which have no header worth
+        // repeating; the stacked view then shows the value alone.
+        if (column.label) td.dataset.label = column.label;
       });
     });
     return el;

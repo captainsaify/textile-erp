@@ -231,6 +231,32 @@ button:focus-visible {
   color: var(--danger);
 }
 
+/* The only way to add a line on a phone. Full width there because it is
+   the next thing you do after filling a row, and a 44px target you can
+   hit without looking beats a tidy inline link. */
+.add-line {
+  margin-top: 0.6rem;
+  background: none;
+  border: 1px dashed var(--border);
+  color: var(--ink-muted);
+  border-radius: var(--radius, 8px);
+  padding: 0.55rem 0.9rem;
+  font-weight: 550;
+}
+
+.add-line:hover {
+  border-style: solid;
+  color: var(--ink);
+}
+
+@media (max-width: 768px) {
+  .add-line {
+    display: block;
+    width: 100%;
+    min-height: 44px;
+  }
+}
+
 .entry-foot {
   display: flex;
   gap: 2rem;
