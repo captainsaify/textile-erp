@@ -1313,16 +1313,39 @@ async def unlink_contact(body: UnlinkIn, user: ControlUser, session: Session) ->
 
 @router.get("/payments/recent")
 async def recent_payments(
-    user: ControlUser, session: Session, limit: Annotated[int, Query(ge=1, le=50)] = 20
+    user: ControlUser,
+    session: Session,
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    include_reversed: Annotated[bool, Query()] = False,
 ) -> dict[str, Any]:
     """Payments in and out, newest first, so one can be picked to correct.
 
     Read from `audit_logs` because that row *is* the payment's handle --
     the reference on the receipt, what `undo payment` takes, and what the
     edit below takes. There is no payments table to read instead.
+
+    **Reversed ones are left out unless asked for.** A reversed payment
+    is not a payment any more: it settled nothing and moved nothing on
+    balance, and correcting one is refused anyway. Every correction
+    leaves one behind, so showing them means the list fills with pairs
+    where only one half can be acted on. They are one checkbox away,
+    because "where did that payment go" is still a question people ask
+    and an absence cannot answer it.
     """
+    from sqlalchemy import or_
 
     from backend.models import AuditLog, Customer, Supplier
+
+    hide_reversed = (
+        []
+        if include_reversed
+        else [
+            or_(
+                AuditLog.after_state["reversed"].astext.is_(None),
+                AuditLog.after_state["reversed"].astext != "true",
+            )
+        ]
+    )
 
     rows = list(
         (
@@ -1331,6 +1354,7 @@ async def recent_payments(
                 .where(
                     AuditLog.org_id == user.org_id,
                     AuditLog.action.in_(["payment.paid", "payment.received"]),
+                    *hide_reversed,
                 )
                 .order_by(AuditLog.created_at.desc())
                 .limit(limit)

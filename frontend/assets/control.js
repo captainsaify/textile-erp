@@ -855,7 +855,10 @@
   let editing = null;
 
   async function loadPayments() {
-    const data = await api("/control/payments/recent");
+    const withReversed = $("payments-reversed").checked;
+    const data = await api(
+      `/control/payments/recent${withReversed ? "?include_reversed=true" : ""}`,
+    );
     $("payments").replaceChildren(
       rowsTable(
         ["Ref", "When", "Direction", "Party", "Amount", "Via", ""],
@@ -896,6 +899,10 @@
     $("pe-out").textContent = "";
     $("pe-amount").focus();
   }
+
+  $("payments-reversed").addEventListener("change", () => {
+    loadPayments().catch((exc) => banner(exc.message));
+  });
 
   $("pe-cancel").addEventListener("click", () => {
     editing = null;

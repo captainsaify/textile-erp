@@ -1713,3 +1713,51 @@ async def test_a_purged_bill_disappears_from_every_list_but_keeps_its_row(
             )
         ).scalar_one()
     assert row is True, "the row must survive; hiding is not deleting"
+
+
+async def test_a_reversed_payment_is_left_out_of_the_list_unless_asked_for(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Every correction leaves a reversed payment behind. Showing them by
+    default fills the list with pairs where only one half can be acted
+    on -- and correcting a reversed one is refused anyway."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    invoice = f"REV-{uuid.uuid4().hex[:5]}"
+
+    created = await client.post(
+        "/api/v1/control/purchases",
+        headers=headers,
+        json={
+            "supplier": f"Supp {stocked_code}",
+            "invoice_no": invoice,
+            "invoice_date": "2026-08-14",
+            "lines": [{"code": stocked_code, "qty": "800", "rate": "120"}],
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    paid = await client.post(
+        "/api/v1/control/pay",
+        headers=headers,
+        json={"party": f"Supp {stocked_code}", "amount": "5000", "via": "cash"},
+    )
+    assert paid.status_code == 201, paid.text
+    reference = paid.json()["reference"]
+
+    reversed_response = await client.post(
+        f"/api/v1/control/payments/{reference}/reverse", headers=headers
+    )
+    assert reversed_response.status_code == 200, reversed_response.text
+
+    hidden = await client.get("/api/v1/control/payments/recent", headers=headers)
+    assert reference not in [item["reference"] for item in hidden.json()["items"]]
+
+    shown = await client.get(
+        "/api/v1/control/payments/recent?include_reversed=true", headers=headers
+    )
+    match = [item for item in shown.json()["items"] if item["reference"] == reference]
+    assert match and match[0]["reversed"] is True

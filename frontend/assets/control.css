@@ -231,6 +231,24 @@ button:focus-visible {
   color: var(--danger);
 }
 
+/* A checkbox that reads as one line with its label, rather than a
+   stacked field -- it switches a list, it does not fill in a form. */
+.inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 0.7rem;
+  color: var(--ink-muted);
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.inline-check input {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--series-1, #3f7cac);
+}
+
 /* The only way to add a line on a phone. Full width there because it is
    the next thing you do after filling a row, and a 44px target you can
    hit without looking beats a tidy inline link. */
