@@ -1584,6 +1584,13 @@
   });
   document.querySelectorAll("#nav button").forEach((button) => {
       button.classList.toggle("active", button.dataset.page === name);
+      // On a phone the bar is one row that scrolls sideways rather than
+      // three rows that wrap, so the section just opened can be off to
+      // the right of what is visible. `nearest` block, so selecting a
+      // section never scrolls the page itself.
+      if (button.classList.contains("active")) {
+        button.scrollIntoView({ inline: "center", block: "nearest" });
+      }
     });
     document.querySelectorAll(".page").forEach((page) => {
       page.hidden = page.id !== `page-${name}`;

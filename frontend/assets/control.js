@@ -559,6 +559,9 @@
     if (PAGES[next]) {
       document.querySelectorAll("#nav button").forEach((button) => {
         button.classList.toggle("active", button.dataset.page === next);
+        if (button.classList.contains("active")) {
+          button.scrollIntoView({ inline: "center", block: "nearest" });
+        }
       });
       $("entry").hidden = true;
       Object.values(PAGES).forEach((id) => ($(id).hidden = id !== PAGES[next]));
@@ -570,6 +573,9 @@
     kind = next;
     document.querySelectorAll("#nav button").forEach((button) => {
       button.classList.toggle("active", button.dataset.page === kind);
+      if (button.classList.contains("active")) {
+        button.scrollIntoView({ inline: "center", block: "nearest" });
+      }
     });
     const sale = kind === "sale";
     $("party-label").textContent = sale ? "Customer" : "Supplier";
@@ -726,7 +732,7 @@
       remove.addEventListener("click", () => previewPurge(item.invoice_no));
       action.append(remove);
     });
-    host.replaceChildren(table);
+    host.replaceChildren(scroller(table));
   }
 
   /** Preview is mandatory and is a real dry run: the removal genuinely
@@ -910,6 +916,19 @@
 
   // ----------------------------------------------------------- system
 
+  /** A table in its own horizontal scroller.
+   *
+   * Cells are `white-space: nowrap`, so a six-column table is wider than
+   * a phone. Without the wrapper that width is the *page's*, and the
+   * whole document scrolls sideways -- the one thing ui-plan.md §9 says
+   * must never happen. Every caller only appends what this returns, so
+   * wrapping here covers all of them. */
+  function scroller(table) {
+    const box = el("div", "table-scroll");
+    box.append(table);
+    return box;
+  }
+
   function rowsTable(headers, items, cells) {
     const table = el("table", "grid");
     const head = table.createTHead().insertRow();
@@ -924,7 +943,7 @@
       cell.colSpan = headers.length;
       cell.className = "muted";
       cell.textContent = "Nothing here.";
-      return table;
+      return scroller(table);
     }
     items.forEach((item) => {
       const tr = body.insertRow();
@@ -934,7 +953,7 @@
         else cell.textContent = value;
       });
     });
-    return table;
+    return scroller(table);
   }
 
   async function loadSystem() {

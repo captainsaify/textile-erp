@@ -460,6 +460,35 @@ If phone entry turns out to matter, the answer is a separate cut-down
 "quick sale" form, not a responsive version of this grid. That is a
 later decision, deliberately not made now.
 
+### What that claim was worth before 2026-08-15
+
+The paragraph above was true of the *layout* and false of everything
+else, which is the most misleading kind of true. On a real phone the
+dashboard had to be pinch-zoomed to read a stock or purchase list, and
+the section bar wrapped to three rows — sticky, so those three rows
+followed you down the page and took roughly half of it.
+
+Four causes, all now fixed in `styles.css` under "phone and tablet":
+
+- **Type never scaled.** `body` is 15px, but table type is set in `rem`,
+  which is root-relative — so cells stayed at ~14px no matter what the
+  body did. Below 768px the body is 16px and tables are 1rem. 16 also
+  happens to be the width at which Safari stops zooming the page on
+  every input focus.
+- **`#nav` wrapped.** Eight sections at ~90px is three rows on a 390px
+  screen. It is now one row that scrolls sideways, with the open section
+  scrolled into view.
+- **Master Control's tables were not wrapped.** `control.js` built bare
+  `<table>` elements, and with `white-space: nowrap` that width became
+  the *page's* — the body scrolled sideways, which §9 says it never
+  does. `rowsTable` now returns its table inside a `.table-scroll`.
+- **Mouse-sized targets and mouse-only tooltips.** 28px buttons, and
+  chart figures that appeared on `pointerenter` and vanished on
+  `pointerleave` — which for a finger is the length of one tap.
+
+The stance is unchanged. Entry is still for a laptop. The rest was
+always meant to be read on a phone; now it can be.
+
 ---
 
 ## 10. Print

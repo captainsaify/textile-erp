@@ -88,6 +88,18 @@ const Charts = (() => {
       node.className = "tip";
       node.hidden = true;
       container.append(node);
+      // Dismissal for the touch case above: a tap that lands anywhere
+      // other than a mark clears whatever figure is showing. Capture, so
+      // it runs before a mark's own handler puts a new one up.
+      document.addEventListener(
+        "pointerdown",
+        (event) => {
+          if (event.pointerType !== "mouse" && !container.contains(event.target)) {
+            node.hidden = true;
+          }
+        },
+        true,
+      );
     }
     return node;
   }
@@ -101,8 +113,12 @@ const Charts = (() => {
       tip.style.left = `${event.clientX - bounds.left}px`;
       tip.style.top = `${event.clientY - bounds.top}px`;
     });
-    target.addEventListener("pointerleave", () => {
-      tip.hidden = true;
+    target.addEventListener("pointerleave", (event) => {
+      // A finger has no hover: touching fires enter on contact and leave
+      // on release, so the figure appeared and vanished inside the tap
+      // and the numbers behind every chart were unreadable on a phone.
+      // A touch leaves it up; the next touch anywhere takes it down.
+      if (event.pointerType === "mouse") tip.hidden = true;
     });
   }
 

@@ -674,3 +674,135 @@ tr.detail-row > td {
   color: var(--ink);
   border-color: var(--ink-muted);
 }
+
+/* ------------------------------------------------- phone and tablet
+ *
+ * ui-plan.md §9 says everything except entry is designed for the phone,
+ * because that is where the dashboard is read. This section is what
+ * makes that true rather than aspirational. Nothing here is a separate
+ * mobile layout -- the grids already collapse on their own. It is four
+ * things the desktop layout got wrong on a small screen: type too small
+ * to read, a navigation bar that wrapped into three sticky rows and ate
+ * half the viewport, targets sized for a mouse, and a notch.
+ */
+
+@media (max-width: 768px) {
+  /* 16px, not 15: below 16 Safari zooms the page on every input focus
+     and leaves it scrolled sideways. This also drives the inputs, which
+     inherit it. The desktop's tighter 15px is a density choice for a
+     screen that has room for it. */
+  body {
+    font-size: 16px;
+  }
+
+  /* rem is root-relative, so the table type never followed `body` down
+     -- these were ~14px on a phone, which is where the zooming was
+     coming from. The padding pays for the extra width. */
+  table {
+    font-size: 1rem;
+  }
+
+  th,
+  td {
+    padding: 0.55rem 0.5rem;
+  }
+
+  th {
+    font-size: 0.85rem;
+  }
+
+  main#pages {
+    padding: 0.9rem 0.8rem;
+  }
+
+  /* The bar wrapped: eight sections at ~90px each is three rows on a
+     390px screen, and it is sticky, so those three rows followed you
+     down the page. One row that scrolls sideways instead -- the bar
+     stays one line high and every section is still reachable. */
+  #nav {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    scroll-snap-type: x proximity;
+    /* the row is its own scroll container, so it must be allowed to
+       shrink inside the topbar's flex row rather than pushing it wide */
+    min-width: 0;
+    flex: 1 1 auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  #nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  #nav button {
+    flex: 0 0 auto;
+    scroll-snap-align: center;
+  }
+
+  .topbar {
+    /* the brand and the sign-out stay put; only the sections scroll */
+    flex-wrap: nowrap;
+    gap: 0.6rem;
+    padding: 0.55rem 0.8rem;
+  }
+
+  .brand {
+    flex: 0 0 auto;
+  }
+
+  .topbar-end {
+    flex: 0 0 auto;
+  }
+}
+
+/* The sheet is pinned under a topbar of a fixed assumed height. Below
+   900px the two columns have already collapsed to one, so the sheet is
+   above the lines rather than beside them -- pinning it there only
+   hides the first rows behind the bar. */
+@media (max-width: 900px) {
+  .scan-beside img {
+    position: static;
+  }
+}
+
+/* A finger, not a mouse: 44px is the smallest target iOS and iPadOS
+   consider reliably hittable, and these were ~28px. Keyed off the
+   pointer rather than the width, because an iPad in landscape is a
+   wide screen being touched. */
+@media (pointer: coarse) {
+  button,
+  .control-link {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  #nav button {
+    padding: 0.5rem 0.85rem;
+  }
+
+  button.link {
+    /* inline links inside table rows: reachable without becoming a
+       44px-tall block that breaks the row's rhythm */
+    min-height: 0;
+    padding: 0.6rem 0.5rem;
+  }
+}
+
+/* The notch and the home indicator. Without this the first nav button
+   sits under the rounded corner in landscape, and the last row of a
+   table sits under the home bar. */
+@supports (padding: env(safe-area-inset-left)) {
+  .topbar {
+    padding-left: max(0.8rem, env(safe-area-inset-left));
+    padding-right: max(0.8rem, env(safe-area-inset-right));
+  }
+
+  main#pages {
+    padding-left: max(0.8rem, env(safe-area-inset-left));
+    padding-right: max(0.8rem, env(safe-area-inset-right));
+    padding-bottom: max(1.1rem, env(safe-area-inset-bottom));
+  }
+}
