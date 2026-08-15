@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.api.command_types import RequestContext
 from backend.api.commands.stock_commands import handle_stock
+from backend.api.interactive import ListMenu
 from backend.models import Brand, Inventory, Product, User
 from backend.repositories.product_repository import ProductRepository
 from backend.tests.conftest import (
@@ -202,6 +203,52 @@ async def test_stock_command_lists_every_brand_carrying_the_code(
     assert "Corduroy Pant" in result.reply
     # each brand's own stock, not a merged figure
     assert "800" in result.reply and "1520" in result.reply
+
+
+async def test_tapping_a_brand_on_the_menu_answers_with_that_brand(
+    two_brands: tuple[Product, Product], ctx: RequestContext
+) -> None:
+    """The menu sends its own choice id back as text, so `stock VVP`
+    then a tap arrives as `stock VVP Puma`. That used to be looked up as
+    a product *coded* "VVP PUMA" and answered "not found" -- making the
+    Pick brand menu unusable for every code two brands share."""
+    listed = await handle_stock(SHARED_CODE, ctx)
+    assert isinstance(listed.interactive, ListMenu)
+    # unordered: list_by_code orders by created_at, and rows written in one
+    # transaction share a single now() -- so which brand comes first is not
+    # decided by anything here
+    tapped = {c.id for c in listed.interactive.sections[0].rows}
+    assert tapped == {f"stock {SHARED_CODE} Nike", f"stock {SHARED_CODE} Puma"}
+
+    # exactly what the dispatcher hands back after the tap, minus the keyword
+    result = await handle_stock(f"{SHARED_CODE} Puma", ctx)
+    assert "not found" not in result.reply
+    assert "Corduroy Pant" in result.reply  # the Puma one
+    assert "Golden Velvet Pant" not in result.reply
+    assert "1520" in result.reply
+    assert "brands:" not in result.reply  # narrowed, not re-listed
+
+
+async def test_a_brand_that_does_not_carry_the_code_says_who_does(
+    two_brands: tuple[Product, Product], ctx: RequestContext
+) -> None:
+    """Never fall through to another brand's stock -- a wrong answer,
+    not a near miss (ProductRepository.get_by_code's rule)."""
+    result = await handle_stock(f"{SHARED_CODE} Adidas", ctx)
+    assert "Golden Velvet Pant" not in result.reply
+    assert "Corduroy Pant" not in result.reply
+    assert "not stocked under 'Adidas'" in result.reply
+    assert "Nike" in result.reply and "Puma" in result.reply
+
+
+async def test_suggestions_do_not_repeat_a_code_once_per_brand(
+    two_brands: tuple[Product, Product], ctx: RequestContext
+) -> None:
+    """'Did you mean 55D, 55D?' -- the same code under two brands is one
+    suggestion."""
+    result = await handle_stock("VV", ctx)
+    assert "not found" in result.reply
+    assert result.reply.count(SHARED_CODE) == 1
 
 
 async def test_stock_command_unchanged_for_an_unambiguous_code(

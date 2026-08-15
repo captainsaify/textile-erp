@@ -383,7 +383,21 @@ Stock value: ₹19,917.30
 Reorder level: 15.0 KG
 Last movement: sale −20.0 KG (24-07-2026)
 ```
-**Errors:** unresolved code → fuzzy suggestions ("Did you mean TRP?").
+**Errors:** unresolved code → fuzzy suggestions ("Did you mean TRP?"),
+one per distinct code — two brands carrying one code are one suggestion.
+
+**When two brands carry the code:** both are listed, with a "Pick brand"
+list menu. Tapping a row sends `stock <CODE> <BRAND>` back as text, so
+that form is part of the command:
+
+**Syntax:** `stock <CODE> [BRAND]`
+**Example:** `stock 55D MKD`
+
+A brand that does not carry the code is refused by name rather than
+falling through to the other brand's stock:
+```
+'55D' is not stocked under 'Adidas'. It is stocked under: MKD, LALA.
+```
 **Permissions:** owner, staff.
 
 ---

@@ -64,12 +64,23 @@ class StockService:
             totals=await self._inventory.totals(org_id),
         )
 
-    async def details(self, org_id: uuid.UUID, code: str) -> list[StockDetail]:
+    async def details(
+        self, org_id: uuid.UUID, code: str, brand: str | None = None
+    ) -> list[StockDetail]:
         """Every product carrying this code -- more than one when brands
         share it. The caller shows them all rather than picking, since
-        which brand was meant isn't knowable from the code alone."""
+        which brand was meant isn't knowable from the code alone.
+
+        Once the caller comes back naming a brand, it is knowable, and
+        this narrows to that one. An unrecognised brand narrows to
+        nothing rather than falling through to another brand's stock --
+        the same rule `ProductRepository.get_by_code` follows."""
+        found = await self._products.list_by_code(org_id, code)
+        if brand is not None:
+            wanted = brand.strip().casefold()
+            found = [p for p in found if p.brand is not None and p.brand.name.casefold() == wanted]
         details: list[StockDetail] = []
-        for product in await self._products.list_by_code(org_id, code):
+        for product in found:
             inventory = await self._inventory.get_for_product(org_id, product.id)
             details.append(
                 StockDetail(
@@ -82,7 +93,15 @@ class StockService:
         return details
 
     async def suggest_codes(self, org_id: uuid.UUID, query: str) -> list[str]:
-        return [p.code for p in await self._products.search(org_id, query, limit=3)]
+        """Distinct codes -- two brands carrying one code are one
+        suggestion, not two. "Did you mean 55D, 55D?" is no help."""
+        seen: list[str] = []
+        for product in await self._products.search(org_id, query, limit=8):
+            if product.code not in seen:
+                seen.append(product.code)
+            if len(seen) == 3:
+                break
+        return seen
 
     async def low_stock(
         self, org_id: uuid.UUID, *, negative_only: bool = False
