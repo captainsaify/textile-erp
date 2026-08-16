@@ -1937,3 +1937,80 @@ async def test_a_line_cannot_be_added_to_a_confirmed_bill(
     )
     assert response.status_code == 400  # a domain refusal, not a schema one
     assert "its own bill" in response.text
+
+
+async def test_undoing_a_removal_puts_the_line_and_its_stock_back(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The repair that today's mistake needed: a line removed by an edit
+    goes back, with the stock movement it brought in -- read from the
+    audit row the removal wrote, not from a backup."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    invoice = f"UNDO-{uuid.uuid4().hex[:5]}"
+    await _confirmed_bill(client, headers, stocked_code, invoice)
+
+    async with session_factory() as session:
+        before_stock = (
+            await session.execute(
+                sa.text(
+                    "SELECT qty_on_hand FROM inventory i JOIN products p ON p.id = i.product_id "
+                    "WHERE p.code = :c"
+                ),
+                {"c": stocked_code},
+            )
+        ).scalar_one()
+
+    removed = await client.post(
+        f"/api/v1/control/purchases/{invoice}/edit",
+        headers=headers,
+        json={
+            "lines": [
+                {"line_no": 1, "code": stocked_code, "qty": "800", "rate": "120"},
+                {"line_no": 2, "code": stocked_code, "qty": "400", "rate": "120",
+                 "removed": True},
+            ]
+        },
+    )
+    assert removed.status_code == 200, removed.text
+
+    listed = await client.get("/api/v1/control/activity", headers=headers)
+    assert listed.status_code == 200, listed.text
+    edit = next(i for i in listed.json()["items"] if i["action"] == "purchase.edited")
+    assert edit["undo"] == "restore_lines", "a removal must be offered as undoable"
+
+    undone = await client.post(
+        f"/api/v1/control/activity/{edit['id']}/undo", headers=headers
+    )
+    assert undone.status_code == 200, undone.text
+
+    async with session_factory() as session:
+        lines = (
+            await session.execute(
+                sa.text(
+                    "SELECT pl.line_no, pl.qty FROM purchase_lines pl JOIN purchase_headers ph "
+                    "ON ph.id = pl.purchase_header_id WHERE ph.invoice_no = :i ORDER BY pl.line_no"
+                ),
+                {"i": invoice},
+            )
+        ).all()
+        after_stock = (
+            await session.execute(
+                sa.text(
+                    "SELECT qty_on_hand FROM inventory i JOIN products p ON p.id = i.product_id "
+                    "WHERE p.code = :c"
+                ),
+                {"c": stocked_code},
+            )
+        ).scalar_one()
+
+    # the line is back, in its original numbered place
+    assert [(r.line_no, r.qty) for r in lines] == [
+        (1, decimal.Decimal("800.000")),
+        (2, decimal.Decimal("400.000")),
+    ]
+    # and so is the stock it brought in
+    assert after_stock == before_stock

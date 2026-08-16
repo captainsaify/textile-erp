@@ -39,6 +39,7 @@
           <button data-page="records">Records</button>
           <button data-page="money">Money</button>
           <button data-page="stock">Stock</button>
+          <button data-page="activity">Activity</button>
           <button data-page="partners">Partners</button>
           <button data-page="whatsapp">WhatsApp</button>
           <button data-page="system">System</button>
@@ -227,6 +228,22 @@
             <button type="button" id="pm-go" class="primary">Show me what this would do</button>
             <div id="pm-out" class="hint"></div>
             <div id="pm-preview" hidden></div>
+          </section>
+        </section>
+
+        <!-- Everything that has been done, and what can be taken back.
+             Undo is offered only where an inverse exists that keeps
+             stock, cost and the ledger honest; the rest says what to do
+             instead, which is more use than a button that half-works. -->
+        <section id="page-activity" hidden>
+          <section class="card">
+            <h2>Activity</h2>
+            <p class="muted">
+              Newest first. Merges, purges and re-links have their own undo on
+              the System page.
+            </p>
+            <div id="activity-list"></div>
+            <div id="activity-out" class="hint"></div>
           </section>
         </section>
 

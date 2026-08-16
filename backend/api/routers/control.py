@@ -42,6 +42,7 @@ from backend.services.backup_service import BackupService
 from backend.services.capital_service import CapitalService
 from backend.services.money_service import MoneyService
 from backend.services.purchase_service import Draft, DraftLine, PurchaseService
+from backend.services.receipt_correction_service import ChargeService
 from backend.services.reconciliation_service import ReconciliationService
 from backend.services.reversal_service import ReversalService
 from backend.services.sales_service import SaleDraft, SaleDraftLine, SalesService
@@ -1392,6 +1393,169 @@ async def apply_bill_edit(
     )
     await session.commit()
     return result
+
+
+#: What each recorded action is called on the Activity page, and whether
+#: this screen can take it back. "Undoable" is deliberately narrow: an
+#: action is listed as undoable only where an inverse exists that keeps
+#: stock, cost and the ledger honest. Everything else is shown with what
+#: to do instead, which is more use than a button that half-works.
+ACTIVITY_LABELS: dict[str, tuple[str, str]] = {
+    "purchase.edited": ("Bill corrected", "restore_lines"),
+    "purchase.charge_added": ("Charge added to a bill", "charge"),
+    "purchase.charge_removed": ("Charge taken off a bill", "charge"),
+    "payment.paid": ("Paid a supplier", "payment"),
+    "payment.received": ("Received from a customer", "payment"),
+    "payment.edited": ("Payment corrected", ""),
+    "payment.reversed": ("Payment reversed", ""),
+    "purchase.confirmed": ("Purchase recorded", ""),
+    "purchase.fixed": ("Bill line corrected", ""),
+    "purchase.rate_corrected": ("Bill rate corrected", ""),
+    "purchase.receipt_corrected": ("Receipt corrected", ""),
+    "sale.created": ("Sale recorded", ""),
+    "capital.contribution": ("Partner put capital in", ""),
+    "capital.withdrawal": ("Partner took capital out", ""),
+    "product.described": ("Product renamed", ""),
+    "expense.created": ("Expense recorded", ""),
+}
+
+
+@router.get("/activity")
+async def activity(
+    user: ControlUser, session: Session, limit: Annotated[int, Query(ge=1, le=100)] = 40
+) -> dict[str, Any]:
+    """Everything that has been done, newest first, with what can be undone.
+
+    Read from `audit_logs`, which is the only record that spans every
+    kind of change -- bills, payments, capital, renames. Reversal
+    manifests (merges, purges, re-links) have their own undo on the
+    System page and are not repeated here.
+    """
+    from backend.models import AuditLog, User
+
+    rows = list(
+        (
+            await session.execute(
+                select(AuditLog)
+                .where(AuditLog.org_id == user.org_id)
+                .order_by(AuditLog.created_at.desc())
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    actors: dict[uuid.UUID, str] = {}
+    items = []
+    for row in rows:
+        if row.actor_user_id not in actors:
+            who = await session.get(User, row.actor_user_id)
+            actors[row.actor_user_id] = who.full_name if who else "—"
+        label, undo_kind = ACTIVITY_LABELS.get(row.action, (row.action, ""))
+        before = row.before_state or {}
+        after = row.after_state or {}
+        removed = before.get("removed_lines") or []
+        if undo_kind == "restore_lines" and not removed:
+            # A correction that removed nothing has nothing this screen
+            # can put back: the field changes are undone by editing the
+            # bill again, which is a different act with its own record.
+            undo_kind = ""
+        detail = after.get("changes") or []
+        items.append(
+            {
+                "id": str(row.id)[:8],
+                "at": row.created_at.isoformat(),
+                "action": row.action,
+                "label": label,
+                "who": actors[row.actor_user_id],
+                "channel": row.channel,
+                "detail": detail if isinstance(detail, list) else [str(detail)],
+                "subject": before.get("invoice_no") or after.get("invoice_no") or "",
+                "undo": undo_kind,
+                "undone": bool(after.get("reversed") or after.get("undone")),
+            }
+        )
+    return {"items": items}
+
+
+@router.post("/activity/{reference}/undo")
+async def undo_activity(reference: str, user: ControlUser, session: Session) -> dict[str, Any]:
+    """Take back one recorded action.
+
+    Each kind goes through the inverse that already exists for it rather
+    than through anything written specially here -- a payment through the
+    reversal that unwinds its allocations, a charge through the charge
+    path with the sign flipped, a removed line through the restore that
+    brings its stock movement back with it.
+    """
+    from sqlalchemy import String, cast
+
+    from backend.models import AuditLog
+
+    entry = (
+        (
+            await session.execute(
+                select(AuditLog).where(
+                    AuditLog.org_id == user.org_id,
+                    cast(AuditLog.id, String).like(f"{reference.lower()}%"),
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"no activity {reference!r}")
+
+    _, kind = ACTIVITY_LABELS.get(entry.action, ("", ""))
+    before = entry.before_state or {}
+    after = entry.after_state or {}
+    notes: list[str] = []
+
+    if kind == "payment":
+        result = await PaymentReversalService(session).reverse(user, reference=reference)
+        notes.append(f"{result.kind} {money_str(result.amount)} to {result.party_name} reversed")
+
+    elif kind == "charge":
+        label = str(after.get("label") or "CHARGES")
+        amount = decimal.Decimal(str(after.get("amount") or "0"))
+        invoice = str(after.get("invoice_no") or before.get("invoice_no") or "")
+        service = ChargeService(session)
+        if entry.action == "purchase.charge_added":
+            await service.remove_in_transaction(
+                user, reference=invoice, label=label, amount=amount
+            )
+            notes.append(f"{label} {money_str(amount)} taken back off {invoice}")
+        else:
+            await service.add_in_transaction(user, reference=invoice, label=label, amount=amount)
+            notes.append(f"{label} {money_str(amount)} put back on {invoice}")
+
+    elif kind == "restore_lines":
+        invoice = str(before.get("invoice_no") or "")
+        fixer = PurchaseLineFixService(session)
+        async with guarded(session, user.org_id) as report:
+            for line in before.get("removed_lines") or []:
+                notes.extend(
+                    await fixer.restore_line(user.org_id, user, invoice_no=invoice, line=line)
+                )
+            for note in notes:
+                report.note(note)
+        if not report.committed:
+            raise HTTPException(status_code=409, detail="the books did not balance; nothing saved")
+
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "That one cannot be taken back from here. Correct it with a new "
+                "entry, or use the System page for merges, purges and re-links."
+            ),
+        )
+
+    # Stamp it, so the same action cannot be undone twice.
+    entry.after_state = {**after, "undone": True}
+    await session.commit()
+    return {"reference": reference, "notes": notes}
 
 
 @router.get("/payments/recent")

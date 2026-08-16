@@ -29,7 +29,7 @@ from backend.models import (
     PurchaseLine,
     User,
 )
-from backend.models.enums import PurchaseStatus
+from backend.models.enums import MovementType, PurchaseStatus
 from backend.services.admin.guard import guarded
 from backend.services.audit_service import AuditService
 from backend.services.cost_replay_service import CostReplayService
@@ -281,6 +281,129 @@ class PurchaseLineFixService:
             f"line {line_no} removed ({code}, {qty}), {len(gone)} movement(s) deleted",
             f"bill total → {header.grand_total}",
         ]
+
+    async def restore_line(
+        self,
+        org_id: uuid.UUID,
+        actor: User,
+        *,
+        invoice_no: str,
+        line: dict[str, Any],
+    ) -> list[str]:
+        """Put a removed line back, with the stock it brought in.
+
+        The undo for a removal, reading the line out of the audit row the
+        removal wrote. Re-creating the row alone would give a bill whose
+        lines add up to more than its stock -- the movement is what the
+        balance is derived from, so it has to come back too.
+
+        Keeps the original line number. It is an identifier people have
+        already used, and the removal deliberately left a gap rather than
+        closing it up, so the gap is exactly where this goes back.
+        """
+        header = (
+            (
+                await self._session.execute(
+                    select(PurchaseHeader).where(
+                        PurchaseHeader.org_id == org_id,
+                        PurchaseHeader.invoice_no == invoice_no.strip(),
+                        PurchaseHeader.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if header is None:
+            raise NotFoundError("purchase", invoice_no)
+
+        line_no = int(line["line_no"])
+        clash = (
+            (
+                await self._session.execute(
+                    select(PurchaseLine).where(
+                        PurchaseLine.purchase_header_id == header.id,
+                        PurchaseLine.line_no == line_no,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if clash is not None:
+            raise ValidationError(
+                f"{header.invoice_no} already has a line {line_no} — it has been put back "
+                "already, or the number was reused."
+            )
+
+        product = await self._product_by_code(org_id, str(line["code"]), line.get("brand"))
+        qty = decimal.Decimal(str(line["qty"]))
+        rate = decimal.Decimal(str(line["rate"]))
+        weight = decimal.Decimal(str(line["weight_kg"])) if line.get("weight_kg") else None
+
+        restored = PurchaseLine(
+            org_id=org_id,
+            purchase_header_id=header.id,
+            line_no=line_no,
+            product_id=product.id,
+            description=line.get("description"),
+            qty=qty,
+            weight_kg=weight,
+            total_weight_kg=qty,
+            rate=rate,
+            line_total=(qty * rate).quantize(TWO),
+            freight_allocated=ZERO,
+            landed_cost_per_unit=rate,
+        )
+        self._session.add(restored)
+        await self._session.flush()
+
+        self._session.add(
+            InventoryMovement(
+                org_id=org_id,
+                product_id=product.id,
+                warehouse_id=header.warehouse_id,
+                movement_type=MovementType.PURCHASE,
+                qty_delta=qty,
+                unit_cost=rate,
+                resulting_qty_on_hand=ZERO,
+                resulting_avg_cost=ZERO,
+                source_type="purchase_line",
+                source_id=restored.id,
+                created_by=actor.id,
+            )
+        )
+        await self._session.flush()
+        await self._retotal(header)
+        await self._session.flush()
+        # The replay is what fills in the running quantity and average
+        # the movement above was created with placeholders for: recomputed
+        # from the whole history, in order, rather than guessed at here.
+        await self._replay(org_id, product.id)
+        return [
+            f"line {line_no} restored ({product.code}, {qty} @ {rate})",
+            f"bill total → {header.grand_total}",
+        ]
+
+    async def _product_by_code(
+        self, org_id: uuid.UUID, code: str, brand: str | None
+    ) -> Product:
+        stmt = select(Product).where(
+            Product.org_id == org_id,
+            func.upper(Product.code) == code.strip().upper(),
+            Product.deleted_at.is_(None),
+        )
+        rows = list((await self._session.execute(stmt)).scalars())
+        if brand:
+            named = []
+            for row in rows:
+                label = await self._session.get(Brand, row.brand_id) if row.brand_id else None
+                if label is not None and label.name.strip().lower() == brand.strip().lower():
+                    named.append(row)
+            rows = named or rows
+        if not rows:
+            raise NotFoundError("product", code)
+        return rows[0]
 
     async def _retotal(self, header: PurchaseHeader) -> None:
         """Re-spread freight and charges, then re-add the bill.

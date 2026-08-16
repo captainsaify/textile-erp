@@ -557,6 +557,7 @@
     records: "page-records",
     money: "page-money",
     stock: "page-stock",
+    activity: "page-activity",
     partners: "page-partners",
     whatsapp: "page-whatsapp",
     system: "page-system",
@@ -568,6 +569,7 @@
     records: () => loadRecords(),
     money: () => loadPayments(),
     stock: () => loadProducts(),
+    activity: () => loadActivity(),
     partners: () => loadPartners(),
     whatsapp: () => loadWhatsApp(),
     system: () => loadSystem(),
@@ -1070,6 +1072,56 @@
       `Now outstanding ${Money.format(result.outstanding_after)}. New ref ${result.reference}.`
     );
   });
+
+  // ---------------------------------------------------------- activity
+
+  async function loadActivity() {
+    const data = await api("/control/activity");
+    $("activity-list").replaceChildren(
+      rowsTable(["When", "What", "Detail", "Who", ""], data.items, (item) => {
+        const detail = el("div");
+        if (item.subject) detail.append(el("span", "code", item.subject));
+        (item.detail || []).slice(0, 4).forEach((line) => detail.append(el("div", "muted", line)));
+
+        let action;
+        if (item.undone) {
+          action = el("span", "muted", "undone");
+        } else if (item.undo) {
+          action = el("button", "link", "Undo");
+          action.type = "button";
+          action.addEventListener("click", () => undoActivity(item));
+        } else {
+          // Silence would read as "not undoable yet". A dash says the
+          // decision was made rather than forgotten.
+          action = el("span", "muted", "—");
+        }
+        return [
+          item.at.slice(0, 16).replace("T", " "),
+          item.label,
+          detail,
+          `${item.who} · ${item.channel}`,
+          action,
+        ];
+      }),
+    );
+  }
+
+  async function undoActivity(item) {
+    if (!window.confirm(`Undo: ${item.label}${item.subject ? ` on ${item.subject}` : ""}?`)) {
+      return;
+    }
+    const out = $("activity-out");
+    out.textContent = "Working…";
+    out.classList.remove("warn");
+    try {
+      const result = await api(`/control/activity/${item.id}/undo`, { method: "POST" });
+      out.textContent = result.notes.join("; ");
+      await loadActivity();
+    } catch (exc) {
+      out.textContent = exc.message;
+      out.classList.add("warn");
+    }
+  }
 
   // ---------------------------------------------------------- partners
 

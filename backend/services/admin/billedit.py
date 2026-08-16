@@ -328,7 +328,12 @@ class BillEditService:
         fields: dict[str, Any] = {}
         if wanted_code != product.code.upper():
             fields["code"] = wanted_code
-        if (wanted_brand or "").lower() != (current_brand or "").lower():
+        # A missing brand means "no opinion", not "clear it". The form
+        # always sends back the brand it loaded, so None can only come
+        # from a caller that did not mention brands -- and treating that
+        # as a change produced an edit that changed nothing and was then
+        # refused as empty.
+        if wanted_brand is not None and wanted_brand.lower() != (current_brand or "").lower():
             fields["brand"] = wanted_brand
         if row.description is not None and row.description.strip() != (line.description or ""):
             fields["description"] = row.description.strip()
