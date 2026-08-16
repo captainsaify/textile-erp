@@ -191,6 +191,10 @@ class BillEditService:
                 raise NotFoundError("line", str(row.line_no))
 
         changes: list[str] = []
+        #: What each removed line held, so the removal can be undone. A
+        #: destructive step that does not record what it destroyed leaves
+        #: the backup as the only way back.
+        removed: list[dict[str, Any]] = []
         async with guarded(self._session, org_id, dry_run=dry_run) as report:
             changes.extend(await self._header_changes(org_id, header, edited))
 
@@ -209,14 +213,31 @@ class BillEditService:
                 if not row.removed:
                     continue
                 assert row.line_no is not None
-                await fixer.fix_in_transaction(
-                    org_id,
-                    actor,
-                    invoice_no=header.invoice_no,
-                    line_no=row.line_no,
-                    remove=True,
+                # Keep what the service says, not a summary of it. The
+                # service's note carries the code and quantity; a bare
+                # "line 4 removed" cannot be undone from, and undoing a
+                # removal is the one repair someone always wants.
+                gone = existing[row.line_no]
+                removed.append(
+                    {
+                        "line_no": row.line_no,
+                        "code": row.code,
+                        "brand": row.brand,
+                        "description": gone.description,
+                        "qty": str(gone.qty),
+                        "rate": str(gone.rate),
+                        "weight_kg": str(gone.weight_kg) if gone.weight_kg else None,
+                    }
                 )
-                changes.append(f"line {row.line_no} removed")
+                changes.extend(
+                    await fixer.fix_in_transaction(
+                        org_id,
+                        actor,
+                        invoice_no=header.invoice_no,
+                        line_no=row.line_no,
+                        remove=True,
+                    )
+                )
 
             if edited.charges is not None:
                 changes.extend(await self._charge_changes(actor, header, edited.charges))
@@ -230,7 +251,7 @@ class BillEditService:
                 action="purchase.edited",
                 entity_type="purchase_headers",
                 entity_id=header.id,
-                before_state={"invoice_no": invoice_no},
+                before_state={"invoice_no": invoice_no, "removed_lines": removed},
                 after_state={"changes": changes},
                 channel="dashboard",
             )
