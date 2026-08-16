@@ -626,11 +626,49 @@
    *  differently on the way in than it did on the way out is a bill
    *  people stop trusting. */
   let editingBill = null;
+  //: "purchase" or "sale" -- the same form, two different sets of
+  //: consequences behind Save.
+  let editingKind = "purchase";
+
+  async function openSaleEditor(reference) {
+    const sale = await api(`/control/sales/${encodeURIComponent(reference)}`);
+    setKind("sale");
+    editingBill = sale.reference;
+    editingKind = "sale";
+
+    $("party").value = sale.customer;
+    $("entry-date").value = sale.sale_date;
+    charges = [];
+    $("freight").value = Number(sale.freight) ? sale.freight : "";
+    $("discount").value = Number(sale.discount) ? sale.discount : "";
+    rows = sale.lines.map((line) => ({
+      line_no: line.line_no,
+      product_id: line.code,
+      code: line.code,
+      brand: line.brand,
+      description: line.description || "",
+      pieces: line.pieces || "",
+      weight_kg: line.weight_kg || line.qty,
+      qty: line.qty,
+      rate: line.rate,
+      note: "",
+      removed: false,
+    }));
+    renderRows();
+    renderCharges();
+    renderTotals();
+    $("editing-banner").hidden = false;
+    $("editing-what").textContent =
+      `Editing sale ${sale.reference} — ${sale.customer} · ${Money.format(sale.amount_paid)} received`;
+    $("save").textContent = "Review changes";
+    window.scrollTo({ top: 0 });
+  }
 
   async function openBillEditor(invoiceNo) {
     const bill = await api(`/control/purchases/${encodeURIComponent(invoiceNo)}`);
     setKind("purchase");
     editingBill = bill.invoice_no;
+    editingKind = "purchase";
 
     $("party").value = bill.supplier;
     $("invoice").value = bill.invoice_no;
@@ -669,6 +707,8 @@
 
   function stopEditing() {
     editingBill = null;
+    editingKind = "purchase";
+    $("pay-gap").hidden = true;
     $("editing-banner").hidden = true;
     $("edit-preview").hidden = true;
     $("save").textContent = "Save";
@@ -700,10 +740,12 @@
   }
 
   async function reviewEdit() {
+    const base = editingKind === "sale" ? "sales" : "purchases";
     const preview = await api(
-      `/control/purchases/${encodeURIComponent(editingBill)}/edit/preview`,
+      `/control/${base}/${encodeURIComponent(editingBill)}/edit/preview`,
       { method: "POST", body: JSON.stringify(editedPayload()) },
     );
+    showPaymentGap(preview);
     const panel = $("edit-preview");
     panel.hidden = false;
     const list = el("ul", "change-list");
@@ -720,12 +762,49 @@
     $("edit-confirm").disabled = false;
   }
 
+  /** What the edit does to money already received.
+   *
+   *  Only for sales, and only when something has been paid. The payment
+   *  is not moved by the edit -- so the question is whether the customer
+   *  ends up owing more, or having paid more than the sale now comes to,
+   *  and it is asked with the arithmetic on screen rather than as a
+   *  browser popup that can only say "are you sure". */
+  function showPaymentGap(preview) {
+    const panel = $("pay-gap");
+    const paid = Number(preview.amount_paid || 0);
+    if (editingKind !== "sale" || !paid) {
+      panel.hidden = true;
+      return;
+    }
+    const over = Number(preview.overpaid || 0);
+    const balance = Number(preview.balance || 0);
+    panel.hidden = false;
+    $("pay-gap-head").textContent =
+      `This sale has ${Money.format(preview.amount_paid)} received against it`;
+    $("pay-gap-detail").textContent = over
+      ? `Edited, it comes to ${Money.format(preview.grand_total)} — ${Money.format(preview.overpaid)} more than was paid. The money stays where it is and the customer becomes overpaid by that much.`
+      : balance
+        ? `Edited, it comes to ${Money.format(preview.grand_total)} — the customer would still owe ${Money.format(preview.balance)}. Nothing already received is moved.`
+        : `Edited, it comes to ${Money.format(preview.grand_total)}, which the payment covers exactly.`;
+  }
+
+  $("edit-back").addEventListener("click", () => {
+    $("edit-preview").hidden = true;
+    $("pay-gap").hidden = true;
+  });
+
   wire("edit-confirm", "edit-out", async () => {
-    const result = await api(`/control/purchases/${encodeURIComponent(editingBill)}/edit`, {
+    const base = editingKind === "sale" ? "sales" : "purchases";
+    const result = await api(`/control/${base}/${encodeURIComponent(editingBill)}/edit`, {
       method: "POST",
       body: JSON.stringify(editedPayload()),
     });
-    const done = `${result.changes.length} change(s) saved. Bill total ${Money.format(result.grand_total)}.`;
+    const noun = editingKind === "sale" ? "Sale" : "Bill";
+    const gap =
+      editingKind === "sale" && Number(result.overpaid || 0)
+        ? ` Customer is overpaid by ${Money.format(result.overpaid)}.`
+        : "";
+    const done = `${result.changes.length} change(s) saved. ${noun} total ${Money.format(result.grand_total)}.${gap}`;
     stopEditing();
     await loadRecords().catch(() => {});
     return done;
@@ -829,8 +908,14 @@
         const remove = el("button", "link", "Remove");
         remove.type = "button";
         remove.addEventListener("click", () => previewPurge(item.reference, "sale"));
+        const open = el("button", "link open-bill", item.reference);
+        open.type = "button";
+        open.title = "Open this sale to correct it";
+        open.addEventListener("click", () =>
+          openSaleEditor(item.reference).catch((exc) => banner(exc.message)),
+        );
         return [
-          item.reference,
+          open,
           item.date,
           item.customer,
           Money.format(item.grand_total),

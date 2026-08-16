@@ -44,6 +44,7 @@ from backend.models import (
 from backend.models.enums import PurchaseStatus
 from backend.services.admin.fixline import PurchaseLineFixService
 from backend.services.admin.guard import guarded
+from backend.services.admin.salefix import SaleFixService
 from backend.services.audit_service import AuditService
 from backend.services.receipt_correction_service import ChargeService
 
@@ -391,3 +392,201 @@ class BillEditService:
             )
             notes.append(f"charges {current_total} → {wanted_total}")
         return notes
+
+
+class SaleEditService:
+    """The same screen, for a sale.
+
+    Two differences from a bill, and both matter.
+
+    Stock goes *out*, so correcting a quantity upward takes more of it
+    and can strand a product below zero. The guard re-checks the books
+    and throws the whole edit away if it does, which is why nothing here
+    checks it by hand.
+
+    **Money already received is left exactly where it is.** Editing a
+    sale down to less than the customer has paid does not move their
+    money back; it makes them overpaid, and says so. Silently
+    re-allocating someone's payment is how a business loses track of who
+    owes what -- so the difference is reported before the save and again
+    after it.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def detail(self, org_id: uuid.UUID, reference: str) -> dict[str, Any]:
+        from backend.models import Customer, SalesLine
+
+        header = await SaleFixService(self._session)._sale(org_id, reference)
+        customer = await self._session.get(Customer, header.customer_id)
+        rows = list(
+            (
+                await self._session.execute(
+                    select(SalesLine, Product, Brand)
+                    .join(Product, Product.id == SalesLine.product_id)
+                    .join(Brand, Brand.id == Product.brand_id, isouter=True)
+                    .where(SalesLine.sales_header_id == header.id)
+                    .order_by(SalesLine.line_no)
+                )
+            ).all()
+        )
+        return {
+            "reference": str(header.id)[:8],
+            "sale_date": header.sale_date.isoformat(),
+            "customer": customer.name if customer else "",
+            "status": header.status,
+            "freight": str(header.freight),
+            "discount": str(header.discount),
+            "other_charges": str(header.other_charges),
+            "subtotal": str(header.subtotal),
+            "grand_total": str(header.grand_total),
+            "amount_paid": str(header.amount_paid),
+            "payment_status": header.payment_status,
+            "lines": [
+                {
+                    "line_no": line.line_no,
+                    "code": product.code,
+                    "brand": brand.name if brand else None,
+                    "description": product.description,
+                    "qty": str(line.qty),
+                    "rate": str(line.rate),
+                    "pieces": str(line.qty / line.weight_kg) if line.weight_kg else None,
+                    "weight_kg": str(line.weight_kg) if line.weight_kg else None,
+                    "line_total": str(line.line_total),
+                }
+                for line, product, brand in rows
+            ],
+        }
+
+    async def apply(
+        self,
+        org_id: uuid.UUID,
+        actor: User,
+        *,
+        reference: str,
+        edited: EditedBill,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        from backend.models import SalesLine
+
+        fixer = SaleFixService(self._session)
+        header = await fixer._sale(org_id, reference)
+        existing = {
+            line.line_no: line
+            for line in (
+                await self._session.execute(
+                    select(SalesLine).where(SalesLine.sales_header_id == header.id)
+                )
+            ).scalars()
+        }
+        for row in edited.lines:
+            if row.line_no is None:
+                raise ValidationError(
+                    "A new line cannot be added to a recorded sale — it would have no "
+                    "stock movement behind it. Record it as its own sale."
+                )
+            if row.line_no not in existing:
+                raise NotFoundError("line", str(row.line_no))
+
+        paid = header.amount_paid
+        total_before = header.grand_total
+        changes: list[str] = []
+        removed: list[dict[str, Any]] = []
+
+        async with guarded(self._session, org_id, dry_run=dry_run) as report:
+            if edited.supplier is not None and edited.supplier.strip():
+                changes.extend(
+                    await fixer.fix_in_transaction(
+                        org_id, actor, reference=reference, customer=edited.supplier.strip()
+                    )
+                )
+
+            for row in sorted(
+                (r for r in edited.lines if not r.removed), key=lambda r: r.line_no or 0
+            ):
+                assert row.line_no is not None
+                line = existing[row.line_no]
+                product = await self._session.get(Product, line.product_id)
+                brand = (
+                    await self._session.get(Brand, product.brand_id)
+                    if product and product.brand_id
+                    else None
+                )
+                fields: dict[str, Any] = {}
+                if product is not None and row.code.strip().upper() != product.code.upper():
+                    fields["code"] = row.code.strip().upper()
+                wanted_brand = (row.brand or "").strip() or None
+                if wanted_brand is not None and wanted_brand.lower() != (
+                    brand.name.lower() if brand else ""
+                ):
+                    fields["brand"] = wanted_brand
+                if row.qty != line.qty:
+                    fields["quantity"] = row.qty
+                if row.rate != line.rate:
+                    fields["rate"] = row.rate
+                if fields:
+                    changes.extend(
+                        await fixer.fix_in_transaction(
+                            org_id, actor, reference=reference, line_no=row.line_no, **fields
+                        )
+                    )
+
+            for row in edited.lines:
+                if not row.removed:
+                    continue
+                assert row.line_no is not None
+                gone = existing[row.line_no]
+                removed.append(
+                    {
+                        "line_no": row.line_no,
+                        "code": row.code,
+                        "brand": row.brand,
+                        "qty": str(gone.qty),
+                        "rate": str(gone.rate),
+                        "weight_kg": str(gone.weight_kg) if gone.weight_kg else None,
+                    }
+                )
+                changes.extend(
+                    await fixer.fix_in_transaction(
+                        org_id, actor, reference=reference, line_no=row.line_no, remove=True
+                    )
+                )
+
+            if not changes:
+                raise ValidationError("Nothing on this sale would change.")
+
+            total_after = header.grand_total
+            await AuditService(self._session).record(
+                org_id,
+                actor.id,
+                action="sale.edited",
+                entity_type="sales_headers",
+                entity_id=header.id,
+                before_state={
+                    "reference": reference,
+                    "grand_total": str(total_before),
+                    "removed_lines": removed,
+                },
+                after_state={"changes": changes, "grand_total": str(total_after)},
+                channel="dashboard",
+            )
+            for note in changes:
+                report.note(note)
+            committed = report.committed
+
+        # The payment sits where it was. What changed is how much of it
+        # this sale needed, which is the thing to say out loud.
+        balance = (total_after - paid).quantize(TWO)
+        return {
+            "reference": reference,
+            "changes": changes,
+            "committed": committed,
+            "dry_run": dry_run,
+            "amount_paid": str(paid),
+            "total_before": str(total_before),
+            "grand_total": str(total_after),
+            "balance": str(balance),
+            "overpaid": str(-balance) if balance < ZERO else "0",
+            "payment_moved": False,
+        }

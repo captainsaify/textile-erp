@@ -28,7 +28,12 @@ from backend.models import Product, ProductType, PurchaseHeader
 from backend.models.enums import CapitalEntryType, SalePaymentType
 from backend.repositories.purchase_repository import PurchaseRepository
 from backend.services import message_log
-from backend.services.admin.billedit import BillEditService, EditedBill, EditedLine
+from backend.services.admin.billedit import (
+    BillEditService,
+    EditedBill,
+    EditedLine,
+    SaleEditService,
+)
 from backend.services.admin.contacts import ContactAdminService
 from backend.services.admin.diagnostics import DiagnosticsService
 from backend.services.admin.fixline import PurchaseLineFixService
@@ -1522,9 +1527,7 @@ async def undo_activity(reference: str, user: ControlUser, session: Session) -> 
         invoice = str(after.get("invoice_no") or before.get("invoice_no") or "")
         service = ChargeService(session)
         if entry.action == "purchase.charge_added":
-            await service.remove_in_transaction(
-                user, reference=invoice, label=label, amount=amount
-            )
+            await service.remove_in_transaction(user, reference=invoice, label=label, amount=amount)
             notes.append(f"{label} {money_str(amount)} taken back off {invoice}")
         else:
             await service.add_in_transaction(user, reference=invoice, label=label, amount=amount)
@@ -1556,6 +1559,42 @@ async def undo_activity(reference: str, user: ControlUser, session: Session) -> 
     entry.after_state = {**after, "undone": True}
     await session.commit()
     return {"reference": reference, "notes": notes}
+
+
+@router.get("/sales/{reference}")
+async def sale_detail(reference: str, user: ControlUser, session: Session) -> dict[str, Any]:
+    """A recorded sale, shaped for the entry form to reopen it."""
+    return await SaleEditService(session).detail(user.org_id, reference)
+
+
+@router.post("/sales/{reference}/edit/preview")
+async def preview_sale_edit(
+    reference: str, body: EditBillIn, user: ControlUser, session: Session
+) -> dict[str, Any]:
+    """What saving would change, and what it does to what the customer owes.
+
+    The payment is *not* moved, so the figures here are the ones the
+    screen asks about before committing: what was paid, what the sale
+    would come to, and the difference either way.
+    """
+    try:
+        return await SaleEditService(session).apply(
+            user.org_id, user, reference=reference, edited=_edited(body), dry_run=True
+        )
+    except GuardRegression as exc:
+        return {"reference": reference, "changes": [], "ok": False, "blockers": exc.problems}
+
+
+@router.post("/sales/{reference}/edit")
+async def apply_sale_edit(
+    reference: str, body: EditBillIn, user: ControlUser, session: Session
+) -> dict[str, Any]:
+    """Save the edited sale, leaving money already received where it is."""
+    result = await SaleEditService(session).apply(
+        user.org_id, user, reference=reference, edited=_edited(body)
+    )
+    await session.commit()
+    return result
 
 
 @router.get("/payments/recent")

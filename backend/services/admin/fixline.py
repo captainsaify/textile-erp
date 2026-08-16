@@ -385,9 +385,7 @@ class PurchaseLineFixService:
             f"bill total → {header.grand_total}",
         ]
 
-    async def _product_by_code(
-        self, org_id: uuid.UUID, code: str, brand: str | None
-    ) -> Product:
+    async def _product_by_code(self, org_id: uuid.UUID, code: str, brand: str | None) -> Product:
         stmt = select(Product).where(
             Product.org_id == org_id,
             func.upper(Product.code) == code.strip().upper(),

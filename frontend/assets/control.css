@@ -479,3 +479,24 @@ button:focus-visible {
   color: var(--series-1, #3f7cac);
   padding: 0;
 }
+
+/* The money question, asked on the page. It is not a warning about
+   something going wrong -- it is arithmetic the person has to agree
+   with before it becomes true. */
+.pay-gap {
+  border: 1px solid var(--warn, #a86b00);
+  border-radius: var(--radius, 8px);
+  padding: 0.7rem 0.9rem;
+  margin: 0.6rem 0 0.9rem;
+  background: color-mix(in oklab, var(--warn, #a86b00) 8%, transparent);
+}
+
+.pay-gap h3 {
+  margin: 0 0 0.3rem;
+  font-size: 0.95rem;
+}
+
+.pay-gap p {
+  margin: 0;
+  font-size: 0.9rem;
+}

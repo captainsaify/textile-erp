@@ -1970,8 +1970,7 @@ async def test_undoing_a_removal_puts_the_line_and_its_stock_back(
         json={
             "lines": [
                 {"line_no": 1, "code": stocked_code, "qty": "800", "rate": "120"},
-                {"line_no": 2, "code": stocked_code, "qty": "400", "rate": "120",
-                 "removed": True},
+                {"line_no": 2, "code": stocked_code, "qty": "400", "rate": "120", "removed": True},
             ]
         },
     )
@@ -1982,9 +1981,7 @@ async def test_undoing_a_removal_puts_the_line_and_its_stock_back(
     edit = next(i for i in listed.json()["items"] if i["action"] == "purchase.edited")
     assert edit["undo"] == "restore_lines", "a removal must be offered as undoable"
 
-    undone = await client.post(
-        f"/api/v1/control/activity/{edit['id']}/undo", headers=headers
-    )
+    undone = await client.post(f"/api/v1/control/activity/{edit['id']}/undo", headers=headers)
     assert undone.status_code == 200, undone.text
 
     async with session_factory() as session:
@@ -2014,3 +2011,81 @@ async def test_undoing_a_removal_puts_the_line_and_its_stock_back(
     ]
     # and so is the stock it brought in
     assert after_stock == before_stock
+
+
+# --------------------------------------------------------------------
+# editing a sale: the payment stays where it is
+# --------------------------------------------------------------------
+
+
+async def test_editing_a_paid_sale_leaves_the_money_and_reports_the_gap(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Editing a sale down below what the customer paid does not hand
+    their money back -- it makes them overpaid, and says so. Silently
+    re-allocating a payment is how a business loses track of who owes
+    what."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+
+    # stock to sell, a customer to sell it to, then a sale paid in full
+    await _confirmed_bill(client, headers, stocked_code, f"SB-{uuid.uuid4().hex[:5]}")
+    made = await client.post(
+        "/api/v1/control/parties",
+        headers=headers,
+        json={"kind": "customer", "name": f"Cust {stocked_code}"},
+    )
+    assert made.status_code in (200, 201), made.text
+    sale = await client.post(
+        "/api/v1/control/sales",
+        headers=headers,
+        json={
+            "customer": f"Cust {stocked_code}",
+            "lines": [{"code": stocked_code, "qty": "100", "rate": "200"}],
+            # cash means paid in full already; paid_now is for credit
+            "payment_type": "cash",
+        },
+    )
+    assert sale.status_code == 201, sale.text
+    reference = sale.json()["sale_id"][:8]
+
+    detail = await client.get(f"/api/v1/control/sales/{reference}", headers=headers)
+    assert detail.status_code == 200, detail.text
+    assert decimal.Decimal(detail.json()["amount_paid"]) == decimal.Decimal("20000")
+
+    preview = await client.post(
+        f"/api/v1/control/sales/{reference}/edit/preview",
+        headers=headers,
+        json={"lines": [{"line_no": 1, "code": stocked_code, "qty": "80", "rate": "200"}]},
+    )
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["committed"] is False
+    assert body["payment_moved"] is False
+    # 80 x 200 = 16,000 against 20,000 paid -> 4,000 overpaid
+    assert decimal.Decimal(body["grand_total"]) == decimal.Decimal("16000.00")
+    assert decimal.Decimal(body["overpaid"]) == decimal.Decimal("4000.00")
+
+    applied = await client.post(
+        f"/api/v1/control/sales/{reference}/edit",
+        headers=headers,
+        json={"lines": [{"line_no": 1, "code": stocked_code, "qty": "80", "rate": "200"}]},
+    )
+    assert applied.status_code == 200, applied.text
+
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                sa.text(
+                    "SELECT amount_paid, grand_total, payment_status FROM sales_headers "
+                    "WHERE cast(id as text) LIKE :r"
+                ),
+                {"r": f"{reference}%"},
+            )
+        ).one()
+    assert row.amount_paid == decimal.Decimal("20000.00"), "the payment must not move"
+    assert row.grand_total == decimal.Decimal("16000.00")
+    assert row.payment_status == "paid"

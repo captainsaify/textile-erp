@@ -416,7 +416,17 @@
         <div id="edit-preview" class="card" hidden>
           <h2>What this will change</h2>
           <div id="edit-changes"></div>
+
+          <!-- Asked in the page, not by the browser. A browser confirm
+               cannot show the arithmetic, and this is a question about
+               money someone has already handed over. -->
+          <div id="pay-gap" class="pay-gap" hidden>
+            <h3 id="pay-gap-head"></h3>
+            <p id="pay-gap-detail"></p>
+          </div>
+
           <button type="button" id="edit-confirm" class="primary">Save these changes</button>
+          <button type="button" id="edit-back" class="link">Review edit</button>
           <div id="edit-out" class="hint"></div>
         </div>
 
