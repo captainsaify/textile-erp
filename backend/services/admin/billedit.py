@@ -79,6 +79,9 @@ class EditedBill:
 class BillEditService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+        #: Filled while an edit runs; written to the audit row so the
+        #: change can be put back without anyone remembering it.
+        self._field_changes: list[dict[str, Any]] = []
 
     # --- reading ------------------------------------------------------
 
@@ -192,6 +195,7 @@ class BillEditService:
                 raise NotFoundError("line", str(row.line_no))
 
         changes: list[str] = []
+        self._field_changes = []
         #: What each removed line held, so the removal can be undone. A
         #: destructive step that does not record what it destroyed leaves
         #: the backup as the only way back.
@@ -252,7 +256,11 @@ class BillEditService:
                 action="purchase.edited",
                 entity_type="purchase_headers",
                 entity_id=header.id,
-                before_state={"invoice_no": invoice_no, "removed_lines": removed},
+                before_state={
+                    "invoice_no": invoice_no,
+                    "removed_lines": removed,
+                    "field_changes": self._field_changes,
+                },
                 after_state={"changes": changes},
                 channel="dashboard",
             )
@@ -296,13 +304,34 @@ class BillEditService:
                     raise NotFoundError("supplier", edited.supplier)
                 header.supplier_id = party.id
                 notes.append(f"supplier → {party.name}")
+                self._field_changes.append(
+                    {
+                        "field": "supplier",
+                        "before": current.name if current else None,
+                        "after": party.name,
+                    }
+                )
 
         if edited.invoice_no is not None and edited.invoice_no.strip() != header.invoice_no:
             notes.append(f"invoice no {header.invoice_no} → {edited.invoice_no.strip()}")
+            self._field_changes.append(
+                {
+                    "field": "invoice_no",
+                    "before": header.invoice_no,
+                    "after": edited.invoice_no.strip(),
+                }
+            )
             header.invoice_no = edited.invoice_no.strip()
 
         if edited.invoice_date is not None and edited.invoice_date != header.invoice_date:
             notes.append(f"date {header.invoice_date} → {edited.invoice_date}")
+            self._field_changes.append(
+                {
+                    "field": "invoice_date",
+                    "before": header.invoice_date.isoformat(),
+                    "after": edited.invoice_date.isoformat(),
+                }
+            )
             header.invoice_date = edited.invoice_date
 
         return notes
@@ -345,6 +374,28 @@ class BillEditService:
 
         if not fields:
             return []
+
+        # Structured, beside the sentences. The notes read well in a log
+        # and are useless to an undo -- "line 1: qty 800 → 960" has to be
+        # parsed back into numbers, and a format written for people is
+        # the wrong thing to parse. So each change is also recorded as
+        # what it was and what it became.
+        for field, value in fields.items():
+            was = {
+                "code": product.code,
+                "brand": current_brand,
+                "description": line.description,
+                "quantity": str(line.qty),
+                "rate": str(line.rate),
+            }[field]
+            self._field_changes.append(
+                {
+                    "line_no": line.line_no,
+                    "field": field,
+                    "before": was if was is None else str(was),
+                    "after": str(value),
+                }
+            )
 
         # `fix_in_transaction`, not `fix`: this already holds the guard,
         # and a guard inside a guard commits the outer transaction to take
@@ -590,3 +641,4 @@ class SaleEditService:
             "overpaid": str(-balance) if balance < ZERO else "0",
             "payment_moved": False,
         }
+
