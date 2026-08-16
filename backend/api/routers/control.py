@@ -28,6 +28,7 @@ from backend.models import Product, ProductType, PurchaseHeader
 from backend.models.enums import CapitalEntryType, SalePaymentType
 from backend.repositories.purchase_repository import PurchaseRepository
 from backend.services import message_log
+from backend.services.admin.billedit import BillEditService, EditedBill, EditedLine
 from backend.services.admin.contacts import ContactAdminService
 from backend.services.admin.diagnostics import DiagnosticsService
 from backend.services.admin.fixline import PurchaseLineFixService
@@ -1307,6 +1308,88 @@ class UnlinkIn(BaseModel):
 async def unlink_contact(body: UnlinkIn, user: ControlUser, session: Session) -> dict[str, Any]:
     """For a SIM that is gone rather than moved."""
     result = await ContactAdminService(session).unlink(user.org_id, user, name=body.user)
+    await session.commit()
+    return result
+
+
+@router.get("/purchases/{invoice_no}")
+async def purchase_detail(invoice_no: str, user: ControlUser, session: Session) -> dict[str, Any]:
+    """A confirmed bill, shaped for the entry form to reopen it."""
+    return await BillEditService(session).detail(user.org_id, invoice_no)
+
+
+class EditLineIn(BaseModel):
+    line_no: int | None = None
+    code: str = Field(min_length=1)
+    brand: str | None = None
+    description: str | None = None
+    qty: decimal.Decimal = Field(gt=0)
+    rate: decimal.Decimal = Field(ge=0)
+    removed: bool = False
+
+
+class EditBillIn(BaseModel):
+    supplier: str | None = None
+    invoice_no: str | None = None
+    invoice_date: datetime.date | None = None
+    lines: list[EditLineIn] = Field(default_factory=list)
+    charges: dict[str, decimal.Decimal] | None = None
+
+
+def _edited(body: EditBillIn) -> EditedBill:
+    return EditedBill(
+        supplier=body.supplier,
+        invoice_no=body.invoice_no,
+        invoice_date=body.invoice_date,
+        lines=[
+            EditedLine(
+                line_no=row.line_no,
+                code=row.code,
+                brand=row.brand,
+                description=row.description,
+                qty=row.qty,
+                rate=row.rate,
+                removed=row.removed,
+            )
+            for row in body.lines
+        ],
+        charges=body.charges,
+    )
+
+
+@router.post("/purchases/{invoice_no}/edit/preview")
+async def preview_bill_edit(
+    invoice_no: str, body: EditBillIn, user: ControlUser, session: Session
+) -> dict[str, Any]:
+    """What saving would change, computed by doing it and rolling back.
+
+    The same call as the save below with `dry_run` -- so the list shown
+    is what the commit would produce, not a prediction of it. A preview
+    that disagrees with its commit is worse than no preview.
+    """
+    try:
+        return await BillEditService(session).apply(
+            user.org_id, user, invoice_no=invoice_no, edited=_edited(body), dry_run=True
+        )
+    except GuardRegression as exc:
+        return {"invoice_no": invoice_no, "changes": [], "ok": False, "blockers": exc.problems}
+
+
+@router.post("/purchases/{invoice_no}/edit")
+async def apply_bill_edit(
+    invoice_no: str, body: EditBillIn, user: ControlUser, session: Session
+) -> dict[str, Any]:
+    """Save the edited bill.
+
+    Every change runs the repair the terminal runs for it -- a quantity
+    moves its stock movement and replays cost, a code or brand moves the
+    movements to another product, a rate replays, charges re-allocate --
+    inside one guard that throws the whole edit away if the books stop
+    balancing.
+    """
+    result = await BillEditService(session).apply(
+        user.org_id, user, invoice_no=invoice_no, edited=_edited(body)
+    )
     await session.commit()
     return result
 

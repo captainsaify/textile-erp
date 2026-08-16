@@ -389,6 +389,20 @@
              the party label, the invoice fields, and whether money can
              be taken at the counter -- so they are one template with
              three toggles rather than two that drift apart. -->
+        <!-- Shown only while correcting a bill that already exists. The
+             form is otherwise identical to entering a new one. -->
+        <div id="editing-banner" class="editing-banner" hidden>
+          <strong id="editing-what"></strong>
+          <button type="button" id="editing-cancel" class="link">Cancel</button>
+        </div>
+
+        <div id="edit-preview" class="card" hidden>
+          <h2>What this will change</h2>
+          <div id="edit-changes"></div>
+          <button type="button" id="edit-confirm" class="primary">Save these changes</button>
+          <div id="edit-out" class="hint"></div>
+        </div>
+
         <form id="entry" class="entry" autocomplete="off">
           <div class="entry-head">
             <div class="field wide">

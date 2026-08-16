@@ -432,3 +432,50 @@ button:focus-visible {
 .msg-cause b {
   font-variant-numeric: tabular-nums;
 }
+
+/* --------------------------------------------- correcting a bill */
+
+/* The form is the same one bills are typed into, so this bar is the
+   only thing saying which bill is open -- and that a Save here changes
+   something that already exists rather than making something new. */
+.editing-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 0.9rem;
+  margin-bottom: 0.9rem;
+  border: 1px solid var(--series-1, #3f7cac);
+  border-radius: var(--radius, 8px);
+  background: color-mix(in oklab, var(--series-1, #3f7cac) 10%, transparent);
+}
+
+/* Struck through rather than hidden: a line waiting to be taken off is
+   still on the bill until the save, and it has to be possible to change
+   your mind about it. */
+.row-removed td {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.row-removed td:last-child {
+  text-decoration: none;
+  opacity: 1;
+}
+
+.change-list {
+  margin: 0.3rem 0 0.8rem;
+  padding-left: 1.1rem;
+}
+
+.change-list li {
+  margin-bottom: 0.2rem;
+}
+
+/* An invoice number that opens something reads as a link, not a label. */
+.open-bill {
+  font-weight: 600;
+  color: var(--series-1, #3f7cac);
+  padding: 0;
+}

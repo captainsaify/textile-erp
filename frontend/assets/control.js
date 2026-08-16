@@ -342,15 +342,26 @@
       amountCell.textContent = Money.format(Money.fromPaise(amountPaise(row)));
 
       const dropCell = tr.insertCell();
-      const drop = el("button", "drop", "×");
+      const drop = el("button", "drop", row.removed ? "↺" : "×");
       drop.type = "button";
-      drop.title = "Remove this line";
+      drop.title = row.removed ? "Keep this line after all" : "Remove this line";
       drop.addEventListener("click", () => {
+        if (row.line_no) {
+          // A line that exists on a confirmed bill is not dropped from a
+          // list -- it has stock behind it. Mark it, show it struck
+          // through, and let the save take it off properly. Tapping
+          // again puts it back, since nothing has happened yet.
+          row.removed = !row.removed;
+          renderRows();
+          renderTotals();
+          return;
+        }
         rows.splice(index, 1);
         if (!rows.length) rows.push(blankRow());
         renderRows();
       });
       dropCell.append(drop);
+      if (row.removed) tr.classList.add("row-removed");
 
       if (row.note) {
         const noteRow = body.insertRow();
@@ -606,10 +617,132 @@
     renderTotals();
   }
 
+  // -------------------------------------------------- editing a bill
+
+  /** The invoice number being corrected, or null when entering a new
+   *  bill. The form is the same form either way: a bill that reads
+   *  differently on the way in than it did on the way out is a bill
+   *  people stop trusting. */
+  let editingBill = null;
+
+  async function openBillEditor(invoiceNo) {
+    const bill = await api(`/control/purchases/${encodeURIComponent(invoiceNo)}`);
+    setKind("purchase");
+    editingBill = bill.invoice_no;
+
+    $("party").value = bill.supplier;
+    $("invoice").value = bill.invoice_no;
+    $("entry-date").value = bill.invoice_date;
+    charges = bill.other_charges && Number(bill.other_charges) > 0
+      ? [{ label: "CHARGES", amount: bill.other_charges }]
+      : [];
+    $("freight").value = Number(bill.freight) ? bill.freight : "";
+    $("discount").value = Number(bill.discount) ? bill.discount : "";
+
+    rows = bill.lines.map((line) => ({
+      // `line_no` is what ties a row back to the line it came from. A
+      // row without one is new, and a confirmed bill cannot grow lines.
+      line_no: line.line_no,
+      product_id: line.code,
+      code: line.code,
+      brand: line.brand,
+      description: line.description || "",
+      // Shown the way it was typed -- bales and kg per bale -- so the
+      // person corrects what they counted rather than a derived total.
+      pieces: line.pieces || "",
+      weight_kg: line.weight_kg || line.qty,
+      qty: line.qty,
+      rate: line.rate,
+      note: "",
+      removed: false,
+    }));
+    renderRows();
+    renderCharges();
+    renderTotals();
+    $("editing-banner").hidden = false;
+    $("editing-what").textContent = `Editing bill ${bill.invoice_no} — ${bill.supplier}`;
+    $("save").textContent = "Review changes";
+    window.scrollTo({ top: 0 });
+  }
+
+  function stopEditing() {
+    editingBill = null;
+    $("editing-banner").hidden = true;
+    $("edit-preview").hidden = true;
+    $("save").textContent = "Save";
+    resetForm();
+  }
+
+  $("editing-cancel").addEventListener("click", stopEditing);
+
+  function editedPayload() {
+    return {
+      supplier: $("party").value.trim() || null,
+      invoice_no: $("invoice").value.trim() || null,
+      invoice_date: $("entry-date").value || null,
+      lines: rows
+        .filter((row) => row.line_no)
+        .map((row) => ({
+          line_no: row.line_no,
+          code: row.code,
+          brand: row.brand,
+          description: row.description || null,
+          qty: totalKg(row) || row.qty,
+          rate: row.rate || "0",
+          removed: Boolean(row.removed),
+        })),
+      charges: charges.length
+        ? Object.fromEntries(charges.map((c) => [c.label || "CHARGES", c.amount || "0"]))
+        : null,
+    };
+  }
+
+  async function reviewEdit() {
+    const preview = await api(
+      `/control/purchases/${encodeURIComponent(editingBill)}/edit/preview`,
+      { method: "POST", body: JSON.stringify(editedPayload()) },
+    );
+    const panel = $("edit-preview");
+    panel.hidden = false;
+    const list = el("ul", "change-list");
+    (preview.changes || []).forEach((change) => list.append(el("li", "", change)));
+    $("edit-changes").replaceChildren(
+      el("p", "muted", `${(preview.changes || []).length} change(s), then the books are re-checked`),
+      list,
+    );
+    if (preview.blockers && preview.blockers.length) {
+      preview.blockers.forEach((problem) => $("edit-changes").append(el("p", "warn", problem)));
+      $("edit-confirm").disabled = true;
+      return;
+    }
+    $("edit-confirm").disabled = false;
+  }
+
+  wire("edit-confirm", "edit-out", async () => {
+    const result = await api(`/control/purchases/${encodeURIComponent(editingBill)}/edit`, {
+      method: "POST",
+      body: JSON.stringify(editedPayload()),
+    });
+    const done = `${result.changes.length} change(s) saved. Bill total ${Money.format(result.grand_total)}.`;
+    stopEditing();
+    await loadRecords().catch(() => {});
+    return done;
+  });
+
   // ------------------------------------------------------------- save
 
   async function save(event) {
     event.preventDefault();
+    if (editingBill) {
+      // Same button, different verb: on a bill that already exists it
+      // shows what would change instead of writing it.
+      try {
+        await reviewEdit();
+      } catch (exc) {
+        banner(exc.message);
+      }
+      return;
+    }
     const chosen = rows.filter((row) => row.product_id);
     if (!chosen.length) return banner("Add at least one line.");
     if (!$("party").value.trim()) return banner("Pick a party first.");
@@ -716,8 +849,16 @@
         const remove = el("button", "link", "Remove");
         remove.type = "button";
         remove.addEventListener("click", () => previewPurge(item.invoice_no));
+        // The invoice number opens the bill in the entry form. A whole
+        // row would be a trap: Remove lives at the other end of it.
+        const open = el("button", "link open-bill", item.invoice_no);
+        open.type = "button";
+        open.title = "Open this bill to correct it";
+        open.addEventListener("click", () =>
+          openBillEditor(item.invoice_no).catch((exc) => banner(exc.message)),
+        );
         return [
-          item.invoice_no,
+          open,
           item.date,
           item.supplier,
           Money.format(item.grand_total),

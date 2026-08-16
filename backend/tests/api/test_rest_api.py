@@ -1761,3 +1761,179 @@ async def test_a_reversed_payment_is_left_out_of_the_list_unless_asked_for(
     )
     match = [item for item in shown.json()["items"] if item["reference"] == reference]
     assert match and match[0]["reversed"] is True
+
+
+# --------------------------------------------------------------------
+# editing a whole bill from the form
+# --------------------------------------------------------------------
+
+
+async def _confirmed_bill(
+    client: AsyncClient, headers: dict[str, str], stocked_code: str, invoice: str
+) -> None:
+    created = await client.post(
+        "/api/v1/control/purchases",
+        headers=headers,
+        json={
+            "supplier": f"Supp {stocked_code}",
+            "invoice_no": invoice,
+            "invoice_date": "2026-08-14",
+            "lines": [
+                {
+                    "code": stocked_code,
+                    "qty": "800",
+                    "rate": "120",
+                    "pieces": "10",
+                    "weight_kg": "80",
+                },
+                {"code": stocked_code, "qty": "400", "rate": "120"},
+            ],
+        },
+    )
+    assert created.status_code == 201, created.text
+
+
+async def test_a_bill_reopens_with_what_was_typed(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The form has to show bales and kg per bale, not only the total --
+    reopening a bill that says 800 KG when it was typed as 10 bales makes
+    the person do the arithmetic backwards to correct it."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    invoice = f"EDIT-{uuid.uuid4().hex[:5]}"
+    await _confirmed_bill(client, headers, stocked_code, invoice)
+
+    detail = await client.get(f"/api/v1/control/purchases/{invoice}", headers=headers)
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert body["invoice_no"] == invoice
+    assert body["supplier"] == f"Supp {stocked_code}"
+    assert len(body["lines"]) == 2
+    first = body["lines"][0]
+    assert first["code"] == stocked_code
+    assert decimal.Decimal(first["qty"]) == decimal.Decimal("800")
+    assert first["pieces"] == "10" or decimal.Decimal(first["pieces"]) == decimal.Decimal("10")
+    assert decimal.Decimal(first["weight_kg"]) == decimal.Decimal("80")
+
+
+async def test_previewing_an_edit_changes_nothing(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A preview that writes is worse than no preview, because it is
+    trusted -- the same lesson `--dry-run` taught."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    invoice = f"EDIT-{uuid.uuid4().hex[:5]}"
+    await _confirmed_bill(client, headers, stocked_code, invoice)
+
+    preview = await client.post(
+        f"/api/v1/control/purchases/{invoice}/edit/preview",
+        headers=headers,
+        json={
+            "lines": [
+                {"line_no": 1, "code": stocked_code, "qty": "900", "rate": "125"},
+                {"line_no": 2, "code": stocked_code, "qty": "400", "rate": "120"},
+            ]
+        },
+    )
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["committed"] is False
+    assert body["dry_run"] is True
+    assert any("qty" in change for change in body["changes"])
+
+    async with session_factory() as session:
+        qty = (
+            await session.execute(
+                sa.text(
+                    "SELECT pl.qty FROM purchase_lines pl JOIN purchase_headers ph "
+                    "ON ph.id = pl.purchase_header_id WHERE ph.invoice_no = :i AND pl.line_no = 1"
+                ),
+                {"i": invoice},
+            )
+        ).scalar_one()
+    assert qty == decimal.Decimal("800.000"), "the preview saved the edit"
+
+
+async def test_several_edits_at_once_are_applied_together(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The point of the screen: a quantity, a rate and a removal in one
+    save, each through the repair that carries its stock and cost."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    invoice = f"EDIT-{uuid.uuid4().hex[:5]}"
+    await _confirmed_bill(client, headers, stocked_code, invoice)
+
+    applied = await client.post(
+        f"/api/v1/control/purchases/{invoice}/edit",
+        headers=headers,
+        json={
+            "invoice_date": "2026-08-15",
+            "lines": [
+                {"line_no": 1, "code": stocked_code, "qty": "1040", "rate": "120"},
+                {"line_no": 2, "code": stocked_code, "qty": "400", "rate": "120", "removed": True},
+            ],
+        },
+    )
+    assert applied.status_code == 200, applied.text
+    body = applied.json()
+    assert body["committed"] is True
+
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                sa.text(
+                    "SELECT pl.line_no, pl.qty FROM purchase_lines pl JOIN purchase_headers ph "
+                    "ON ph.id = pl.purchase_header_id WHERE ph.invoice_no = :i "
+                    "ORDER BY pl.line_no"
+                ),
+                {"i": invoice},
+            )
+        ).all()
+        header = (
+            await session.execute(
+                sa.text(
+                    "SELECT invoice_date, subtotal, grand_total FROM purchase_headers "
+                    "WHERE invoice_no = :i"
+                ),
+                {"i": invoice},
+            )
+        ).one()
+    assert [(r.line_no, r.qty) for r in rows] == [(1, decimal.Decimal("1040.000"))]
+    assert header.invoice_date == datetime.date(2026, 8, 15)
+    # 1040 × 120, with the removed line gone from the total
+    assert header.subtotal == decimal.Decimal("124800.00")
+    assert header.grand_total == decimal.Decimal("124800.00")
+
+
+async def test_a_line_cannot_be_added_to_a_confirmed_bill(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """It would have no stock movement behind it, so the bill's history
+    would not explain its own stock."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    invoice = f"EDIT-{uuid.uuid4().hex[:5]}"
+    await _confirmed_bill(client, headers, stocked_code, invoice)
+
+    response = await client.post(
+        f"/api/v1/control/purchases/{invoice}/edit",
+        headers=headers,
+        json={"lines": [{"line_no": None, "code": stocked_code, "qty": "100", "rate": "120"}]},
+    )
+    assert response.status_code == 400  # a domain refusal, not a schema one
+    assert "its own bill" in response.text
