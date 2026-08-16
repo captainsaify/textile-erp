@@ -41,6 +41,18 @@ cli.add_typer(merge, name="merge")
 # --- charge -----------------------------------------------------------
 
 
+def _charge_notes(added: object) -> None:
+    """Which products had their cost restated, and which were already
+    sold and so could not be -- the same either way round."""
+    for attr, text in (
+        ("sold_codes", "already sold, cost not restated for"),
+        ("restated_codes", "cost restated for"),
+    ):
+        codes = getattr(added, attr, None)
+        if codes:
+            console.item(f"{text}: {', '.join(codes)}")
+
+
 @cli.command("charge")
 def charge(
     kind: Annotated[str, typer.Argument(help="purchase | sale")],
@@ -48,19 +60,46 @@ def charge(
     label: Annotated[str, typer.Argument(help="GST, packing, freight …")],
     amount: Annotated[str, typer.Argument(help="Amount")],
     note: Annotated[str | None, typer.Option("--note", help="Why, or who shared it")] = None,
+    remove: Annotated[
+        bool, typer.Option("--remove", help="Take this charge back off the bill")
+    ] = False,
 ) -> None:
     """Put a charge on a bill or sale that is already confirmed.
 
     On a purchase it becomes part of what the goods cost and is spread
     across the lines by value. On a sale it credits other income, not
-    revenue, so gross margin stays about the goods."""
+    revenue, so gross margin stays about the goods.
+
+    `--remove` takes one back off, for the charge typed twice -- the
+    ordinary mistake, since a bill can legitimately carry two charges of
+    the same amount and nothing refuses the second. Purchases only: a
+    sale's charge is income rather than landed cost and has no stock to
+    restate, so its inverse is a different shape."""
 
     async def action(ctx: AdminContext) -> None:
         if kind not in {"purchase", "sale"}:
             raise AdminError("first argument must be `purchase` or `sale`.")
+        if remove and kind != "purchase":
+            raise AdminError("--remove works on a purchase; a sale charge is income, not cost.")
         console.head(f"{kind} {reference}")
         async with guarded(ctx, what=f"{label.upper()} on {reference}"):
-            added = await ChargeService(ctx.session).add_in_transaction(
+            service = ChargeService(ctx.session)
+            if remove:
+                added = await service.remove_in_transaction(
+                    ctx.actor,
+                    reference=reference,
+                    label=label,
+                    amount=decimal.Decimal(amount),
+                    note=note,
+                )
+                console.item(
+                    f"{label.upper()} {console.money(decimal.Decimal(amount))} taken off; "
+                    f"charges now {console.money(added.other_charges)}"
+                )
+                console.item(f"bill total → {console.money(added.new_total)}")
+                _charge_notes(added)
+                return
+            added = await service.add_in_transaction(
                 ctx.actor,
                 reference=reference,
                 label=label,
@@ -68,13 +107,7 @@ def charge(
                 note=note,
             )
             console.item(f"{label.upper()} {console.money(decimal.Decimal(amount))} added")
-            for attr, text in (
-                ("sold_codes", "already sold, cost not restated for"),
-                ("restated_codes", "cost restated for"),
-            ):
-                codes = getattr(added, attr, None)
-                if codes:
-                    console.item(f"{text}: {', '.join(codes)}")
+            _charge_notes(added)
 
     run(action)
 

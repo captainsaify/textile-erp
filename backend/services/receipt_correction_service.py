@@ -687,6 +687,69 @@ class ChargeService:
                 partly_sold=[],
             )
 
+    async def remove(
+        self,
+        actor: User,
+        *,
+        reference: str,
+        label: str,
+        amount: decimal.Decimal,
+        note: str | None = None,
+        whatsapp_message_id: str | None = None,
+    ) -> ChargeAdded:
+        """Take a charge back off a bill it should not have gone on.
+
+        The same charge typed twice is the ordinary mistake -- the second
+        one looks like the first and nothing refuses it, because a bill
+        genuinely can carry two charges of the same amount.
+
+        It runs the *same* path as adding, with the amount negated,
+        rather than an inverse written out separately. Adding a charge
+        does five things: it moves `other_charges`, re-allocates freight
+        and charges across the lines, restates the landed cost of stock
+        still on hand, posts a journal pair, and audits. An inverse
+        written by hand would have to mirror all five and would drift
+        from them the first time one changed.
+        """
+        async with self._session.begin():
+            return await self.remove_in_transaction(
+                actor,
+                reference=reference,
+                label=label,
+                amount=amount,
+                note=note,
+                whatsapp_message_id=whatsapp_message_id,
+            )
+
+    async def remove_in_transaction(
+        self,
+        actor: User,
+        *,
+        reference: str,
+        label: str,
+        amount: decimal.Decimal,
+        note: str | None = None,
+        whatsapp_message_id: str | None = None,
+    ) -> ChargeAdded:
+        """The same removal, for a caller that already holds the
+        transaction -- the admin CLI, which commits only if
+        reconciliation still passes afterwards."""
+        if amount <= ZERO:
+            raise ValidationError("Say how much of the charge to take off.")
+        label = " ".join(label.split()).upper()
+        header = await self._find_purchase(actor.org_id, reference)
+        if header is None:
+            # Sales charges post to income rather than to landed cost and
+            # have no stock to restate, so the inverse is a different
+            # shape. Not built until it is needed.
+            raise NotFoundError("bill", reference)
+        if amount > header.other_charges:
+            raise ValidationError(
+                f"{header.invoice_no} carries {header.other_charges} in charges; "
+                f"{amount} cannot come off it."
+            )
+        return await self._on_purchase(actor, header, label, -amount, note, whatsapp_message_id)
+
     async def _on_purchase(
         self,
         actor: User,
@@ -696,6 +759,13 @@ class ChargeService:
         note: str | None,
         whatsapp_message_id: str | None,
     ) -> ChargeAdded:
+        """Signed: a negative `amount` takes the charge off again.
+
+        Every step below is its own inverse when the sign flips -- the
+        allocation is recomputed from the new total rather than adjusted,
+        the landed-cost delta comes out negative on its own, and the
+        journal pair is swapped explicitly.
+        """
         from backend.models import Inventory
 
         org_id = actor.org_id
@@ -735,6 +805,12 @@ class ChargeService:
             )
             if header.amount_paid < header.grand_total:
                 header.payment_status = "partial" if header.amount_paid > ZERO else "unpaid"
+            elif header.amount_paid > ZERO:
+                # Only reachable when a charge comes *off*: money that was
+                # short of the total now covers it. Left unset, a bill
+                # paid in full would keep showing as partly paid and its
+                # supplier would keep showing a balance nobody owes.
+                header.payment_status = "paid"
             if note:
                 header.notes = note
 
@@ -767,24 +843,39 @@ class ChargeService:
                     value_delta=(delta * min(on_hand, line.qty)).quantize(TWO),
                     source_id=line.id,
                     created_by=actor.id,
-                    reason=f"{label} added to {header.invoice_no}",
+                    reason=(
+                        f"{label} {'removed from' if amount < ZERO else 'added to'} "
+                        f"{header.invoice_no}"
+                    ),
                 )
 
-            # The goods cost more and the supplier is owed more.
+            # The goods cost more and the supplier is owed more -- and
+            # the other way round when the charge comes off. Posted as a
+            # positive pair in the opposite direction rather than as a
+            # negative one, so neither side of the journal ever carries a
+            # negative amount.
+            removing = amount < ZERO
+            magnitude = -amount if removing else amount
             await self._journal.post(
                 org_id,
                 entry_date=header.invoice_date,
-                description=f"{label} added to {header.invoice_no}",
+                description=(
+                    f"{label} {'removed from' if removing else 'added to'} {header.invoice_no}"
+                ),
                 source_type="purchase_header",
                 source_id=header.id,
                 created_by=actor.id,
-                debits=[(AccountCode.INVENTORY, amount)],
-                credits=[(AccountCode.ACCOUNTS_PAYABLE, amount)],
+                debits=[
+                    (AccountCode.ACCOUNTS_PAYABLE if removing else AccountCode.INVENTORY, magnitude)
+                ],
+                credits=[
+                    (AccountCode.INVENTORY if removing else AccountCode.ACCOUNTS_PAYABLE, magnitude)
+                ],
             )
             await self._audit.record(
                 org_id,
                 actor.id,
-                action="purchase.charge_added",
+                action="purchase.charge_removed" if removing else "purchase.charge_added",
                 entity_type="purchase_headers",
                 entity_id=header.id,
                 whatsapp_message_id=whatsapp_message_id,

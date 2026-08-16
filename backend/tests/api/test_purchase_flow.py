@@ -730,3 +730,108 @@ async def test_charge_is_named_where_someone_would_look_for_it(ctx: RequestConte
     # differently from a bill and guessing costs a round trip.
     usage = await handle_charge("", ctx)
     assert "invoice" in usage.reply.lower() and "sale" in usage.reply.lower()
+
+
+async def test_a_charge_added_twice_can_be_taken_back_off(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The ordinary mistake: the same GST typed twice, because a bill can
+    legitimately carry two charges of the same amount and nothing refuses
+    the second.
+
+    Removal has to be the exact inverse of adding, which is five things
+    and not one -- the header total, the allocation across lines, the
+    landed cost of stock still on hand, the journal, and the audit. So it
+    runs the same path with the amount negated, and this asserts the
+    round trip lands back where it started.
+    """
+    from backend.api.commands.correction_commands import handle_charge
+    from backend.services.receipt_correction_service import ChargeService
+
+    await handle_purchase(PURCHASE_TEXT, ctx)
+    await _session_reply("create supplier", ctx)
+    await _session_reply("create product TRP Trouser Poly", ctx)
+    await _session_reply("create product MJP Micro Jogging Pants Fabric", ctx)
+    await _session_reply("CONFIRM", ctx)
+
+    async with session_factory() as session:
+        opening_total, opening_charges = (
+            await session.execute(
+                sa.text("SELECT grand_total, other_charges FROM purchase_headers")
+            )
+        ).one()
+        opening_cost = (
+            await session.execute(
+                sa.text(
+                    "SELECT weighted_avg_cost FROM inventory i JOIN products p "
+                    "ON p.id = i.product_id WHERE p.code = 'TRP'"
+                )
+            )
+        ).scalar_one()
+
+    await handle_charge("INV-4521 GST 2240", ctx)
+    await handle_charge("INV-4521 GST 2240", ctx)  # the slip
+
+    async with session_factory() as session:
+        doubled = (
+            await session.execute(
+                sa.text("SELECT other_charges, grand_total FROM purchase_headers")
+            )
+        ).one()
+    assert doubled.other_charges == opening_charges + D("4480.00")
+
+    async with session_factory() as session:
+        undone = await ChargeService(session).remove(
+            ctx.user, reference="INV-4521", label="GST", amount=D("2240")
+        )
+
+    assert undone.other_charges == opening_charges + D("2240.00")
+
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                sa.text("SELECT other_charges, grand_total FROM purchase_headers")
+            )
+        ).one()
+        cost = (
+            await session.execute(
+                sa.text(
+                    "SELECT weighted_avg_cost FROM inventory i JOIN products p "
+                    "ON p.id = i.product_id WHERE p.code = 'TRP'"
+                )
+            )
+        ).scalar_one()
+        logged = (
+            await session.execute(
+                sa.text("SELECT count(*) FROM audit_logs WHERE action = 'purchase.charge_removed'")
+            )
+        ).scalar_one()
+
+    # exactly one charge left, and the total is what one charge implies
+    assert row.grand_total == opening_total + D("2240.00")
+    assert logged == 1
+    # the stock carries one share of the charge, not two
+    assert cost > opening_cost
+
+
+async def test_more_cannot_be_taken_off_than_the_bill_carries(
+    ctx: RequestContext, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Otherwise `other_charges` goes negative and the bill starts
+    reducing what the goods cost."""
+    from backend.api.commands.correction_commands import handle_charge
+    from backend.core.exceptions import ValidationError
+    from backend.services.receipt_correction_service import ChargeService
+
+    await handle_purchase(PURCHASE_TEXT, ctx)
+    await _session_reply("create supplier", ctx)
+    await _session_reply("create product TRP Trouser Poly", ctx)
+    await _session_reply("create product MJP Micro Jogging Pants Fabric", ctx)
+    await _session_reply("CONFIRM", ctx)
+    await handle_charge("INV-4521 GST 2240", ctx)
+
+    async with session_factory() as session:
+        with pytest.raises(ValidationError, match="cannot come off"):
+            await ChargeService(session).remove(
+                ctx.user, reference="INV-4521", label="GST", amount=D("99999")
+            )
