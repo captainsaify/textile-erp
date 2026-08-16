@@ -156,6 +156,65 @@ class BillEditService:
             )
         return header
 
+    async def revert(
+        self,
+        org_id: uuid.UUID,
+        actor: User,
+        *,
+        invoice_no: str,
+        field_changes: list[dict[str, Any]],
+    ) -> list[str]:
+        """Put an edit's field changes back to what they were.
+
+        Reads the bill as it stands and lays the recorded `before` values
+        over it, then saves that through the ordinary edit path. So
+        putting a quantity back runs the same repair that changed it, and
+        nothing here knows how to move stock on its own.
+
+        Fields the edit did not touch are left as they are now, not as
+        they were then -- undoing one change must not quietly roll back a
+        later, deliberate one.
+        """
+        current = await self.detail(org_id, invoice_no)
+        by_line: dict[int, dict[str, Any]] = {}
+        header_fields: dict[str, Any] = {}
+        for change in field_changes:
+            if change.get("line_no") is None:
+                header_fields[str(change["field"])] = change.get("before")
+            else:
+                by_line.setdefault(int(change["line_no"]), {})[str(change["field"])] = change.get(
+                    "before"
+                )
+
+        lines = [
+            EditedLine(
+                line_no=int(row["line_no"]),
+                code=str(by_line.get(int(row["line_no"]), {}).get("code") or row["code"]),
+                brand=by_line.get(int(row["line_no"]), {}).get("brand", row["brand"]),
+                description=by_line.get(int(row["line_no"]), {}).get(
+                    "description", row["description"]
+                ),
+                qty=decimal.Decimal(
+                    str(by_line.get(int(row["line_no"]), {}).get("quantity") or row["qty"])
+                ),
+                rate=decimal.Decimal(
+                    str(by_line.get(int(row["line_no"]), {}).get("rate") or row["rate"])
+                ),
+            )
+            for row in current["lines"]
+        ]
+
+        edited = EditedBill(
+            supplier=str(header_fields.get("supplier") or current["supplier"]),
+            invoice_no=str(header_fields.get("invoice_no") or current["invoice_no"]),
+            invoice_date=datetime.date.fromisoformat(
+                str(header_fields.get("invoice_date") or current["invoice_date"])
+            ),
+            lines=lines,
+        )
+        result = await self.apply(org_id, actor, invoice_no=current["invoice_no"], edited=edited)
+        return [str(note) for note in result["changes"]]
+
     # --- writing ------------------------------------------------------
 
     async def apply(
@@ -641,4 +700,3 @@ class SaleEditService:
             "overpaid": str(-balance) if balance < ZERO else "0",
             "payment_moved": False,
         }
-

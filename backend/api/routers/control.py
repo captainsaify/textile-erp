@@ -1413,7 +1413,7 @@ ACTIVITY_LABELS: dict[str, tuple[str, str]] = {
     "payment.paid": ("Paid a supplier", "payment"),
     "payment.received": ("Received from a customer", "payment"),
     "payment.edited": ("Payment corrected", "payment_edit"),
-    "payment.reversed": ("Payment reversed", ""),
+    "payment.reversed": ("Payment reversed", "unreverse"),
     # These five go through `UndoService`, which was already here and
     # already writes compensating entries rather than deleting rows. The
     # page dispatches to it rather than growing a second idea of what
@@ -1467,7 +1467,8 @@ async def activity(
         before = row.before_state or {}
         after = row.after_state or {}
         removed = before.get("removed_lines") or []
-        if undo_kind in {"restore_lines", "restore_sale_lines"} and not removed:
+        fields = before.get("field_changes") or []
+        if undo_kind in {"restore_lines", "restore_sale_lines"} and not (removed or fields):
             # A correction that removed nothing has nothing this screen
             # can put back: the field changes are undone by editing the
             # bill again, which is a different act with its own record.
@@ -1546,15 +1547,28 @@ async def undo_activity(reference: str, user: ControlUser, session: Session) -> 
     elif kind == "restore_lines":
         invoice = str(before.get("invoice_no") or "")
         fixer = PurchaseLineFixService(session)
-        async with guarded(session, user.org_id) as report:
-            for line in before.get("removed_lines") or []:
-                notes.extend(
-                    await fixer.restore_line(user.org_id, user, invoice_no=invoice, line=line)
+        removed_lines = before.get("removed_lines") or []
+        if removed_lines:
+            async with guarded(session, user.org_id) as report:
+                for line in removed_lines:
+                    notes.extend(
+                        await fixer.restore_line(user.org_id, user, invoice_no=invoice, line=line)
+                    )
+                for note in notes:
+                    report.note(note)
+            if not report.committed:
+                raise HTTPException(
+                    status_code=409, detail="the books did not balance; nothing saved"
                 )
-            for note in notes:
-                report.note(note)
-        if not report.committed:
-            raise HTTPException(status_code=409, detail="the books did not balance; nothing saved")
+        # Fields after lines: a quantity is put back on the line it
+        # belongs to, and that line has to exist again first.
+        changed_fields = before.get("field_changes") or []
+        if changed_fields:
+            notes.extend(
+                await BillEditService(session).revert(
+                    user.org_id, user, invoice_no=invoice, field_changes=changed_fields
+                )
+            )
 
     elif kind.startswith("undo:"):
         # purchase, sale, expense, income, capital -- all of which
@@ -1562,11 +1576,52 @@ async def undo_activity(reference: str, user: ControlUser, session: Session) -> 
         from backend.services.undo_service import UndoService
 
         entity = kind.split(":", 1)[1]
-        subject = str(
-            after.get("invoice_no") or before.get("invoice_no") or str(entry.entity_id)[:8]
+        # The reference alone is enough: the service resolves the audit
+        # row and dispatches on the action *it* finds, so naming the
+        # entity here would only be a second chance to name it wrongly.
+        # `undo_in_transaction` because this handler's session has
+        # already autobegun on the reads above.
+        undone = await UndoService(session).undo_in_transaction(user, reference=reference)
+        notes.append(getattr(undone, "summary", None) or f"{entity} undone")
+
+    elif kind == "unreverse":
+        # A reversal taken back is the payment happening again -- a new
+        # entry with its own reference, not the old one un-cancelled.
+        # Recording it afresh is what actually moves the money and
+        # re-settles the bills, so that is what this does.
+        from backend.models import Customer, Supplier
+
+        amount = decimal.Decimal(str(before.get("amount") or "0"))
+        via = str(before.get("via") or "cash")
+        if amount <= ZERO:
+            raise HTTPException(status_code=400, detail="the original amount was not recorded")
+        settle = SettlementService(session)
+        if entry.entity_type == "suppliers":
+            party_row = await session.get(Supplier, entry.entity_id)
+            if party_row is None:
+                raise HTTPException(status_code=404, detail="that supplier no longer exists")
+            redone = await settle.pay_supplier(
+                user,
+                supplier_name=party_row.name,
+                amount=amount,
+                via=via,
+                allow_advance=True,
+            )
+        else:
+            customer_row = await session.get(Customer, entry.entity_id)
+            if customer_row is None:
+                raise HTTPException(status_code=404, detail="that customer no longer exists")
+            redone = await settle.receive_from_customer(
+                user,
+                customer_name=customer_row.name,
+                amount=amount,
+                via=via,
+                allow_advance=True,
+            )
+        notes.append(
+            f"{money_str(redone.amount)} recorded again for {redone.party_name} "
+            f"({via}) — new reference {redone.reference}"
         )
-        undone = await UndoService(session).undo(user, entity=entity, reference=subject)
-        notes.append(getattr(undone, "summary", f"{entity} {subject} undone"))
 
     elif kind == "rename":
         old_name = str((before or {}).get("description") or "")
@@ -1611,9 +1666,7 @@ async def undo_activity(reference: str, user: ControlUser, session: Session) -> 
         async with guarded(session, user.org_id) as report:
             for line in before.get("removed_lines") or []:
                 notes.extend(
-                    await sale_fixer.restore_line(
-                        user.org_id, user, reference=sale_ref, line=line
-                    )
+                    await sale_fixer.restore_line(user.org_id, user, reference=sale_ref, line=line)
                 )
             for note in notes:
                 report.note(note)
