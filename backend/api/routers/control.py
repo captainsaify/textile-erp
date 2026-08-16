@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.api.amounts import money_str, qty_display
 from backend.api.deps import ControlUser, Session
 from backend.core.exceptions import DuplicateSaleError, ExactDuplicateInvoiceError
-from backend.models import Product, ProductType, PurchaseHeader
+from backend.models import Brand, Product, ProductType, PurchaseHeader
 from backend.models.enums import CapitalEntryType, SalePaymentType
 from backend.repositories.purchase_repository import PurchaseRepository
 from backend.services import message_log
@@ -1407,21 +1407,28 @@ async def apply_bill_edit(
 #: to do instead, which is more use than a button that half-works.
 ACTIVITY_LABELS: dict[str, tuple[str, str]] = {
     "purchase.edited": ("Bill corrected", "restore_lines"),
+    "sale.edited": ("Sale corrected", "restore_sale_lines"),
     "purchase.charge_added": ("Charge added to a bill", "charge"),
     "purchase.charge_removed": ("Charge taken off a bill", "charge"),
     "payment.paid": ("Paid a supplier", "payment"),
     "payment.received": ("Received from a customer", "payment"),
-    "payment.edited": ("Payment corrected", ""),
+    "payment.edited": ("Payment corrected", "payment_edit"),
     "payment.reversed": ("Payment reversed", ""),
-    "purchase.confirmed": ("Purchase recorded", ""),
+    # These five go through `UndoService`, which was already here and
+    # already writes compensating entries rather than deleting rows. The
+    # page dispatches to it rather than growing a second idea of what
+    # undoing a purchase means.
+    "purchase.confirmed": ("Purchase recorded", "undo:purchase"),
+    "sale.created": ("Sale recorded", "undo:sale"),
+    "expense.created": ("Expense recorded", "undo:expense"),
+    "income.created": ("Income recorded", "undo:income"),
+    "capital.contribution": ("Partner put capital in", "undo:capital"),
+    "capital.withdrawal": ("Partner took capital out", "undo:capital"),
+    "product.described": ("Product renamed", "rename"),
     "purchase.fixed": ("Bill line corrected", ""),
     "purchase.rate_corrected": ("Bill rate corrected", ""),
     "purchase.receipt_corrected": ("Receipt corrected", ""),
-    "sale.created": ("Sale recorded", ""),
-    "capital.contribution": ("Partner put capital in", ""),
-    "capital.withdrawal": ("Partner took capital out", ""),
-    "product.described": ("Product renamed", ""),
-    "expense.created": ("Expense recorded", ""),
+    "sale.fixed": ("Sale line corrected", ""),
 }
 
 
@@ -1460,7 +1467,7 @@ async def activity(
         before = row.before_state or {}
         after = row.after_state or {}
         removed = before.get("removed_lines") or []
-        if undo_kind == "restore_lines" and not removed:
+        if undo_kind in {"restore_lines", "restore_sale_lines"} and not removed:
             # A correction that removed nothing has nothing this screen
             # can put back: the field changes are undone by editing the
             # bill again, which is a different act with its own record.
@@ -1518,8 +1525,11 @@ async def undo_activity(reference: str, user: ControlUser, session: Session) -> 
     notes: list[str] = []
 
     if kind == "payment":
-        result = await PaymentReversalService(session).reverse(user, reference=reference)
-        notes.append(f"{result.kind} {money_str(result.amount)} to {result.party_name} reversed")
+        undone_payment = await PaymentReversalService(session).reverse(user, reference=reference)
+        notes.append(
+            f"{undone_payment.kind} {money_str(undone_payment.amount)} "
+            f"to {undone_payment.party_name} reversed"
+        )
 
     elif kind == "charge":
         label = str(after.get("label") or "CHARGES")
@@ -1540,6 +1550,70 @@ async def undo_activity(reference: str, user: ControlUser, session: Session) -> 
             for line in before.get("removed_lines") or []:
                 notes.extend(
                     await fixer.restore_line(user.org_id, user, invoice_no=invoice, line=line)
+                )
+            for note in notes:
+                report.note(note)
+        if not report.committed:
+            raise HTTPException(status_code=409, detail="the books did not balance; nothing saved")
+
+    elif kind.startswith("undo:"):
+        # purchase, sale, expense, income, capital -- all of which
+        # `UndoService` already reverses with compensating entries.
+        from backend.services.undo_service import UndoService
+
+        entity = kind.split(":", 1)[1]
+        subject = str(
+            after.get("invoice_no") or before.get("invoice_no") or str(entry.entity_id)[:8]
+        )
+        undone = await UndoService(session).undo(user, entity=entity, reference=subject)
+        notes.append(getattr(undone, "summary", f"{entity} {subject} undone"))
+
+    elif kind == "rename":
+        old_name = str((before or {}).get("description") or "")
+        if not old_name:
+            raise HTTPException(status_code=400, detail="the previous name was not recorded")
+        product = await session.get(Product, entry.entity_id)
+        if product is None:
+            raise HTTPException(status_code=404, detail="that product no longer exists")
+        brand_row = await session.get(Brand, product.brand_id) if product.brand_id else None
+        await ProductAdminService(session).describe(
+            user.org_id,
+            user,
+            code=product.code,
+            brand=brand_row.name if brand_row else None,
+            description=old_name,
+        )
+        notes.append(f"{product.code} named back to {old_name}")
+
+    elif kind == "payment_edit":
+        # The edit reversed the old payment and recorded a new one, so
+        # undoing it is editing back to the figures it started from --
+        # which the audit row kept for exactly this.
+        target = str(after.get("reference") or "")
+        previous = before.get("amount")
+        if not target or previous is None:
+            raise HTTPException(status_code=400, detail="the original figures were not recorded")
+        rolled_back = await PaymentEditService(session).edit(
+            user,
+            reference=target,
+            amount=decimal.Decimal(str(previous)),
+            via=str(before.get("via") or "cash"),
+            on=str(before.get("entry_date")) if before.get("entry_date") else None,
+        )
+        notes.append(
+            f"{rolled_back.party_name}: {money_str(rolled_back.old_amount)} → "
+            f"{money_str(rolled_back.new_amount)}"
+        )
+
+    elif kind == "restore_sale_lines":
+        sale_ref = str(before.get("reference") or "")
+        sale_fixer = SaleFixService(session)
+        async with guarded(session, user.org_id) as report:
+            for line in before.get("removed_lines") or []:
+                notes.extend(
+                    await sale_fixer.restore_line(
+                        user.org_id, user, reference=sale_ref, line=line
+                    )
                 )
             for note in notes:
                 report.note(note)

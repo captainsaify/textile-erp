@@ -31,6 +31,7 @@ from backend.models import (
     SalesLine,
     User,
 )
+from backend.models.enums import MovementType
 from backend.services.admin.guard import guarded
 from backend.services.audit_service import AuditService
 from backend.services.cost_replay_service import CostReplayService
@@ -318,6 +319,105 @@ class SaleFixService:
             header.payment_status = "partial"
         else:
             header.payment_status = "paid"
+
+    async def restore_line(
+        self,
+        org_id: uuid.UUID,
+        actor: User,
+        *,
+        reference: str,
+        line: dict[str, Any],
+    ) -> list[str]:
+        """Put a removed sale line back, with the stock it took out.
+
+        The mirror of the purchase restore, and the sign is the whole
+        difference: these goods *left*, so the movement that comes back
+        is negative. If the stock is no longer there to leave, the guard
+        refuses the whole undo rather than letting the balance go under.
+        """
+        header = await self._sale(org_id, reference)
+        line_no = int(line["line_no"])
+        clash = (
+            (
+                await self._session.execute(
+                    select(SalesLine).where(
+                        SalesLine.sales_header_id == header.id,
+                        SalesLine.line_no == line_no,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if clash is not None:
+            raise ValidationError(f"this sale already has a line {line_no}")
+
+        code = str(line["code"])
+        rows = list(
+            (
+                await self._session.execute(
+                    select(Product).where(
+                        Product.org_id == org_id,
+                        func.upper(Product.code) == code.strip().upper(),
+                        Product.deleted_at.is_(None),
+                    )
+                )
+            ).scalars()
+        )
+        brand = line.get("brand")
+        if brand:
+            for row in rows:
+                label = await self._session.get(Brand, row.brand_id) if row.brand_id else None
+                if label is not None and label.name.strip().lower() == str(brand).strip().lower():
+                    rows = [row]
+                    break
+        if not rows:
+            raise NotFoundError("product", code)
+        product = rows[0]
+
+        qty = decimal.Decimal(str(line["qty"]))
+        rate = decimal.Decimal(str(line["rate"]))
+        weight = decimal.Decimal(str(line["weight_kg"])) if line.get("weight_kg") else None
+
+        restored = SalesLine(
+            org_id=org_id,
+            sales_header_id=header.id,
+            line_no=line_no,
+            product_id=product.id,
+            qty=qty,
+            weight_kg=weight,
+            total_weight_kg=qty,
+            rate=rate,
+            line_total=(qty * rate).quantize(TWO),
+            # What the goods cost when they left. Recomputed by the
+            # replay below rather than invented here.
+            avg_cost_at_sale_time=ZERO,
+        )
+        self._session.add(restored)
+        await self._session.flush()
+        self._session.add(
+            InventoryMovement(
+                org_id=org_id,
+                product_id=product.id,
+                warehouse_id=header.warehouse_id,
+                movement_type=MovementType.SALE,
+                qty_delta=-qty,
+                unit_cost=rate,
+                resulting_qty_on_hand=ZERO,
+                resulting_avg_cost=ZERO,
+                source_type="sales_line",
+                source_id=restored.id,
+                created_by=actor.id,
+            )
+        )
+        await self._session.flush()
+        await self._retotal(header)
+        await self._session.flush()
+        await CostReplayService(self._session).replay_product(org_id, product.id)
+        return [
+            f"line {line_no} restored ({product.code}, {qty} @ {rate})",
+            f"sale total → {header.grand_total}",
+        ]
 
     async def _target(
         self, org_id: uuid.UUID, old: Product, code: str | None, brand: str | None
