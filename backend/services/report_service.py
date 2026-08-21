@@ -46,7 +46,7 @@ from backend.reports.excel.styling import (
     write_row,
 )
 from backend.repositories.accounting_repository import business_today
-from backend.repositories.party_repository import OPEN_SALE_STATUSES
+from backend.repositories.party_repository import OPEN_SALE_STATUSES, drop_reversed_pairs
 
 logger = get_logger(__name__)
 ZERO = decimal.Decimal("0")
@@ -423,6 +423,7 @@ class ReportService:
         # party in source_id. Leaving them out was not a cosmetic gap:
         # the settlement they undid was still counted, so six reversed
         # payments made a supplier owed 37,55,350 read as fully settled.
+        payments: list[tuple[bool, StatementEntry]] = []
         for ledger in (CashLedger, BankLedger):
             ledger_stmt = select(ledger).where(
                 ledger.org_id == org_id,
@@ -441,19 +442,36 @@ class ReportService:
             # is the same row with the opposite sign, cancelling its
             # original instead of reading as a second payment.
             direction = 1 if role == "customer" else -1
-            entries += [
-                StatementEntry(
-                    at=self._moment(row.entry_date, row.created_at),
-                    kind=(
-                        f"Reversal ({via})"
-                        if row.source_type == "payment_reversal"
-                        else f"{payment_label} ({via})"
+            payments += [
+                (
+                    row.source_type == "payment_reversal",
+                    StatementEntry(
+                        at=self._moment(row.entry_date, row.created_at),
+                        kind=(
+                            f"Reversal ({via})"
+                            if row.source_type == "payment_reversal"
+                            else f"{payment_label} ({via})"
+                        ),
+                        reference=row.notes or "",
+                        credit=direction * row.amount,
                     ),
-                    reference=row.notes or "",
-                    credit=direction * row.amount,
                 )
                 for row in (await self._session.execute(ledger_stmt)).scalars()
             ]
+
+        # A reversed payment and its reversal cancel. Both are kept in
+        # the ledger and the audit log; neither belongs on a statement,
+        # where they turn one payment into three lines the reader has to
+        # net out by hand. Dropping both halves leaves every balance
+        # exactly as it was.
+        entries += [
+            entry
+            for _, entry in drop_reversed_pairs(
+                payments,
+                amount_of=lambda pair: pair[1].credit,
+                is_reversal=lambda pair: pair[0],
+            )
+        ]
         return entries
 
     async def _build_statement(self, job: ReportJob) -> tuple[Path, int]:

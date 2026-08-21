@@ -2353,3 +2353,52 @@ async def _ledger_rows(session_factory: async_sessionmaker[AsyncSession]) -> int
         cash = (await session.execute(select(func.count()).select_from(CashLedger))).scalar_one()
         bank = (await session.execute(select(func.count()).select_from(BankLedger))).scalar_one()
     return int(cash) + int(bank)
+
+
+# --------------------------------------------------------------------
+# a corrected payment is one line, not three
+# --------------------------------------------------------------------
+
+
+async def test_a_reversed_payment_and_its_reversal_leave_the_statement(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Correcting a payment reverses and re-records it, which is the
+    honest ledger and terrible reading: one payment becomes three lines
+    that the supplier has to net out by hand. Both halves of the
+    cancelled pair come off the statement, and because they summed to
+    nothing, the closing balance does not move."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    api = {"Authorization": f"Bearer {await _token(client, owner)}"}
+    supplier_name = f"Supp {stocked_code}"
+
+    await _confirmed_bill(client, headers, stocked_code, f"RV-{uuid.uuid4().hex[:5]}")
+    paid = await client.post(
+        "/api/v1/control/pay",
+        headers=headers,
+        json={"party": supplier_name, "amount": "5000", "via": "cash"},
+    )
+    assert paid.status_code == 201, paid.text
+
+    supplier_id = await _party_id(client, api, "/api/v1/payables", supplier_name)
+    before = await _statement_sheet(client, api, kind="supplier", party_id=supplier_id)
+    owed_before = await _balance(client, api, "/api/v1/payables", supplier_name)
+
+    # the date was wrong; correcting it reverses and re-records
+    fixed = await client.post(
+        f"/api/v1/control/payments/{paid.json()['reference']}/edit",
+        headers=headers,
+        json={"on": "2026-08-17"},
+    )
+    assert fixed.status_code == 200, fixed.text
+
+    after = await _statement_sheet(client, api, kind="supplier", party_id=supplier_id)
+    # no reversal line, and the payment still appears exactly once
+    assert "Reversal" not in after, after
+    assert after.count("5000") <= before.count("5000") + 1
+    # the balance is untouched: the pair that was hidden summed to zero
+    assert await _balance(client, api, "/api/v1/payables", supplier_name) == owed_before

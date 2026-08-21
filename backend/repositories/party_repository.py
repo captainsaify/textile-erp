@@ -7,6 +7,8 @@ import dataclasses
 import datetime
 import decimal
 import uuid
+from collections.abc import Callable
+from typing import Any
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy import desc as sa_desc
@@ -101,7 +103,52 @@ async def _payment_entries(
             (row[0], row[1], row[2], row[3] == "payment_reversal")
             for row in (await session.execute(stmt)).all()
         )
-    return rows
+    # A payment that was reversed, and the reversal, are two rows that
+    # cancel. Neither belongs on a statement.
+    return drop_reversed_pairs(rows, amount_of=lambda r: r[1], is_reversal=lambda r: r[3])
+
+
+def drop_reversed_pairs(
+    rows: list[Any],
+    *,
+    amount_of: Callable[[Any], decimal.Decimal],
+    is_reversal: Callable[[Any], bool],
+) -> list[Any]:
+    """Take a reversal off a statement together with what it reversed.
+
+    A reversed payment is two rows that cancel: the payment, and the
+    reversal undoing it. Both are true, both are kept in the ledger and
+    the audit log, and neither belongs on a statement -- correcting the
+    date on six payments turned one line each into three, and a supplier
+    reading "₹2,00,000 paid / ₹2,00,000 reversed / ₹2,00,000 paid" has
+    to work out for himself that he was paid once.
+
+    Dropping *both* halves is what makes this safe. The pair already
+    summed to nothing, so every balance is unchanged; dropping only the
+    reversal would leave a payment on the statement that never stood.
+    A reversal with no partner is kept -- an unexplained credit is worth
+    seeing, and silently hiding one would be the very bug the pairing
+    exists to avoid.
+    """
+    reversals = [row for row in rows if is_reversal(row)]
+    if not reversals:
+        return list(rows)
+
+    # A reversal cancels its original exactly, so they are equal and
+    # opposite. Magnitude is the whole of the match: where two identical
+    # payments exist and one was reversed, either may be the one that
+    # goes -- the rows are indistinguishable and the result is the same.
+    unmatched = [row for row in rows if not is_reversal(row)]
+    dropped: list[int] = []
+    for reversal in reversals:
+        target = abs(amount_of(reversal))
+        for row in unmatched:
+            if id(row) in dropped:
+                continue
+            if abs(amount_of(row)) == target:
+                dropped.extend([id(row), id(reversal)])
+                break
+    return [row for row in rows if id(row) not in dropped]
 
 
 def _bucket_for_age(days: int) -> str:

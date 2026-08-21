@@ -347,6 +347,7 @@ async def test_a_reversed_payment_cancels_itself_out_of_the_party_ledger(
     the absolute value of every ledger row turned it into a *second*
     payment, so six reversed payments made a supplier who was owed
     37,55,350 read as -51,65,000."""
+    from backend.models import CashLedger
     from backend.services.report_service import ReportService
     from backend.services.settlement_service import PaymentReversalService
 
@@ -370,9 +371,24 @@ async def test_a_reversed_payment_cancels_itself_out_of_the_party_ledger(
         entries = await ReportService(session).party_entries(
             ORG, role="supplier", party_id=supplier_id
         )
-    # both rows are still there -- nothing is deleted -- and they net off
-    assert len(entries) == 3
+    # The pair cancels, so neither half is shown: the statement is the
+    # bill alone, and the payment that no longer stands is not on it.
+    # The balance is the assertion that matters -- it is what broke when
+    # reversals were counted as second payments -- and hiding a pair
+    # that already summed to nothing cannot move it.
     assert sum((e.debit - e.credit for e in entries), D("0")) == D("10000")
+    assert len(entries) == 1
+    assert not [e for e in entries if "Reversal" in e.kind]
+    # and nothing was deleted to achieve it -- both rows are in the ledger
+    async with session_factory() as session:
+        kept = (
+            await session.execute(
+                sa.select(sa.func.count())
+                .select_from(CashLedger)
+                .where(CashLedger.source_id == supplier_id)
+            )
+        ).scalar_one()
+    assert kept == 2
 
 
 async def test_a_reversal_and_its_original_are_kept_but_not_counted(
@@ -461,9 +477,13 @@ async def test_the_exported_statement_and_the_payable_agree(
         for row in load_workbook(built.file_path).worksheets[0].iter_rows()
         for cell in row
     ]
-    # the reversal is on the statement, named, and the closing balance
-    # is the payable
-    assert any(isinstance(value, str) and "Reversal" in value for value in cells)
+    # The reversed payment and its reversal are off the statement: they
+    # cancelled, and a supplier reading "4,000 paid / 4,000 reversed"
+    # has to net them out himself to learn he was paid nothing.
+    assert not any(isinstance(value, str) and "Reversal" in value for value in cells)
+    # This is the assertion that matters and it is unchanged: the sheet
+    # closes on the payable. Hiding a pair that summed to nothing cannot
+    # move it -- if it ever does, these two disagree and the test says so.
     assert D(str(cells[-1])) == payable
 
 
