@@ -1947,9 +1947,21 @@
         (await api(`/control/parties?q=${encodeURIComponent(query)}&kind=${kind}`)).items,
       render: (item) => {
         const node = el("div");
+        // For someone who trades both ways, "open" is the net of both
+        // sides -- showing only this form's side reads as "we are square
+        // with Afzal" while his purchases sit on the other row.
+        const net = Money.format(item.outstanding);
         node.append(
           el("span", "code", item.name),
-          el("span", "stock", `${Money.format(item.outstanding)} open`),
+          el(
+            "span",
+            "stock",
+            item.linked
+              ? `${net} net (${Money.format(item.own_side)} here, ${Money.format(
+                  item.other_side,
+                )} the other side)`
+              : `${net} open`,
+          ),
         );
         return node;
       },

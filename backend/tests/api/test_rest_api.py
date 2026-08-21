@@ -13,6 +13,7 @@ import datetime
 import decimal
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 import sqlalchemy as sa
@@ -2402,3 +2403,53 @@ async def test_a_reversed_payment_and_its_reversal_leave_the_statement(
     assert after.count("5000") <= before.count("5000") + 1
     # the balance is untouched: the pair that was hidden summed to zero
     assert await _balance(client, api, "/api/v1/payables", supplier_name) == owed_before
+
+
+async def test_the_party_picker_shows_both_sides_for_a_linked_party(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Afzal Bhai read "₹0.00 open" in the customer field while ₹64,000
+    of his purchases sat on the supplier row. True of that column, and
+    read by everyone as "we are square with Afzal"."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    supplier_name = f"Supp {stocked_code}"
+    customer_name = f"Cust {stocked_code}"
+
+    await _confirmed_bill(client, headers, stocked_code, f"PK-{uuid.uuid4().hex[:5]}")
+    await client.post(
+        "/api/v1/control/parties",
+        headers=headers,
+        json={"kind": "customer", "name": customer_name},
+    )
+
+    async def pick(kind: str, name: str) -> dict[str, Any]:
+        found = await client.get(
+            f"/api/v1/control/parties?q={name.split()[0]}&kind={kind}", headers=headers
+        )
+        assert found.status_code == 200, found.text
+        rows = [i for i in found.json()["items"] if i["name"] == name]
+        assert rows, found.text
+        return dict(rows[0])
+
+    # unlinked: the customer side knows nothing of the purchases
+    assert decimal.Decimal((await pick("customer", customer_name))["outstanding"]) == ZERO
+    owed = decimal.Decimal((await pick("supplier", supplier_name))["outstanding"])
+    assert owed > ZERO
+
+    linked = await client.post(
+        "/api/v1/control/links",
+        headers=headers,
+        json={"supplier": supplier_name, "customer": customer_name},
+    )
+    assert linked.status_code == 201, linked.text
+
+    # linked: picking him as a customer shows what is really open with
+    # him -- negative, because the balance runs the other way
+    row = await pick("customer", customer_name)
+    assert row["linked"] is True
+    assert decimal.Decimal(row["outstanding"]) == -owed
+    assert decimal.Decimal(row["other_side"]) == owed

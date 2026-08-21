@@ -469,16 +469,44 @@ async def party_picker(
                 )
             ).scalars()
         )
-    return {
-        "items": [
-            {
+    # A party who trades both ways has a balance on each side, and the
+    # picker was showing only the side it happens to be filling in.
+    # Afzal Bhai read "₹0.00 open" in the customer field while ₹64,000
+    # of his purchases sat on the supplier row -- true of that column,
+    # and read by everyone as "we are square with Afzal".
+    from backend.services.party_link_service import PartyLinkService
+
+    links = PartyLinkService(session)
+    other_repo = CustomerRepository(session) if kind == "supplier" else SupplierRepository(session)
+
+    async def _position(row: Any) -> dict[str, Any]:
+        own = await repo.outstanding(user.org_id, row.id)
+        counterpart = (
+            await links.linked_customer_id(user.org_id, row.id)
+            if kind == "supplier"
+            else await links.linked_supplier_id(user.org_id, row.id)
+        )
+        if counterpart is None:
+            return {
                 "id": str(row.id),
                 "name": row.name,
-                "outstanding": money_str(await repo.outstanding(user.org_id, row.id)),
+                "outstanding": money_str(own),
+                "linked": False,
             }
-            for row in rows
-        ]
-    }
+        opposite = await other_repo.outstanding(user.org_id, counterpart)
+        return {
+            "id": str(row.id),
+            "name": row.name,
+            # What is open with them once both sides are counted. Signed,
+            # so the form can say which way it points rather than showing
+            # a bare number that could mean either.
+            "outstanding": money_str(own - opposite),
+            "linked": True,
+            "own_side": money_str(own),
+            "other_side": money_str(opposite),
+        }
+
+    return {"items": [await _position(row) for row in rows]}
 
 
 class MergeIn(BaseModel):
