@@ -351,8 +351,12 @@ async def purchase_scan(purchase_id: str, user: CurrentUser, session: Session) -
 async def receivables(user: CurrentUser, session: Session) -> dict[str, Any]:
     """Who owes us, oldest first -- the aging question from docs/21 §2."""
     from backend.repositories.party_repository import CustomerRepository
+    from backend.services.party_link_service import net_against_links
 
     rows = await CustomerRepository(session).outstanding_parties(user.org_id)
+    # A party who is also a supplier appears on both lists gross, which
+    # counts one person twice in opposite directions.
+    netted = await net_against_links(session, user.org_id, list(rows), role="customer")
     return {
         "data": [
             {
@@ -360,8 +364,10 @@ async def receivables(user: CurrentUser, session: Session) -> dict[str, Any]:
                 "name": row.name,
                 "outstanding": money_str(row.outstanding),
                 "oldest_date": row.oldest_date.isoformat() if row.oldest_date else None,
+                "gross": money_str(row.gross),
+                "offset": money_str(row.offset),
             }
-            for row in rows
+            for row in netted
         ]
     }
 
@@ -369,8 +375,10 @@ async def receivables(user: CurrentUser, session: Session) -> dict[str, Any]:
 @router.get("/payables")
 async def payables(user: CurrentUser, session: Session) -> dict[str, Any]:
     from backend.repositories.party_repository import SupplierRepository
+    from backend.services.party_link_service import net_against_links
 
     rows = await SupplierRepository(session).outstanding_parties(user.org_id)
+    netted = await net_against_links(session, user.org_id, list(rows), role="supplier")
     return {
         "data": [
             {
@@ -378,8 +386,10 @@ async def payables(user: CurrentUser, session: Session) -> dict[str, Any]:
                 "name": row.name,
                 "outstanding": money_str(row.outstanding),
                 "oldest_date": row.oldest_date.isoformat() if row.oldest_date else None,
+                "gross": money_str(row.gross),
+                "offset": money_str(row.offset),
             }
-            for row in rows
+            for row in netted
         ]
     }
 

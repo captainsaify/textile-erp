@@ -31,6 +31,7 @@ from backend.tests.conftest import (
 
 ORG = uuid.UUID(SEEDED_ORG_ID)
 PASSWORD = "correct-horse-battery-staple"
+ZERO = decimal.Decimal("0")
 
 
 @pytest.fixture(autouse=True)
@@ -2089,3 +2090,266 @@ async def test_editing_a_paid_sale_leaves_the_money_and_reports_the_gap(
     assert row.amount_paid == decimal.Decimal("20000.00"), "the payment must not move"
     assert row.grand_total == decimal.Decimal("16000.00")
     assert row.payment_status == "paid"
+
+
+# --------------------------------------------------------------------
+# selling more than is on hand: refused with a reason, then allowed
+# --------------------------------------------------------------------
+
+
+async def test_short_stock_is_refused_by_name_and_records_on_override(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Goods leave the yard before the bill that brought them in is
+    typed. The form refuses first and says which code is short -- in the
+    error envelope the dashboard actually reads -- and records the sale
+    when the person says to, exactly as WhatsApp does."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+
+    await _confirmed_bill(client, headers, stocked_code, f"SS-{uuid.uuid4().hex[:5]}")
+    await client.post(
+        "/api/v1/control/parties",
+        headers=headers,
+        json={"kind": "customer", "name": f"Short {stocked_code}"},
+    )
+    body = {
+        "customer": f"Short {stocked_code}",
+        # far more than the bill above brought in
+        "lines": [{"code": stocked_code, "qty": "999999", "rate": "200"}],
+        "payment_type": "credit",
+    }
+
+    refused = await client.post("/api/v1/control/sales", headers=headers, json=body)
+    assert refused.status_code == 422, refused.text
+    error = refused.json()["error"]
+    assert error["code"] == "insufficient_stock"
+    # the message names the code, so the dashboard can show which line
+    assert stocked_code in error["message"]
+
+    allowed = await client.post(
+        "/api/v1/control/sales",
+        headers=headers,
+        json={**body, "allow_negative_stock": True},
+    )
+    assert allowed.status_code == 201, allowed.text
+    assert allowed.json()["already_existed"] is False
+
+
+# --------------------------------------------------------------------
+# money moves on its own day, not the day it was typed
+# --------------------------------------------------------------------
+
+
+async def test_money_in_out_and_expenses_take_the_day_they_happened(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A notebook is copied out days after the money moved. Every money
+    form takes the day it happened -- the form sends `on` in the format
+    a date input produces -- and blank still means today."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+
+    await _confirmed_bill(client, headers, stocked_code, f"DT-{uuid.uuid4().hex[:5]}")
+    paid = await client.post(
+        "/api/v1/control/pay",
+        headers=headers,
+        # <input type="date"> emits exactly this shape
+        json={"party": f"Supp {stocked_code}", "amount": "5000", "via": "cash", "on": "2026-08-17"},
+    )
+    assert paid.status_code == 201, paid.text
+
+    spent = await client.post(
+        "/api/v1/control/expenses",
+        headers=headers,
+        json={"category": "freight", "amount": "1200", "via": "cash", "on": "2026-08-17"},
+    )
+    assert spent.status_code == 201, spent.text
+
+    listed = await client.get("/api/v1/control/payments/recent", headers=headers)
+    assert listed.status_code == 200, listed.text
+    dated = [i for i in listed.json()["items"] if i["reference"] == paid.json()["reference"]]
+    assert dated and dated[0]["date"] == "2026-08-17", dated
+
+    # a day that has not happened yet is refused, not filed under today
+    future = await client.post(
+        "/api/v1/control/pay",
+        headers=headers,
+        json={"party": f"Supp {stocked_code}", "amount": "10", "via": "cash", "on": "2099-01-01"},
+    )
+    assert future.status_code == 400, future.text
+    assert future.json()["error"]["code"] == "validation_error"
+
+
+# --------------------------------------------------------------------
+# one person on both sides of the book
+# --------------------------------------------------------------------
+
+
+async def test_a_party_who_buys_and_sells_nets_and_can_be_set_off(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Afzal sells us fabric and buys fabric from us. Linked, his two
+    balances become one position: the payables list shows him net, the
+    receivables list stops showing him twice over, and a set-off clears
+    the smaller side against the larger without a rupee of cash moving."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    api = {"Authorization": f"Bearer {await _token(client, owner)}"}
+
+    supplier_name = f"Supp {stocked_code}"
+    customer_name = f"Cust {stocked_code}"
+
+    # we owe him 1,44,000 on a bill; he owes us 20,000 on a sale
+    await _confirmed_bill(client, headers, stocked_code, f"AF-{uuid.uuid4().hex[:5]}")
+    await client.post(
+        "/api/v1/control/parties",
+        headers=headers,
+        json={"kind": "customer", "name": customer_name},
+    )
+    sale = await client.post(
+        "/api/v1/control/sales",
+        headers=headers,
+        json={
+            "customer": customer_name,
+            "lines": [{"code": stocked_code, "qty": "100", "rate": "200"}],
+            "payment_type": "credit",
+        },
+    )
+    assert sale.status_code == 201, sale.text
+
+    payable_before = await _balance(client, api, "/api/v1/payables", supplier_name)
+    receivable_before = await _balance(client, api, "/api/v1/receivables", customer_name)
+    assert payable_before > ZERO and receivable_before > ZERO
+
+    # unlinked, he is two strangers who happen to share a bank account
+    linked = await client.post(
+        "/api/v1/control/links",
+        headers=headers,
+        json={"supplier": supplier_name, "customer": customer_name},
+    )
+    assert linked.status_code == 201, linked.text
+    position = linked.json()
+    assert decimal.Decimal(position["net"]) == payable_before - receivable_before
+    assert position["we_owe"] is True
+
+    # the payables list now shows him net, and he is off the receivables
+    # list entirely -- he is not a debtor, he is a smaller creditor
+    payable_net = await _balance(client, api, "/api/v1/payables", supplier_name)
+    assert payable_net == payable_before - receivable_before
+    assert await _balance(client, api, "/api/v1/receivables", customer_name) == ZERO
+
+    # setting off clears the whole overlap: the receivable goes, the
+    # payable falls by the same amount, and no cash entry is made
+    before_rows = await _ledger_rows(session_factory)
+    done = await client.post(
+        "/api/v1/control/setoff",
+        headers=headers,
+        json={"supplier": supplier_name, "on": "2026-08-21"},
+    )
+    assert done.status_code == 201, done.text
+    result = done.json()
+    assert decimal.Decimal(result["amount"]) == receivable_before
+    assert decimal.Decimal(result["receivable_after"]) == ZERO
+    assert decimal.Decimal(result["payable_after"]) == payable_before - receivable_before
+    assert result["bills_cleared"] and result["sales_cleared"]
+    # no cash moved, so the cash and bank books must be untouched --
+    # a set-off recorded as a payment would put money through a drawer
+    # nobody opened
+    assert await _ledger_rows(session_factory) == before_rows
+    # and the books still balance afterwards
+    health = await client.get("/api/v1/control/health", headers=headers)
+    assert health.status_code == 200, health.text
+    assert health.json()["ok"] is True, health.text
+
+    # and there is nothing left to set off a second time
+    again = await client.post(
+        "/api/v1/control/setoff", headers=headers, json={"supplier": supplier_name}
+    )
+    assert again.status_code == 400, again.text
+
+    # his statement is now one timeline covering both sides, closing on
+    # the net -- not two sheets that have to be read against each other
+    supplier_id = await _party_id(client, api, "/api/v1/payables", supplier_name)
+    sheet = await _statement_sheet(client, api, kind="supplier", party_id=supplier_id)
+    # the sale to him appears on the supplier's own statement, which is
+    # the whole point of linking the two rows
+    assert str(sale.json()["sale_id"])[:8] in sheet
+
+
+async def test_setting_off_an_unlinked_supplier_is_refused(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Netting two balances is only meaningful once someone has said
+    they belong to one person. Guessing from a matching spelling is how
+    two different Afzals become one."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    await _confirmed_bill(client, headers, stocked_code, f"NL-{uuid.uuid4().hex[:5]}")
+
+    refused = await client.post(
+        "/api/v1/control/setoff", headers=headers, json={"supplier": f"Supp {stocked_code}"}
+    )
+    assert refused.status_code == 400, refused.text
+    assert "not linked" in refused.json()["error"]["message"]
+
+
+async def _balance(
+    client: AsyncClient, headers: dict[str, str], path: str, name: str
+) -> decimal.Decimal:
+    response = await client.get(path, headers=headers)
+    assert response.status_code == 200, response.text
+    for row in response.json()["data"]:
+        if row["name"] == name:
+            return decimal.Decimal(row["outstanding"])
+    return ZERO
+
+
+async def _party_id(client: AsyncClient, headers: dict[str, str], path: str, name: str) -> str:
+    response = await client.get(path, headers=headers)
+    assert response.status_code == 200, response.text
+    for row in response.json()["data"]:
+        if row["name"] == name:
+            return str(row["id"])
+    raise AssertionError(f"{name} not on {path}")
+
+
+async def _statement_sheet(
+    client: AsyncClient, headers: dict[str, str], *, kind: str, party_id: str
+) -> str:
+    """Every cell of the statement, flattened -- the test cares which
+    events are on it, not where they landed."""
+    import io
+
+    from openpyxl import load_workbook
+
+    response = await client.get(
+        f"/api/v1/exports/statement.xlsx?kind={kind}&party_id={party_id}", headers=headers
+    )
+    assert response.status_code == 200, response.text
+    sheet = load_workbook(io.BytesIO(response.content)).worksheets[0]
+    return " ".join(str(c.value) for row in sheet.iter_rows() for c in row if c.value is not None)
+
+
+async def _ledger_rows(session_factory: async_sessionmaker[AsyncSession]) -> int:
+    """How many cash/bank rows exist. A set-off must not add one."""
+    from sqlalchemy import func, select
+
+    from backend.models import BankLedger, CashLedger
+
+    async with session_factory() as session:
+        cash = (await session.execute(select(func.count()).select_from(CashLedger))).scalar_one()
+        bank = (await session.execute(select(func.count()).select_from(BankLedger))).scalar_one()
+    return int(cash) + int(bank)

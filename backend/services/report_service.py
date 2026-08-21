@@ -483,6 +483,13 @@ class ReportService:
         # same three queries -- which is how it kept counting reversed
         # payments long after the copy next door stopped: Noor Traders's
         # statement showed 1,40,85,350 paid against 89,20,350 purchased.
+        # Someone who trades both ways -- Afzal sells us fabric and buys
+        # fabric from us -- has a payable and a receivable that are the
+        # same relationship. Two statements answer neither partner's
+        # actual question, so a linked party gets one, with the other
+        # side's rows flipped: a sale to him reduces what we owe him
+        # exactly as a payment to him does.
+        counterpart = await self._linked_counterpart(job.org_id, role, party_id)
         entries = await self.party_entries(
             job.org_id,
             role=role,
@@ -490,6 +497,18 @@ class ReportService:
             start=job.period_start,
             end=job.period_end,
         )
+        if counterpart is not None:
+            other_role = "customer" if role == "supplier" else "supplier"
+            entries = self._merge_sides(
+                entries,
+                await self.party_entries(
+                    job.org_id,
+                    role=other_role,
+                    party_id=counterpart,
+                    start=job.period_start,
+                    end=job.period_end,
+                ),
+            )
 
         # What was already owed when the period began. A July statement
         # without it starts from zero and closes on a number that is not
@@ -503,6 +522,16 @@ class ReportService:
                 party_id=party_id,
                 end=job.period_start - datetime.timedelta(days=1),
             )
+            if counterpart is not None:
+                earlier = self._merge_sides(
+                    earlier,
+                    await self.party_entries(
+                        job.org_id,
+                        role="customer" if role == "supplier" else "supplier",
+                        party_id=counterpart,
+                        end=job.period_start - datetime.timedelta(days=1),
+                    ),
+                )
             opening = sum((e.debit - e.credit for e in earlier), ZERO)
 
         workbook = build_statement(
@@ -517,6 +546,33 @@ class ReportService:
         path = self._output_path(job)
         workbook.save(path)
         return path, len(entries)
+
+    async def _linked_counterpart(
+        self, org_id: uuid.UUID, role: str, party_id: uuid.UUID
+    ) -> uuid.UUID | None:
+        """The same person's id on the other side of the book, if the
+        two rows have been declared one person."""
+        from backend.services.party_link_service import PartyLinkService
+
+        links = PartyLinkService(self._session)
+        if role == "supplier":
+            return await links.linked_customer_id(org_id, party_id)
+        return await links.linked_supplier_id(org_id, party_id)
+
+    @staticmethod
+    def _merge_sides(primary: list[Any], other: list[Any]) -> list[Any]:
+        """One timeline for a party who trades both ways.
+
+        The other side's rows are flipped, because the statement has one
+        balance column and it can only mean one thing. Read down a
+        supplier's combined statement, the balance is always "what we
+        owe him net": his bills raise it, our payments lower it, our
+        sales to him lower it, and his payments to us raise it.
+        """
+        flipped = [
+            dataclasses.replace(entry, debit=entry.credit, credit=entry.debit) for entry in other
+        ]
+        return sorted([*primary, *flipped], key=lambda e: e.at)
 
     @staticmethod
     def _moment(day: datetime.date | None, recorded: datetime.datetime | None) -> datetime.datetime:

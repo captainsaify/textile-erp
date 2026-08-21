@@ -77,6 +77,7 @@
                 <select id="rc-via"><option value="cash">Cash</option><option value="bank">Bank</option></select>
               </div>
               <div class="field"><label>Against bill (optional)</label><input id="rc-against" /></div>
+              <div class="field narrow"><label for="rc-date">Received on</label><input id="rc-date" type="date" /></div>
               <button type="button" id="rc-go" class="primary">Record receipt</button>
               <div id="rc-out" class="hint"></div>
             </section>
@@ -93,12 +94,14 @@
               <div class="field narrow"><label>From</label>
                 <select id="pay-via"><option value="cash">Cash</option><option value="bank">Bank</option></select>
               </div>
+              <div class="field narrow"><label for="pay-date">Paid on</label><input id="pay-date" type="date" /></div>
               <button type="button" id="pay-go" class="primary">Record payment</button>
               <div id="pay-out" class="hint"></div>
               <hr />
               <div class="field"><label>Expense category</label><input id="ex-cat" placeholder="freight, tea, rent…" /></div>
               <div class="field narrow"><label>Amount</label><input id="ex-amount" inputmode="decimal" /></div>
               <div class="field"><label>Note</label><input id="ex-note" /></div>
+              <div class="field narrow"><label for="ex-date">Spent on</label><input id="ex-date" type="date" /></div>
               <button type="button" id="ex-go" class="primary">Record expense</button>
               <div id="ex-out" class="hint"></div>
             </section>
@@ -141,6 +144,47 @@
               <button type="button" id="pe-cancel" class="link">Cancel</button>
               <div id="pe-out" class="hint"></div>
             </div>
+          </section>
+
+          <!-- Someone who sells to us and buys from us. Two rows, one
+               person: without saying so, the payable and the receivable
+               are unrelated balances and the net exists nowhere. -->
+          <section class="card">
+            <h2>Buys and sells</h2>
+            <p class="muted">
+              A party on both sides of the book — Afzal sells us fabric and buys
+              fabric from us. Link his supplier name to his customer name and the
+              two balances become one position: netted on the money lists, and one
+              statement instead of two. Setting off clears what he owes us against
+              what we owe him — no cash moves, so it is a book entry, not a payment.
+            </p>
+            <div class="field">
+              <label for="ln-supplier">Supplier name</label>
+              <input id="ln-supplier" placeholder="Type a name…" />
+              <div id="ln-supplier-list" class="combo-list" hidden></div>
+            </div>
+            <div class="field">
+              <label for="ln-customer">…is the same person as customer</label>
+              <input id="ln-customer" placeholder="Type a name…" />
+              <div id="ln-customer-list" class="combo-list" hidden></div>
+            </div>
+            <button type="button" id="ln-go" class="primary">Link these two</button>
+            <div id="ln-out" class="hint"></div>
+            <div id="links"></div>
+            <hr />
+            <div class="field">
+              <label for="so-supplier">Set off — supplier</label>
+              <input id="so-supplier" placeholder="Type a name…" />
+              <div id="so-supplier-list" class="combo-list" hidden></div>
+            </div>
+            <div class="field narrow">
+              <label for="so-amount">Amount (blank = the whole overlap)</label>
+              <input id="so-amount" inputmode="decimal" />
+            </div>
+            <div class="field narrow"><label for="so-date">Agreed on</label><input id="so-date" type="date" /></div>
+            <div class="field"><label for="so-note">Note</label><input id="so-note" /></div>
+            <button type="button" id="so-go" class="primary">Set off</button>
+            <div id="so-out" class="hint"></div>
           </section>
         </section>
 

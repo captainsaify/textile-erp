@@ -43,7 +43,8 @@
     if (!response.ok) {
       const detail = await response.json().catch(() => ({}));
       throw new Error(
-        detail.detail ||
+        detail.error?.message ||
+          detail.detail ||
           detail.message ||
           `Request failed (${response.status})`,
       );

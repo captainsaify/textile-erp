@@ -153,6 +153,13 @@ class SaleIn(BaseModel):
     #: recording a second.
     idempotency_key: str | None = None
     sale_date: str | None = None
+    #: Goods that left the yard before the bill that brought them in was
+    #: entered are real, and refusing to record the sale does not put
+    #: them back. WhatsApp can already override this (the session keeps
+    #: `allow_negative_stock`); the form could not, so the same sale was
+    #: allowed on the phone and blocked on the desk. Never a default --
+    #: the form asks first and names what is short.
+    allow_negative_stock: bool = False
 
 
 @router.post("/purchases", status_code=status.HTTP_201_CREATED)
@@ -289,6 +296,7 @@ async def create_sale(body: SaleIn, user: ControlUser, session: Session) -> dict
         paid_now=body.paid_now,
         paid_via=body.paid_via,
         idempotency_key=body.idempotency_key,
+        allow_negative_stock=body.allow_negative_stock,
         on=body.sale_date,
     )
 
@@ -2012,3 +2020,83 @@ async def rebuild_ledgers(user: ControlUser, session: Session) -> dict[str, Any]
 #
 # Taking backups stays here. That one is safe, and it is the half people
 # actually need often.
+
+
+# --- one person on both sides of the book ------------------------------
+
+
+class PartyLinkIn(BaseModel):
+    supplier: str = Field(min_length=1)
+    customer: str = Field(min_length=1)
+
+
+class SetOffIn(BaseModel):
+    supplier: str = Field(min_length=1)
+    #: Left out means the whole overlap, which is what "set off Afzal"
+    #: means when someone says it out loud.
+    amount: decimal.Decimal | None = Field(default=None, gt=0)
+    on: str | None = None
+    note: str | None = None
+
+
+@router.get("/links")
+async def list_links(user: ControlUser, session: Session) -> dict[str, Any]:
+    """Everyone who trades both ways, and where each one stands."""
+    from backend.services.party_link_service import PartyLinkService
+
+    positions = await PartyLinkService(session).all_links(user.org_id)
+    return {"items": [p.as_dict() for p in positions]}
+
+
+@router.post("/links", status_code=status.HTTP_201_CREATED)
+async def link_parties(body: PartyLinkIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    """Declare that a supplier row and a customer row are one person."""
+    from backend.services.party_link_service import PartyLinkService
+
+    position = await PartyLinkService(session).link(
+        user, supplier_name=body.supplier, customer_name=body.customer
+    )
+    await session.commit()
+    return position.as_dict()
+
+
+@router.delete("/links/{supplier}")
+async def unlink_parties(supplier: str, user: ControlUser, session: Session) -> dict[str, Any]:
+    from backend.services.party_link_service import PartyLinkService
+
+    name = await PartyLinkService(session).unlink(user, supplier_name=supplier)
+    await session.commit()
+    return {"supplier": name, "linked": False}
+
+
+@router.post("/setoff", status_code=status.HTTP_201_CREATED)
+async def set_off(body: SetOffIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    """Clear what they owe us against what we owe them.
+
+    No cash moves, so this is a journal contra entry and a pair of
+    allocations -- never a payment. Recording it as a payment would put
+    money through the cash book that never left the drawer.
+    """
+    from backend.services.party_link_service import PartyLinkService
+
+    result = await PartyLinkService(session).set_off(
+        user,
+        supplier_name=body.supplier,
+        amount=body.amount,
+        on=body.on,
+        note=body.note,
+    )
+    await session.commit()
+    return {
+        "reference": result.reference,
+        "party": result.party_name,
+        "amount": money_str(result.amount),
+        "bills_cleared": [
+            {"reference": ref, "applied": money_str(value)} for ref, value in result.purchases
+        ],
+        "sales_cleared": [
+            {"reference": ref, "applied": money_str(value)} for ref, value in result.sales
+        ],
+        "payable_after": money_str(result.payable_after),
+        "receivable_after": money_str(result.receivable_after),
+    }

@@ -45,6 +45,15 @@ class Supplier(UUIDPkMixin, OrgScopedMixin, Base):
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )
     deleted_at: Mapped[datetime.datetime | None]
+    #: Set when this supplier is also a customer -- the same person on
+    #: both sides of the book. Afzal sells us fabric and buys fabric
+    #: from us; without this the payable and the receivable are two
+    #: unrelated balances and the net position exists nowhere. Nullable
+    #: because trading both ways is the exception, and unique because a
+    #: supplier is at most one customer.
+    linked_customer_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("customers.id")
+    )
 
 
 class Customer(UUIDPkMixin, OrgScopedMixin, Base):

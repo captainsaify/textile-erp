@@ -54,7 +54,21 @@
     }
     const body = response.status === 204 ? null : await response.json();
     if (!response.ok) {
-      throw new Error(body?.detail || body?.message || `Request failed (${response.status})`);
+      // The API's error envelope is {"error": {"code", "message"}} --
+      // docs/10_API.md §5. Reading `detail` finds nothing on every real
+      // failure, which turned "you are 400kg short of 55D" into a bare
+      // status code.
+      const failure = new Error(
+        body?.error?.message ||
+          body?.detail ||
+          body?.message ||
+          `Request failed (${response.status})`,
+      );
+      // The stable identifier, carried alongside the copy so a caller
+      // can offer the way past a refusal instead of only reporting it.
+      failure.code = body?.error?.code || "";
+      failure.details = body?.error?.details || {};
+      throw failure;
     }
     return body;
   }
@@ -567,7 +581,7 @@
   // so adding a page is one line here rather than another branch below.
   const ON_OPEN = {
     records: () => loadRecords(),
-    money: () => loadPayments(),
+    money: () => Promise.all([loadPayments(), loadLinks()]),
     stock: () => loadProducts(),
     activity: () => loadActivity(),
     partners: () => loadPartners(),
@@ -865,20 +879,38 @@
           true,
         );
       } else {
-        result = await api("/control/sales", {
-          method: "POST",
-          body: JSON.stringify({
-            ...payload,
-            customer: $("party").value.trim(),
-            payment_type: $("payment-type").value,
-            paid_now: $("paid-now").value || "0",
-            paid_via: $("paid-via").value,
-            sale_date: $("entry-date").value,
-            // Minted with the form. A slow connection and an impatient
-            // thumb is the case a terminal never has.
-            idempotency_key: draftKey,
-          }),
-        });
+        const postSale = (allowNegative) =>
+          api("/control/sales", {
+            method: "POST",
+            body: JSON.stringify({
+              ...payload,
+              customer: $("party").value.trim(),
+              payment_type: $("payment-type").value,
+              paid_now: $("paid-now").value || "0",
+              paid_via: $("paid-via").value,
+              sale_date: $("entry-date").value,
+              // Minted with the form. A slow connection and an impatient
+              // thumb is the case a terminal never has.
+              idempotency_key: draftKey,
+              allow_negative_stock: allowNegative,
+            }),
+          });
+        try {
+          result = await postSale(false);
+        } catch (exc) {
+          // Short stock is a question, not a verdict: the goods have
+          // gone out whether or not the bill that brought them in was
+          // entered yet. Ask, name what is short, and let the person
+          // decide -- exactly what the WhatsApp flow does. Nothing was
+          // written by the attempt that failed, so the retry carries
+          // the same idempotency key.
+          if (exc.code !== "insufficient_stock") throw exc;
+          if (!window.confirm(`${exc.message}.\n\nRecord the sale anyway and let stock go negative?`)) {
+            banner(exc.message);
+            return;
+          }
+          result = await postSale(true);
+        }
         banner(
           result.already_existed
             ? "That sale was already recorded."
@@ -1051,12 +1083,17 @@
         amount: $("rc-amount").value.trim(),
         via: $("rc-via").value,
         against: $("rc-against").value.trim() || null,
+        // The day the money moved, not the day it was typed. Blank
+        // still means today, so the common case costs no keystrokes --
+        // but a receipt entered on Friday for money taken on Monday
+        // belongs in Monday's cash book and on Monday's statement.
+        on: $("rc-date").value || null,
       }),
     });
     const applied = result.allocations
       .map((a) => `${a.reference} ${Money.format(a.applied)}`)
       .join(", ");
-    ["rc-party", "rc-amount", "rc-against"].forEach((id) => ($(id).value = ""));
+    ["rc-party", "rc-amount", "rc-against", "rc-date"].forEach((id) => ($(id).value = ""));
     return (
       `Received ${Money.format(result.amount)} from ${result.party}. ` +
       (applied ? `Settled ${applied}. ` : "") +
@@ -1072,10 +1109,96 @@
         party: $("pay-party").value.trim(),
         amount: $("pay-amount").value.trim(),
         via: $("pay-via").value,
+        on: $("pay-date").value || null,
       }),
     });
-    ["pay-party", "pay-amount"].forEach((id) => ($(id).value = ""));
+    ["pay-party", "pay-amount", "pay-date"].forEach((id) => ($(id).value = ""));
     return `Paid ${Money.format(result.amount)} to ${result.party}. Owing ${Money.format(result.outstanding_after)}.`;
+  });
+
+  // ------------------------------------------------- both-ways parties
+
+  /** Everyone who trades in both directions, and where each stands.
+   *  Gross on both sides is shown beside the net, because "we owe Afzal
+   *  4,02,000" and "we owe him 5,00,000 less the 98,000 he owes us" are
+   *  answers to different questions -- and a screen showing only the net
+   *  invites the call that begins "but your own bill says". */
+  async function loadLinks() {
+    const data = await api("/control/links");
+    const host = $("links");
+    if (!data.items.length) {
+      host.replaceChildren(el("p", "muted", "Nobody is linked yet."));
+      return;
+    }
+    host.replaceChildren(
+      rowsTable(
+        ["Party", "We owe", "They owe", "Net", ""],
+        data.items,
+        (item) => {
+          const unlink = el("button", "link", "Unlink");
+          unlink.type = "button";
+          unlink.addEventListener("click", async () => {
+            if (!window.confirm(`Stop treating ${item.name} as one person?`)) return;
+            try {
+              await api(`/control/links/${encodeURIComponent(item.name)}`, {
+                method: "DELETE",
+              });
+              await loadLinks();
+            } catch (exc) {
+              banner(exc.message);
+            }
+          });
+          const net = el(
+            "span",
+            item.we_owe ? "" : "good",
+            `${Money.format(item.net.replace("-", ""))} ${item.we_owe ? "to them" : "to us"}`,
+          );
+          return [item.name, Money.format(item.payable), Money.format(item.receivable), net, unlink];
+        },
+      ),
+    );
+  }
+
+  wire("ln-go", "ln-out", async () => {
+    const result = await api("/control/links", {
+      method: "POST",
+      body: JSON.stringify({
+        supplier: $("ln-supplier").value.trim(),
+        customer: $("ln-customer").value.trim(),
+      }),
+    });
+    ["ln-supplier", "ln-customer"].forEach((id) => ($(id).value = ""));
+    await loadLinks().catch(() => {});
+    const direction = result.we_owe ? "we owe them" : "they owe us";
+    return (
+      `${result.name} is one person on both sides. We owe ${Money.format(result.payable)}, ` +
+      `they owe ${Money.format(result.receivable)} — net ${Money.format(
+        result.net.replace("-", ""),
+      )} ${direction}.`
+    );
+  });
+
+  wire("so-go", "so-out", async () => {
+    const amount = $("so-amount").value.trim();
+    const result = await api("/control/setoff", {
+      method: "POST",
+      body: JSON.stringify({
+        supplier: $("so-supplier").value.trim(),
+        amount: amount || null,
+        on: $("so-date").value || null,
+        note: $("so-note").value.trim() || null,
+      }),
+    });
+    ["so-supplier", "so-amount", "so-note", "so-date"].forEach((id) => ($(id).value = ""));
+    await loadLinks().catch(() => {});
+    const bills = result.bills_cleared.map((b) => b.reference).join(", ");
+    const sales = result.sales_cleared.map((b) => b.reference).join(", ");
+    return (
+      `Set off ${Money.format(result.amount)} against ${result.party}. ` +
+      `Bills cleared: ${bills || "none"}. Sales cleared: ${sales || "none"}. ` +
+      `Now owed to them ${Money.format(result.payable_after)}, ` +
+      `owed to us ${Money.format(result.receivable_after)}.`
+    );
   });
 
   // ---------------------------------------------------- payment repair
@@ -1253,9 +1376,10 @@
         category: $("ex-cat").value.trim(),
         amount: $("ex-amount").value.trim(),
         description: $("ex-note").value.trim() || null,
+        on: $("ex-date").value || null,
       }),
     });
-    ["ex-cat", "ex-amount", "ex-note"].forEach((id) => ($(id).value = ""));
+    ["ex-cat", "ex-amount", "ex-note", "ex-date"].forEach((id) => ($(id).value = ""));
     // The service spots a category that looks like one already in use.
     // Two buckets for one thing splits the reporting silently, so the
     // warning is worth more than the tidiness of hiding it.
@@ -1838,6 +1962,9 @@
 
   partyPicker("rc-party", "rc-party-list", "customer");
   partyPicker("pay-party", "pay-party-list", "supplier");
+  partyPicker("ln-supplier", "ln-supplier-list", "supplier");
+  partyPicker("ln-customer", "ln-customer-list", "customer");
+  partyPicker("so-supplier", "so-supplier-list", "supplier");
 
   /** Partners come from the page's own list rather than a lookup: there
    * are two or three of them, they are already loaded for the balances
