@@ -40,3 +40,7 @@ docker/cloudflared/credentials.json
 # environment, so it is literal in the file. config.example.yml ships in
 # its place.
 docker/cloudflared/config.yml
+
+# NSE F&O bhavcopy pull (2015-2026), ~1.1GB of parquet. Market data,
+# not source. Regenerable from the NSE archives via bhav_pull.py.
+bhavcopy/
