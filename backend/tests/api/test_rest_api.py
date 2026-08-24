@@ -2439,6 +2439,8 @@ async def test_the_party_picker_shows_both_sides_for_a_linked_party(
     assert decimal.Decimal((await pick("customer", customer_name))["outstanding"]) == ZERO
     owed = decimal.Decimal((await pick("supplier", supplier_name))["outstanding"])
     assert owed > ZERO
+    # different names, so nothing to point at yet
+    assert (await pick("customer", customer_name))["same_name_other_side"] is None
 
     linked = await client.post(
         "/api/v1/control/links",
@@ -2453,3 +2455,41 @@ async def test_the_party_picker_shows_both_sides_for_a_linked_party(
     assert row["linked"] is True
     assert decimal.Decimal(row["outstanding"]) == -owed
     assert decimal.Decimal(row["other_side"]) == owed
+
+
+async def test_the_picker_names_a_same_named_row_on_the_other_side(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Afzal Bhai exists as both, spelled identically, and the customer
+    field showed ₹0.00 with no hint that ₹64,000 of his purchases sat on
+    the other row. The zero is right; the silence is not.
+
+    It is still not netted -- two businesses can share a name, and only
+    a person can say these two rows are one. The picker says what is
+    there and where to go."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    # one name, both sides -- the Afzal case exactly
+    shared = f"Supp {stocked_code}"
+
+    await _confirmed_bill(client, headers, stocked_code, f"TW-{uuid.uuid4().hex[:5]}")
+    made = await client.post(
+        "/api/v1/control/parties", headers=headers, json={"kind": "customer", "name": shared}
+    )
+    assert made.status_code in (200, 201), made.text
+
+    found = await client.get(
+        f"/api/v1/control/parties?q={shared.split()[0]}&kind=customer", headers=headers
+    )
+    assert found.status_code == 200, found.text
+    row = next(i for i in found.json()["items"] if i["name"] == shared)
+
+    # his own side really is zero, and is reported as zero -- not netted
+    assert decimal.Decimal(row["outstanding"]) == ZERO
+    assert row["linked"] is False
+    # but the other side is named, with its balance
+    assert row["other_kind"] == "supplier"
+    assert decimal.Decimal(row["same_name_other_side"]) > ZERO

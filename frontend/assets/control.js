@@ -1951,18 +1951,22 @@
         // sides -- showing only this form's side reads as "we are square
         // with Afzal" while his purchases sit on the other row.
         const net = Money.format(item.outstanding);
-        node.append(
-          el("span", "code", item.name),
-          el(
-            "span",
-            "stock",
-            item.linked
-              ? `${net} net (${Money.format(item.own_side)} here, ${Money.format(
-                  item.other_side,
-                )} the other side)`
-              : `${net} open`,
-          ),
-        );
+        let note;
+        if (item.linked) {
+          note = `${net} net (${Money.format(item.own_side)} here, ${Money.format(
+            item.other_side,
+          )} the other side)`;
+        } else if (item.same_name_other_side) {
+          // Not netted -- nobody has said these two rows are one person,
+          // and two businesses can share a name. But the balance behind
+          // the zero is named here, where the zero is being read.
+          note =
+            `${net} open — also a ${item.other_kind} with ` +
+            `${Money.format(item.same_name_other_side)} open. Money → Buys and sells to link them.`;
+        } else {
+          note = `${net} open`;
+        }
+        node.append(el("span", "code", item.name), el("span", "stock", note));
         return node;
       },
       onPick: (item) => {

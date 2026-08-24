@@ -479,6 +479,28 @@ async def party_picker(
     links = PartyLinkService(session)
     other_repo = CustomerRepository(session) if kind == "supplier" else SupplierRepository(session)
 
+    # The same name on the other side of the book, for the rows that are
+    # not linked yet. Two rows spelled identically are not proof they are
+    # one person -- there can be two Afzals -- so this never nets. It
+    # says so, where the zero that prompts the question is being read,
+    # instead of leaving someone to find a card on another page and
+    # wonder why the balance they know about is missing.
+    other_model = Customer if kind == "supplier" else Supplier
+    twins = {
+        str(name).strip().lower(): pid
+        for pid, name in (
+            await session.execute(
+                select(other_model.id, other_model.name).where(
+                    other_model.org_id == user.org_id,
+                    other_model.deleted_at.is_(None),
+                    func.lower(func.trim(other_model.name)).in_(
+                        [row.name.strip().lower() for row in rows] or [""]
+                    ),
+                )
+            )
+        ).all()
+    }
+
     async def _position(row: Any) -> dict[str, Any]:
         own = await repo.outstanding(user.org_id, row.id)
         counterpart = (
@@ -487,11 +509,22 @@ async def party_picker(
             else await links.linked_supplier_id(user.org_id, row.id)
         )
         if counterpart is None:
+            twin = twins.get(row.name.strip().lower())
+            same_name = (
+                money_str(await other_repo.outstanding(user.org_id, twin))
+                if twin is not None
+                else None
+            )
             return {
                 "id": str(row.id),
                 "name": row.name,
                 "outstanding": money_str(own),
                 "linked": False,
+                # Present only when a row of the same name exists on the
+                # other side and the two have not been declared one
+                # person. The number is theirs, not netted into this one.
+                "same_name_other_side": same_name,
+                "other_kind": "supplier" if kind == "customer" else "customer",
             }
         opposite = await other_repo.outstanding(user.org_id, counterpart)
         return {
