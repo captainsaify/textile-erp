@@ -607,3 +607,26 @@ def _checkin_body(today: datetime.date, lines: list[Any]) -> str:
         "Send 'activity' any time for the last 10."
     )
     return "\n".join(rendered)
+
+
+async def _stale_draft_sweep() -> dict[str, Any]:
+    """Drop drafts nobody has touched in a month.
+
+    The Drafts page says untouched drafts are dropped after 30 days, and
+    a page that says so while they pile up forever is worse than one
+    that says nothing. Nothing here is business data -- a draft has
+    never touched stock or money -- so this is a real delete.
+    """
+    from backend.services.draft_service import DraftService
+
+    factory = get_session_factory()
+    dropped = 0
+    for org_id in await _org_ids():
+        async with factory() as session, session.begin():
+            dropped += await DraftService(session).purge_stale(org_id)
+    return {"dropped": dropped}
+
+
+@celery_app.task(name="stale_draft_sweep", soft_time_limit=60, time_limit=120, max_retries=1)
+def stale_draft_sweep() -> dict[str, Any]:
+    return run_async(_stale_draft_sweep())

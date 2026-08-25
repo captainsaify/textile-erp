@@ -37,6 +37,7 @@
           <button data-page="purchase" class="active">New purchase</button>
           <button data-page="sale">New sale</button>
           <button data-page="records">Records</button>
+          <button data-page="drafts">Drafts</button>
           <button data-page="money">Money</button>
           <button data-page="stock">Stock</button>
           <button data-page="activity">Activity</button>
@@ -59,6 +60,24 @@
       </div>
 
       <main>
+        <section id="page-drafts" hidden>
+          <section class="card">
+            <h2>Drafts</h2>
+            <p class="muted">
+              Bills and sales part-way through. Everything typed on the purchase
+              and sale forms is kept here automatically — you do not have to press
+              anything, and closing the tab or losing the laptop does not lose it.
+              A draft is not in the books: it can name a supplier who does not
+              exist yet or a code that resolves to nothing, and nothing here has
+              touched stock or money. Making it a record sends it through the
+              ordinary form, which checks it the same way it checks anything typed
+              fresh. Untouched drafts are dropped after 30 days.
+            </p>
+            <div id="drafts-out" class="hint"></div>
+            <div id="drafts"></div>
+          </section>
+        </section>
+
         <section id="page-money" hidden>
           <div class="grid-2">
             <section class="card">
@@ -561,6 +580,7 @@
 
           <div class="entry-actions">
             <button type="button" id="discard" class="link">Discard</button>
+            <button type="button" id="save-draft" class="link">Save as draft</button>
             <button type="submit" class="primary" id="save">Save</button>
           </div>
         </form>

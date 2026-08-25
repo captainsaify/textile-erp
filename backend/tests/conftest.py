@@ -75,6 +75,9 @@ _PURGE_ORDER = (
     # Added with the table: it carries actor_user_id, so leaving it out
     # made every teardown that deletes a user fail on a foreign key.
     "reversal_manifests",
+    # Same reason: drafts carry created_by, so leaving them out makes
+    # every teardown that deletes a user fail on a foreign key.
+    "drafts",
     "cash_ledger",
     "bank_ledger",
     "partner_capital",

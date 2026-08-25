@@ -517,6 +517,7 @@
     } catch {
       /* storage full or blocked; a draft is a convenience, not a record */
     }
+    scheduleDraft();
   }
 
   function readDraft() {
@@ -538,7 +539,98 @@
   function clearDraft() {
     localStorage.removeItem(DRAFT_STORE);
     $("draft-bar").hidden = true;
+    // The draft on the server goes with it. A bill that has been
+    // recorded is not still part-way through, and leaving it on the
+    // Drafts page is how it gets entered a second time.
+    if (draftKey) {
+      api(`/control/drafts/${draftKey}`, { method: "DELETE" }).catch(() => {});
+    }
   }
+
+  // ------------------------------------------------- drafts, on the server
+
+  /** localStorage survives a closed laptop; it does not survive a lost
+   *  one, and neither partner can see what the other left unfinished.
+   *  So the draft goes to the server too -- debounced, because this
+   *  fires on every keystroke, and never blocking, because a draft is a
+   *  convenience and must never be why an entry cannot be typed. */
+  let draftTimer = null;
+  let draftDirty = false;
+
+  function draftPayload() {
+    return {
+      party: $("party").value,
+      invoice: $("invoice").value,
+      date: $("entry-date").value,
+      // Only what was typed -- never a server figure, so a stale draft
+      // cannot show a stale balance, and never the paid amount, which is
+      // the one field where being quietly wrong costs money.
+      lines: rows.map((row) => ({
+        code: row.code,
+        brand: row.brand,
+        description: row.description,
+        pieces: row.pieces,
+        weight_kg: row.weight_kg,
+        qty: totalKg(row),
+        rate: row.rate,
+        product_id: row.product_id,
+      })),
+      charges: Object.fromEntries(
+        charges.filter((c) => c.label).map((c) => [c.label, c.amount || "0"]),
+      ),
+      freight: $("freight").value,
+      discount: $("discount").value,
+    };
+  }
+
+  function worthSaving() {
+    return Boolean($("party").value.trim() || rows.some((row) => row.code));
+  }
+
+  async function pushDraft() {
+    if (!draftKey || editingBill || !worthSaving()) return;
+    draftDirty = false;
+    await api("/control/drafts", {
+      method: "PUT",
+      body: JSON.stringify({ key: draftKey, kind, payload: draftPayload() }),
+    });
+  }
+
+  function scheduleDraft() {
+    draftDirty = true;
+    if (draftTimer) clearTimeout(draftTimer);
+    draftTimer = setTimeout(() => pushDraft().catch(() => {}), 1500);
+  }
+
+  // The tab being closed, the phone being locked, the browser being
+  // killed. `pagehide` is the one event that fires for all of them --
+  // `beforeunload` does not fire on mobile -- and `keepalive` lets the
+  // request outlive the page. Without this the last 1.5 seconds of
+  // typing, which is the part someone was in the middle of, is the part
+  // that gets lost.
+  function flushDraft() {
+    if (!draftDirty || !draftKey || editingBill || !worthSaving()) return;
+    if (draftTimer) clearTimeout(draftTimer);
+    draftDirty = false;
+    try {
+      fetch("/api/v1/control/drafts", {
+        method: "PUT",
+        keepalive: true,
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ key: draftKey, kind, payload: draftPayload() }),
+      });
+    } catch {
+      /* leaving anyway; the debounced save has most of it */
+    }
+  }
+
+  window.addEventListener("pagehide", flushDraft);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushDraft();
+  });
 
   function offerDraft() {
     const draft = readDraft();
@@ -565,9 +657,97 @@
     $("draft-discard").onclick = clearDraft;
   }
 
+  // -------------------------------------------------------- drafts page
+
+  /** What is part-way through, whoever started it. Two partners share
+   *  one set of books; a draft only the laptop that typed it can see is
+   *  the case this page exists to end. */
+  async function loadDrafts() {
+    const data = await api("/control/drafts");
+    const host = $("drafts");
+    if (!data.items.length) {
+      host.replaceChildren(el("p", "muted", "Nothing part-way through."));
+      return;
+    }
+    host.replaceChildren(
+      rowsTable(
+        ["Kind", "What", "Lines", "Total", "Last touched", "By", ""],
+        data.items,
+        (item) => {
+          const open = el("button", "link", "Open");
+          open.type = "button";
+          open.title = "Load it back into the form";
+          open.addEventListener("click", () =>
+            openDraft(item).catch((exc) => banner(exc.message)),
+          );
+
+          const remove = el("button", "link", "Delete");
+          remove.type = "button";
+          remove.addEventListener("click", async () => {
+            if (!window.confirm(`Delete the draft “${item.label}”? It is not in the books.`)) {
+              return;
+            }
+            try {
+              await api(`/control/drafts/${item.key}`, { method: "DELETE" });
+              // If this is the draft the form is holding, the form is
+              // now editing something that no longer exists.
+              if (item.key === draftKey) resetForm();
+              await loadDrafts();
+            } catch (exc) {
+              banner(exc.message);
+            }
+          });
+
+          const actions = el("div", "filters");
+          actions.append(open, remove);
+          return [
+            item.kind,
+            item.label,
+            String(item.lines),
+            Money.format(item.total),
+            new Date(item.updated_at).toLocaleString(),
+            item.author,
+            actions,
+          ];
+        },
+      ),
+    );
+  }
+
+  /** Open a draft in the form it came from.
+   *
+   *  Deliberately not a "record it" button on this page. A draft is
+   *  exactly the thing that has not been checked -- its supplier may
+   *  not exist, its code may resolve to nothing -- and a one-click
+   *  record would be a way to put an unchecked bill in the books
+   *  without ever seeing it. The form is where it gets looked at, and
+   *  the Save there is the same Save everything else goes through.
+   */
+  async function openDraft(item) {
+    const full = await api(`/control/drafts/${item.key}`);
+    const draft = full.payload || {};
+    kind = full.kind;
+    setKind(kind);
+    // Adopt the draft's key so editing it updates that row rather than
+    // leaving the original behind as a duplicate.
+    draftKey = full.key;
+    $("party").value = draft.party || "";
+    $("invoice").value = draft.invoice || "";
+    $("entry-date").value = draft.date || "";
+    rows = (draft.lines || []).length ? draft.lines.map((line) => ({ ...line })) : [blankRow()];
+    charges = Object.entries(draft.charges || {}).map(([label, amount]) => ({ label, amount }));
+    $("freight").value = draft.freight || "";
+    $("discount").value = draft.discount || "";
+    renderRows();
+    renderCharges();
+    renderTotals();
+    banner(`Draft opened. Check it, then Save to put it in the books.`, true);
+  }
+
   // ------------------------------------------------------------- mode
 
   const PAGES = {
+    drafts: "page-drafts",
     records: "page-records",
     money: "page-money",
     stock: "page-stock",
@@ -580,6 +760,7 @@
   // What each page has to fetch before it means anything. Kept as data
   // so adding a page is one line here rather than another branch below.
   const ON_OPEN = {
+    drafts: () => loadDrafts(),
     records: () => loadRecords(),
     money: () => Promise.all([loadPayments(), loadLinks()]),
     stock: () => loadProducts(),
@@ -1158,6 +1339,26 @@
       ),
     );
   }
+
+  // The button exists for the person who wants to be told it is saved.
+  // It saves nothing autosave has not already saved -- which is the
+  // point: pressing it should confirm, never rescue.
+  $("save-draft").addEventListener("click", async () => {
+    // The banner, not the Drafts page's own hint: the person pressing
+    // this is looking at the form, and a confirmation on a page they
+    // are not on is not a confirmation.
+    if (editingBill) {
+      return banner("This bill is already in the books — use Save correction.");
+    }
+    if (!worthSaving()) return banner("Nothing to keep yet — type a party or a line first.");
+    if (draftTimer) clearTimeout(draftTimer);
+    try {
+      await pushDraft();
+      banner("Kept in Drafts. It was being saved as you typed anyway.", true);
+    } catch (exc) {
+      banner(exc.message);
+    }
+  });
 
   wire("ln-go", "ln-out", async () => {
     const result = await api("/control/links", {

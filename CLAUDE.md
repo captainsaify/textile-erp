@@ -213,6 +213,7 @@ trigger, threshold, and message copy in the linked doc.
 | [docs/27_Documents.md](docs/27_Documents.md) | A sheet for every purchase, sale and payment, rebuilt on request |
 | [docs/28_SheetsEverywhere.md](docs/28_SheetsEverywhere.md) | Making a correction visible on the sheet, and a download on every page |
 | [docs/32_LinkedParties.md](docs/32_LinkedParties.md) | One person who both sells to us and buys from us: netting and set-off |
+| [docs/33_Drafts.md](docs/33_Drafts.md) | Half-entered bills: autosave, the abrupt exit, and why they are not in the books |
 | [docs/29_DemoMode.md](docs/29_DemoMode.md) | A second, throwaway business to demonstrate in |
 | [docs/30_VpsMigration.md](docs/30_VpsMigration.md) | Moving the whole thing to a VPS, and what deliberately stays behind |
 

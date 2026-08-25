@@ -2161,3 +2161,59 @@ async def set_off(body: SetOffIn, user: ControlUser, session: Session) -> dict[s
         "payable_after": money_str(result.payable_after),
         "receivable_after": money_str(result.receivable_after),
     }
+
+
+# --- drafts: what was typed, before it is worth keeping ----------------
+
+
+class DraftIn(BaseModel):
+    #: Minted by the form when it opens and kept for the life of that
+    #: entry, so a hundred autosaves are one row.
+    key: str = Field(min_length=8, max_length=64)
+    kind: str = Field(pattern="^(purchase|sale)$")
+    #: Whatever the form held. Opaque here on purpose -- a draft may name
+    #: a supplier who does not exist and a code that resolves to nothing,
+    #: and refusing to save that would defeat the point of a draft.
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.get("/drafts")
+async def list_drafts(user: ControlUser, session: Session) -> dict[str, Any]:
+    """Everything half-entered, most recently touched first."""
+    from backend.services.draft_service import DraftService
+
+    drafts = await DraftService(session).list(user.org_id)
+    return {"items": [d.as_dict() for d in drafts]}
+
+
+@router.put("/drafts")
+async def save_draft(body: DraftIn, user: ControlUser, session: Session) -> dict[str, Any]:
+    """Create or update the draft this form owns.
+
+    A PUT because the form owns the key and calling it twice with the
+    same body must leave one draft, not two -- which is exactly what
+    autosave does on a flaky connection.
+    """
+    from backend.services.draft_service import DraftService
+
+    summary = await DraftService(session).save(
+        user, key=body.key, kind=body.kind, payload=body.payload
+    )
+    await session.commit()
+    return summary.as_dict()
+
+
+@router.get("/drafts/{key}")
+async def read_draft(key: str, user: ControlUser, session: Session) -> dict[str, Any]:
+    from backend.services.draft_service import DraftService
+
+    return await DraftService(session).get(user.org_id, key)
+
+
+@router.delete("/drafts/{key}")
+async def delete_draft(key: str, user: ControlUser, session: Session) -> dict[str, Any]:
+    from backend.services.draft_service import DraftService
+
+    label = await DraftService(session).delete(user.org_id, key)
+    await session.commit()
+    return {"deleted": True, "label": label}

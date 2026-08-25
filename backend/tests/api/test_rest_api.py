@@ -2493,3 +2493,163 @@ async def test_the_picker_names_a_same_named_row_on_the_other_side(
     # but the other side is named, with its balance
     assert row["other_kind"] == "supplier"
     assert decimal.Decimal(row["same_name_other_side"]) > ZERO
+
+
+# --------------------------------------------------------------------
+# drafts: a half-entered bill that nobody has committed to
+# --------------------------------------------------------------------
+
+
+async def test_a_draft_survives_autosave_and_becomes_a_record_by_the_front_door(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Autosave writes one row however often it fires, a draft holds
+    what a real record could not, and it becomes a record only by going
+    through the ordinary create endpoint -- which validates it exactly
+    as it validates anything typed fresh."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    key = uuid.uuid4().hex
+
+    # a draft may name a supplier who does not exist and a code that
+    # resolves to nothing: refusing that would defeat the point
+    half = {
+        "key": key,
+        "kind": "purchase",
+        "payload": {
+            "party": "Nobody In Particular",
+            "invoice": "SCRATCH-1",
+            "lines": [{"code": "NOT-A-REAL-CODE", "qty": "5", "rate": "10"}],
+        },
+    }
+    first = await client.put("/api/v1/control/drafts", headers=headers, json=half)
+    assert first.status_code == 200, first.text
+
+    # autosave fires on every keystroke; it must not leave a trail
+    for _ in range(4):
+        again = await client.put("/api/v1/control/drafts", headers=headers, json=half)
+        assert again.status_code == 200, again.text
+    listed = await client.get("/api/v1/control/drafts", headers=headers)
+    assert listed.status_code == 200, listed.text
+    mine = [d for d in listed.json()["items"] if d["key"] == key]
+    assert len(mine) == 1, listed.text
+    assert mine[0]["lines"] == 1
+    assert mine[0]["label"].startswith("Nobody In Particular")
+    assert mine[0]["author"] == owner.full_name
+
+    # nothing of it reached the books
+    bills = await client.get("/api/v1/control/purchases/recent", headers=headers)
+    assert "SCRATCH-1" not in bills.text
+
+    # the payload comes back exactly as the form left it
+    read = await client.get(f"/api/v1/control/drafts/{key}", headers=headers)
+    assert read.status_code == 200, read.text
+    assert read.json()["payload"]["invoice"] == "SCRATCH-1"
+
+    # made real through the front door, with the real code this time
+    invoice = f"DR-{uuid.uuid4().hex[:5]}"
+    created = await client.post(
+        "/api/v1/control/purchases",
+        headers=headers,
+        json={
+            "supplier": f"Supp {stocked_code}",
+            "invoice_no": invoice,
+            "invoice_date": "2026-08-20",
+            "lines": [{"code": stocked_code, "qty": "100", "rate": "120"}],
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    gone = await client.delete(f"/api/v1/control/drafts/{key}", headers=headers)
+    assert gone.status_code == 200, gone.text
+    missing = await client.get(f"/api/v1/control/drafts/{key}", headers=headers)
+    assert missing.status_code == 404, missing.text
+    after = await client.get("/api/v1/control/drafts", headers=headers)
+    assert not [d for d in after.json()["items"] if d["key"] == key]
+
+
+async def test_a_draft_says_whether_it_is_ready_to_record(
+    client: AsyncClient,
+    owner: User,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The list offers a one-click record only where one would work.
+    Advisory: the create endpoint still validates for itself."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+
+    async def save(payload: dict[str, Any]) -> dict[str, Any]:
+        key = uuid.uuid4().hex
+        response = await client.put(
+            "/api/v1/control/drafts",
+            headers=headers,
+            json={"key": key, "kind": "sale", "payload": payload},
+        )
+        assert response.status_code == 200, response.text
+        return dict(response.json())
+
+    # no party yet
+    assert (await save({"lines": [{"code": "X", "qty": "1", "rate": "5"}]}))["ready"] is False
+    # no lines yet
+    assert (await save({"party": "Someone", "lines": []}))["ready"] is False
+    # a line with no quantity is not an entry, it is a row that exists
+    assert (await save({"party": "S", "lines": [{"code": "X", "qty": "0"}]}))["ready"] is False
+
+    whole = await save(
+        {
+            "party": "Someone",
+            "lines": [{"code": "X", "qty": "10", "rate": "20"}],
+            "freight": "100",
+            "charges": {"packing": "50"},
+            "discount": "25",
+        }
+    )
+    assert whole["ready"] is True
+    # 10*20 + 100 + 50 - 25
+    assert decimal.Decimal(whole["total"]) == decimal.Decimal("325")
+
+
+async def test_stale_drafts_are_actually_dropped(
+    client: AsyncClient,
+    owner: User,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The Drafts page tells people untouched drafts go after 30 days.
+    A page that says so while they pile up forever is worse than one
+    that says nothing."""
+    import datetime as dt
+
+    from sqlalchemy import update
+
+    from backend.models import Draft
+    from backend.services.draft_service import DraftService
+
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    old_key, fresh_key = uuid.uuid4().hex, uuid.uuid4().hex
+    for key in (old_key, fresh_key):
+        saved = await client.put(
+            "/api/v1/control/drafts",
+            headers=headers,
+            json={"key": key, "kind": "sale", "payload": {"party": "Someone"}},
+        )
+        assert saved.status_code == 200, saved.text
+
+    # age one of them past the cutoff
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            update(Draft)
+            .where(Draft.client_key == old_key)
+            .values(updated_at=dt.datetime.now(dt.UTC) - dt.timedelta(days=31))
+        )
+
+    async with session_factory() as session, session.begin():
+        dropped = await DraftService(session).purge_stale(ORG)
+    assert dropped == 1
+
+    left = await client.get("/api/v1/control/drafts", headers=headers)
+    keys = [d["key"] for d in left.json()["items"]]
+    assert fresh_key in keys and old_key not in keys

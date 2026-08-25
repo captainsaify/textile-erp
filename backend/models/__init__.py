@@ -21,6 +21,7 @@ from backend.models.catalog import (
     Warehouse,
 )
 from backend.models.core import Organization, Partner, User
+from backend.models.drafts import Draft
 from backend.models.inventory import Inventory, InventoryMovement
 from backend.models.ocr import OcrLearningDictionary, OcrTemplate
 from backend.models.parties import Customer, Supplier
@@ -46,6 +47,7 @@ __all__ = [
     "Brand",
     "CashLedger",
     "Customer",
+    "Draft",
     "Expense",
     "Income",
     "Inventory",

@@ -54,6 +54,11 @@ CELERYBEAT_SCHEDULE: dict[str, dict[str, Any]] = {
         "schedule": crontab(hour="2", minute="45"),
         "options": {"queue": "scheduled"},
     },
+    "stale-draft-sweep": {
+        "task": "stale_draft_sweep",
+        "schedule": crontab(hour="3", minute="15"),
+        "options": {"queue": "scheduled"},
+    },
     "session-expiry-sweep": {
         "task": "session_expiry_sweep",
         "schedule": crontab(minute="*/5"),
