@@ -474,34 +474,42 @@ class BillEditService:
         header: PurchaseHeader,
         wanted: dict[str, decimal.Decimal],
     ) -> list[str]:
-        """Charges are given as a total per label, not as a delta.
+        return await _charges_to(
+            self._session, actor, header.invoice_no, header.other_charges, wanted
+        )
 
-        The form shows what the bill carries; the person edits the figure
-        to what it should be. The difference is what gets added or taken
-        off, which is why the same GST typed twice can be corrected here
-        by typing the right number rather than by knowing which of the
-        two to remove.
-        """
-        notes: list[str] = []
-        charges = ChargeService(self._session)
-        current_total = header.other_charges
-        wanted_total = sum(wanted.values(), ZERO).quantize(TWO)
-        if wanted_total == current_total:
-            return notes
 
-        delta = (wanted_total - current_total).quantize(TWO)
-        label = next(iter(wanted), "CHARGES") if wanted else "CHARGES"
-        if delta > ZERO:
-            await charges.add_in_transaction(
-                actor, reference=header.invoice_no, label=label, amount=delta
-            )
-            notes.append(f"charges {current_total} → {wanted_total}")
-        else:
-            await charges.remove_in_transaction(
-                actor, reference=header.invoice_no, label=label, amount=-delta
-            )
-            notes.append(f"charges {current_total} → {wanted_total}")
-        return notes
+async def _charges_to(
+    session: AsyncSession,
+    actor: User,
+    reference: str,
+    current_total: decimal.Decimal,
+    wanted: dict[str, decimal.Decimal],
+) -> list[str]:
+    """Charges are given as a total per label, not as a delta.
+
+    The form shows what the bill carries; the person edits the figure
+    to what it should be. The difference is what gets added or taken
+    off, which is why the same GST typed twice can be corrected here
+    by typing the right number rather than by knowing which of the
+    two to remove.
+
+    The label on the difference is the last one on the form: a charge
+    being added is the row just typed at the bottom, and naming the
+    adjustment after the old total's label would call labour "GST".
+    """
+    wanted_total = sum(wanted.values(), ZERO).quantize(TWO)
+    if wanted_total == current_total:
+        return []
+
+    charges = ChargeService(session)
+    delta = (wanted_total - current_total).quantize(TWO)
+    label = next(reversed(wanted), "CHARGES") if wanted else "CHARGES"
+    if delta > ZERO:
+        await charges.add_in_transaction(actor, reference=reference, label=label, amount=delta)
+    else:
+        await charges.remove_in_transaction(actor, reference=reference, label=label, amount=-delta)
+    return [f"charges {current_total} → {wanted_total}"]
 
 
 class SaleEditService:
@@ -569,6 +577,37 @@ class SaleEditService:
             ],
         }
 
+    async def _redate(self, header: Any, on: datetime.date) -> str:
+        """Move the sale, and its own journal entries with it.
+
+        Profit by period is read from the journal, not from the sale, so
+        a sale moved to September whose entries stayed in October would
+        show in September's sales and October's profit. Entries that
+        record something done *to* the sale later -- a return, an undo --
+        keep their own dates: those happened when they happened. Cash
+        and bank rows are not touched either; they say when money moved.
+        """
+        from sqlalchemy import or_, update
+
+        from backend.models import Journal, SalesLine
+
+        line_ids = select(SalesLine.id).where(SalesLine.sales_header_id == header.id)
+        await self._session.execute(
+            update(Journal)
+            .where(
+                Journal.org_id == header.org_id,
+                or_(
+                    (Journal.source_id == header.id)
+                    & Journal.source_type.in_(("sales_header", "sales_header_charge")),
+                    (Journal.source_id.in_(line_ids)) & (Journal.source_type == "sales_line"),
+                ),
+            )
+            .values(entry_date=on)
+        )
+        note = f"date {header.sale_date} → {on}"
+        header.sale_date = on
+        return note
+
     async def apply(
         self,
         org_id: uuid.UUID,
@@ -578,7 +617,7 @@ class SaleEditService:
         edited: EditedBill,
         dry_run: bool = False,
     ) -> dict[str, Any]:
-        from backend.models import SalesLine
+        from backend.models import Customer, SalesLine
 
         fixer = SaleFixService(self._session)
         header = await fixer._sale(org_id, reference)
@@ -604,13 +643,23 @@ class SaleEditService:
         changes: list[str] = []
         removed: list[dict[str, Any]] = []
 
+        current_customer = await self._session.get(Customer, header.customer_id)
         async with guarded(self._session, org_id, dry_run=dry_run) as report:
-            if edited.supplier is not None and edited.supplier.strip():
+            # Only when it is a different customer. The form always sends
+            # the name, and "moving" a sale to the party it already
+            # belongs to put a customer change in its history every save.
+            wanted_customer = (edited.supplier or "").strip()
+            if wanted_customer and (
+                current_customer is None or current_customer.name.lower() != wanted_customer.lower()
+            ):
                 changes.extend(
                     await fixer.fix_in_transaction(
-                        org_id, actor, reference=reference, customer=edited.supplier.strip()
+                        org_id, actor, reference=reference, customer=wanted_customer
                     )
                 )
+
+            if edited.invoice_date is not None and edited.invoice_date != header.sale_date:
+                changes.append(await self._redate(header, edited.invoice_date))
 
             for row in sorted(
                 (r for r in edited.lines if not r.removed), key=lambda r: r.line_no or 0
@@ -660,6 +709,15 @@ class SaleEditService:
                 changes.extend(
                     await fixer.fix_in_transaction(
                         org_id, actor, reference=reference, line_no=row.line_no, remove=True
+                    )
+                )
+
+            # Last, as on a bill: the total they are typed against is
+            # the one the line edits above leave behind.
+            if edited.charges is not None:
+                changes.extend(
+                    await _charges_to(
+                        self._session, actor, reference, header.other_charges, edited.charges
                     )
                 )
 

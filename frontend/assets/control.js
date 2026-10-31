@@ -52,7 +52,22 @@
       $("signin").hidden = false;
       throw new Error("Session expired — sign in again.");
     }
-    const body = response.status === 204 ? null : await response.json();
+    // A crash upstream answers with a plain-text "Internal Server Error"
+    // page, not the JSON envelope. Parsing it anyway put `Unexpected
+    // token 'I'...` under the Save button, which says nothing to the
+    // person pressing it.
+    const text = response.status === 204 ? "" : await response.text();
+    let body = null;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      if (response.ok) throw new Error("The server sent back something unreadable — try again.");
+      throw new Error(
+        response.status >= 500
+          ? `The server hit a problem and nothing was saved (${response.status}). Try again in a minute.`
+          : `Request failed (${response.status})`,
+      );
+    }
     if (!response.ok) {
       // The API's error envelope is {"error": {"code", "message"}} --
       // docs/10_API.md §5. Reading `detail` finds nothing on every real
@@ -833,7 +848,12 @@
 
     $("party").value = sale.customer;
     $("entry-date").value = sale.sale_date;
-    charges = [];
+    // What the sale carries, so the total on the form is the total in
+    // Records. Starting empty showed a lower figure, and a charge typed
+    // on top was measured against nothing.
+    charges = Number(sale.other_charges) > 0
+      ? [{ label: "CHARGES", amount: sale.other_charges }]
+      : [];
     $("freight").value = Number(sale.freight) ? sale.freight : "";
     $("discount").value = Number(sale.discount) ? sale.discount : "";
     rows = sale.lines.map((line) => ({
@@ -928,9 +948,18 @@
           rate: row.rate || "0",
           removed: Boolean(row.removed),
         })),
-      charges: charges.length
-        ? Object.fromEntries(charges.map((c) => [c.label || "CHARGES", c.amount || "0"]))
-        : null,
+      // Always the full list, empty included: the form opens with what
+      // the bill carries, so an empty list means every charge was
+      // taken off, not "leave them alone".
+      // Labels are keys, so a second "gst" would overwrite the first
+      // and its amount would vanish from the total; number repeats.
+      charges: charges.reduce((out, c) => {
+        const base = c.label || "CHARGES";
+        let key = base;
+        for (let n = 2; key in out; n += 1) key = `${base} ${n}`;
+        out[key] = c.amount || "0";
+        return out;
+      }, {}),
     };
   }
 
@@ -1348,7 +1377,7 @@
     // this is looking at the form, and a confirmation on a page they
     // are not on is not a confirmation.
     if (editingBill) {
-      return banner("This bill is already in the books — use Save correction.");
+      return banner("This bill is already in the books — press Review changes, then Save these changes.");
     }
     if (!worthSaving()) return banner("Nothing to keep yet — type a party or a line first.");
     if (draftTimer) clearTimeout(draftTimer);

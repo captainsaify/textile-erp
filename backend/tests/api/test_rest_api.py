@@ -2093,6 +2093,98 @@ async def test_editing_a_paid_sale_leaves_the_money_and_reports_the_gap(
     assert row.payment_status == "paid"
 
 
+async def test_a_sale_edit_saves_the_charges_and_date_it_was_given(
+    client: AsyncClient,
+    owner: User,
+    stocked_code: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """What happened on 2026-10-31: labour typed under the GST and a
+    date changed on a credit sale, and the save kept neither -- while
+    reporting the customer as changed to the customer it already had.
+    Records then disagreed with the form, and the form with itself."""
+    await _set_control_password(session_factory, owner, "a-long-generated-secret")
+    headers = await _control(client, owner)
+    await _confirmed_bill(client, headers, stocked_code, f"SB-{uuid.uuid4().hex[:5]}")
+    customer = f"Cust {stocked_code}"
+    made = await client.post(
+        "/api/v1/control/parties", headers=headers, json={"kind": "customer", "name": customer}
+    )
+    assert made.status_code in (200, 201), made.text
+    sale = await client.post(
+        "/api/v1/control/sales",
+        headers=headers,
+        json={
+            "customer": customer,
+            "lines": [{"code": stocked_code, "qty": "100", "rate": "200"}],
+            "payment_type": "credit",
+        },
+    )
+    assert sale.status_code == 201, sale.text
+    reference = sale.json()["sale_id"][:8]
+    line = [{"line_no": 1, "code": stocked_code, "qty": "100", "rate": "200"}]
+    back_then = datetime.date.today() - datetime.timedelta(days=40)
+
+    gst = await client.post(
+        f"/api/v1/control/sales/{reference}/edit",
+        headers=headers,
+        json={"supplier": customer, "lines": line, "charges": {"GST": "1000"}},
+    )
+    assert gst.status_code == 200, gst.text
+    assert gst.json()["changes"] == ["charges 0.00 → 1000.00"], "same customer is not a change"
+
+    # the form reopens carrying the GST, and labour goes under it
+    detail = (await client.get(f"/api/v1/control/sales/{reference}", headers=headers)).json()
+    assert decimal.Decimal(detail["other_charges"]) == decimal.Decimal("1000.00")
+    labour = await client.post(
+        f"/api/v1/control/sales/{reference}/edit",
+        headers=headers,
+        json={
+            "supplier": customer,
+            "invoice_date": back_then.isoformat(),
+            "lines": line,
+            "charges": {"CHARGES": "1000", "labour": "500"},
+        },
+    )
+    assert labour.status_code == 200, labour.text
+    assert decimal.Decimal(labour.json()["grand_total"]) == decimal.Decimal("21500.00")
+
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                sa.text(
+                    "SELECT id, sale_date, other_charges, grand_total FROM sales_headers "
+                    "WHERE cast(id as text) LIKE :r"
+                ),
+                {"r": f"{reference}%"},
+            )
+        ).one()
+        dates = set(
+            (
+                await session.execute(
+                    sa.text(
+                        "SELECT entry_date FROM journal WHERE source_id = :id "
+                        "AND source_type IN ('sales_header', 'sales_header_charge')"
+                    ),
+                    {"id": row.id},
+                )
+            ).scalars()
+        )
+    assert row.sale_date == back_then
+    assert row.other_charges == decimal.Decimal("1500.00")
+    assert row.grand_total == decimal.Decimal("21500.00")
+    assert dates == {back_then}, "profit reads the journal, so its entries move with the sale"
+
+    # and a charge can come back off a sale, down to none
+    cleared = await client.post(
+        f"/api/v1/control/sales/{reference}/edit",
+        headers=headers,
+        json={"supplier": customer, "lines": line, "charges": {}},
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert decimal.Decimal(cleared.json()["grand_total"]) == decimal.Decimal("20000.00")
+
+
 # --------------------------------------------------------------------
 # selling more than is on hand: refused with a reason, then allowed
 # --------------------------------------------------------------------

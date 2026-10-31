@@ -69,6 +69,7 @@ def test_every_process_wide_singleton_is_registered_for_release() -> None:
 
     import backend.core.db  # noqa: F401
     import backend.core.redis  # noqa: F401
+    import backend.services.group_relay  # noqa: F401
     import backend.services.whatsapp_bridge_client  # noqa: F401
     import backend.services.whatsapp_client  # noqa: F401
     from backend.core.lifecycle import registered
@@ -91,3 +92,59 @@ def test_every_process_wide_singleton_is_registered_for_release() -> None:
         "A Celery task runs in a fresh event loop; anything left bound to the previous "
         "one breaks the next task."
     )
+
+
+def test_a_task_abandoned_mid_session_is_unwound_before_the_loop_closes() -> None:
+    """A soft time limit raises from the signal handler while the loop
+    waits on I/O, not inside the coroutine, so the task is left
+    suspended inside `async with session`. Closing the loop over it
+    leaked the connection for the life of the worker; enough of them
+    and Postgres refused everyone, the API's pre-save backup included.
+
+    The interruption is simulated by leaving a task pending; what
+    matters is that its exits run before the loop goes."""
+    import asyncio
+
+    from backend.workers.app import _unwind_abandoned_tasks
+
+    closed: list[bool] = []
+
+    async def _held_open() -> None:
+        try:
+            async with get_session_factory()() as session:
+                await session.execute(sa.text("SELECT 1"))
+                await asyncio.Event().wait()
+        finally:
+            closed.append(True)
+
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        loop.create_task(_held_open())
+        loop.run_until_complete(asyncio.sleep(0.2))
+        assert not closed
+        _unwind_abandoned_tasks(loop)
+        assert closed == [True]
+        assert not asyncio.all_tasks(loop)
+    finally:
+        from backend.workers.app import _release_loop_bound_singletons
+
+        loop.run_until_complete(_release_loop_bound_singletons())
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+def test_worker_processes_do_not_pool_connections() -> None:
+    """The engine is thrown away after every task, so a pool there only
+    holds connections open that nothing will reuse."""
+    from sqlalchemy.pool import NullPool
+
+    import backend.core.db as db
+    from backend.workers.app import _unpooled_database
+
+    try:
+        _unpooled_database()
+        assert isinstance(db.create_engine().pool, NullPool)
+        assert _touch_database() == 1
+    finally:
+        db._pooled = True

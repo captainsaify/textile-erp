@@ -687,6 +687,80 @@ class ChargeService:
                 partly_sold=[],
             )
 
+    async def _off_sale(
+        self,
+        actor: User,
+        sale: object,
+        label: str,
+        amount: decimal.Decimal,
+        note: str | None,
+        whatsapp_message_id: str | None,
+    ) -> ChargeAdded:
+        """A charge taken back off a sale: less owed, less other income.
+
+        Money already received stays where it is. A sale cut below what
+        was paid leaves the customer overpaid, which the sale editor
+        reports -- the same rule as editing a line down."""
+        from backend.models import Customer
+
+        org_id = actor.org_id
+        if amount > sale.other_charges:  # type: ignore[attr-defined]
+            raise ValidationError(
+                f"This sale carries {sale.other_charges} in charges; "  # type: ignore[attr-defined]
+                f"{amount} cannot come off it."
+            )
+        customer = await self._session.get(Customer, sale.customer_id)  # type: ignore[attr-defined]
+        party = customer.name if customer is not None else ""
+        old_total = sale.grand_total  # type: ignore[attr-defined]
+        sale.other_charges = (sale.other_charges - amount).quantize(TWO)  # type: ignore[attr-defined]
+        sale.grand_total = (  # type: ignore[attr-defined]
+            sale.subtotal + sale.freight + sale.other_charges  # type: ignore[attr-defined]
+        ).quantize(TWO)
+        if note:
+            sale.notes = note  # type: ignore[attr-defined]
+        if sale.amount_paid >= sale.grand_total:  # type: ignore[attr-defined]
+            sale.payment_status = "paid"  # type: ignore[attr-defined]
+
+        await self._journal.post(
+            org_id,
+            entry_date=sale.sale_date,  # type: ignore[attr-defined]
+            description=f"{label} taken off sale for {party}",
+            source_type="sales_header_charge",
+            source_id=sale.id,  # type: ignore[attr-defined]
+            created_by=actor.id,
+            debits=[(AccountCode.OTHER_INCOME, amount)],
+            credits=[(AccountCode.ACCOUNTS_RECEIVABLE, amount)],
+        )
+        await self._audit.record(
+            org_id,
+            actor.id,
+            action="sale.charge_removed",
+            entity_type="sales_headers",
+            entity_id=sale.id,  # type: ignore[attr-defined]
+            whatsapp_message_id=whatsapp_message_id,
+            before_state={"grand_total": str(old_total)},
+            after_state={
+                "label": label,
+                "amount": str(amount),
+                "grand_total": str(sale.grand_total),  # type: ignore[attr-defined]
+                **({"note": note} if note else {}),
+            },
+        )
+        return ChargeAdded(
+            kind="sale",
+            reference=str(sale.id)[:8],  # type: ignore[attr-defined]
+            party=party,
+            label=label,
+            amount=-amount,
+            other_charges=sale.other_charges,  # type: ignore[attr-defined]
+            old_total=old_total,
+            new_total=sale.grand_total,  # type: ignore[attr-defined]
+            outstanding_after=(
+                sale.grand_total - sale.amount_paid  # type: ignore[attr-defined]
+            ).quantize(TWO),
+            partly_sold=[],
+        )
+
     async def remove(
         self,
         actor: User,
@@ -741,8 +815,11 @@ class ChargeService:
         if header is None:
             # Sales charges post to income rather than to landed cost and
             # have no stock to restate, so the inverse is a different
-            # shape. Not built until it is needed.
-            raise NotFoundError("bill", reference)
+            # shape: the posting of `_on_sale`, the other way round.
+            sale = await self._find_sale(actor.org_id, reference)
+            if sale is None:
+                raise NotFoundError("bill", reference)
+            return await self._off_sale(actor, sale, label, amount, note, whatsapp_message_id)
         if amount > header.other_charges:
             raise ValidationError(
                 f"{header.invoice_no} carries {header.other_charges} in charges; "

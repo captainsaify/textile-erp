@@ -58,6 +58,13 @@ def _start_tracing(**_: Any) -> None:
     configure_tracing("worker")
 
 
+@worker_process_init.connect
+def _unpooled_database(**_: Any) -> None:
+    from backend.core.db import use_unpooled_connections
+
+    use_unpooled_connections()
+
+
 @worker_process_shutdown.connect
 def _stop_tracing(**_: Any) -> None:
     shutdown_tracing()
@@ -84,9 +91,29 @@ def run_async[T](coro: Coroutine[Any, Any, T]) -> T:
         loop.run_until_complete(_release_loop_bound_singletons())
         return loop.run_until_complete(coro)
     finally:
+        _unwind_abandoned_tasks(loop)
         loop.run_until_complete(_release_loop_bound_singletons())
         asyncio.set_event_loop(None)
         loop.close()
+
+
+def _unwind_abandoned_tasks(loop: asyncio.AbstractEventLoop) -> None:
+    """Cancel whatever is still suspended, and let it run its exits.
+
+    A soft time limit is a signal: it raises wherever the process is,
+    which is usually the loop waiting on I/O, not inside the coroutine.
+    `run_until_complete` then returns with the task still suspended
+    mid-`async with session`, holding a connection. Closing the loop
+    over it leaves that connection open on the server for good -- one
+    per timed-out task, until Postgres refuses everyone. Cancelling it
+    lets the `async with` blocks close what they opened.
+    """
+    pending = asyncio.all_tasks(loop)
+    if not pending:
+        return
+    for task in pending:
+        task.cancel()
+    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
 
 
 async def _release_loop_bound_singletons() -> None:
@@ -100,6 +127,7 @@ async def _release_loop_bound_singletons() -> None:
     # when the module is loaded
     import backend.core.db  # noqa: F401
     import backend.core.redis  # noqa: F401
+    import backend.services.group_relay  # noqa: F401
     import backend.services.whatsapp_bridge_client  # noqa: F401
     import backend.services.whatsapp_client  # noqa: F401
     from backend.core.lifecycle import release_all

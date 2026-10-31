@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 
 from backend.core.config import get_settings
 from backend.core.lifecycle import on_release
@@ -23,12 +24,29 @@ from backend.core.lifecycle import on_release
 
 def create_engine(database_url: str | None = None) -> AsyncEngine:
     settings = get_settings()
+    if not _pooled:
+        return create_async_engine(database_url or settings.database_url, poolclass=NullPool)
     return create_async_engine(
         database_url or settings.database_url,
         pool_pre_ping=True,
         pool_size=10,
         max_overflow=5,
     )
+
+
+# A Celery worker throws its engine away after every task, so a pool
+# there saves nothing and costs a lot: a connection that is checked out
+# when the engine is disposed is not closed, only forgotten, and stays
+# open on the server for the life of the process. Two worker processes
+# piled up 96 of Postgres's 100 that way, and every save that takes a
+# backup first started failing with "too many clients". Unpooled, a
+# connection closes when its session does.
+_pooled = True
+
+
+def use_unpooled_connections() -> None:
+    global _pooled
+    _pooled = False
 
 
 # Engine/session factory are created lazily, not at import time: importing
